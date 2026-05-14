@@ -1,3 +1,11 @@
 .env
+venv/
 __pycache__/
 *.pyc
+CLAUDE.md
+/data/
+/logs/
+.pytest_cache/
+.vscode/
+.idea/
+.claude/
