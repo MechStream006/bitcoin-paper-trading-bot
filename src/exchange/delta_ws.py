@@ -5,12 +5,17 @@ Two entrypoints:
   - `DeltaWSListener` — long-running threaded client with reconnect, maintains
     in-memory state of latest tickers / funding rates (Layer 2c.2 onward).
 """
+from __future__ import annotations
+
 import json
 import threading
 import time
-from typing import Callable
+from typing import TYPE_CHECKING, Callable, Optional
 
 from websocket import WebSocketTimeoutException, create_connection
+
+if TYPE_CHECKING:
+    from src.state.market_state import MarketState
 
 
 def subscribe_payload(channels: list[dict]) -> str:
@@ -80,11 +85,18 @@ class DeltaWSListener:
     main-thread exit will tear it down even if .stop() isn't called.
     """
 
-    def __init__(self, url: str, channels: list[dict], reconnect_backoff_sec: float = 5.0):
+    def __init__(
+        self,
+        url: str,
+        channels: list[dict],
+        reconnect_backoff_sec: float = 5.0,
+        state: Optional[MarketState] = None,
+    ) -> None:
         self.url = url
         self.channels = channels
         self.reconnect_backoff_sec = reconnect_backoff_sec
-        self._tickers: dict[str, dict] = {}
+        self._state = state                  # optional shared MarketState (Layer 2d+)
+        self._tickers: dict[str, dict] = {}  # kept for backward compat (Layer 2c.2)
         self._funding: dict[str, dict] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -154,8 +166,15 @@ class DeltaWSListener:
         symbol = msg.get("symbol")
         if not symbol:
             return
+        # Write to internal dicts (backward-compat with 2c.2 snapshot_* methods).
         with self._lock:
             if msg_type == "v2/ticker":
                 self._tickers[symbol] = msg
             elif msg_type == "funding_rate":
                 self._funding[symbol] = msg
+        # Also propagate to shared MarketState when injected (Layer 2d+).
+        if self._state is not None:
+            if msg_type == "v2/ticker":
+                self._state.update_ticker(symbol, msg)
+            elif msg_type == "funding_rate":
+                self._state.update_funding(symbol, msg)
