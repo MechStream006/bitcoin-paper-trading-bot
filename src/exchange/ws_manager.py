@@ -162,18 +162,33 @@ class WSManager:
     def health(self) -> HealthStatus:
         """Return a point-in-time HealthStatus snapshot.
 
-        healthy=True  only when FSM is in STREAMING state.
+        healthy=True  when:
+          - STREAMING (normal operational state), OR
+          - CONNECTING / SUBSCRIBED (connection in progress — brief, self-resolving), OR
+          - DISCONNECTED with consecutive_failures < 3 (early backoff — self-healing;
+            allow WSManager's own exponential backoff to run before Supervisor interferes).
+        healthy=False when:
+          - DISCONNECTED with consecutive_failures >= 3 (stuck after repeated failures), OR
+          - STALE (data stopped flowing; reconnect needed).
         fatal=False   always — WSManager never self-declares fatal.
                       The Supervisor decides escalation policy.
+
+        The CONNECTING/SUBSCRIBED and early-DISCONNECTED grace prevents the Supervisor
+        from exhausting its restart budget by restarting the WS on every 10s poll while
+        the WS is already in the middle of its own backoff/reconnect sequence.
         """
         with self._lock:
             ws_state = self._ws_state
             last_msg = self._last_msg_at
             msg_count = self._msg_count
             reconnect_count = self._reconnect_count
+            consec_failures = self._consecutive_failures
 
         age_str = f"{time.time() - last_msg:.1f}s" if last_msg is not None else "never"
-        healthy = ws_state == WSState.STREAMING
+        healthy = (
+            ws_state in (WSState.STREAMING, WSState.CONNECTING, WSState.SUBSCRIBED)
+            or (ws_state == WSState.DISCONNECTED and consec_failures < 3)
+        )
         details = (
             f"state={ws_state.value} last_msg={age_str} "
             f"msgs={msg_count} reconnects={reconnect_count}"
@@ -409,20 +424,40 @@ if __name__ == "__main__":
     )
 
     print(f"Before start: {mgr.health()}")
-    assert not mgr.health().healthy, "must not be healthy before start()"
+    # DISCONNECTED + cf=0 is healthy per new policy: self-healing, no failures yet
+    assert mgr.health().healthy, "must be healthy before start() (DISCONNECTED, cf=0)"
 
     mgr.start()
-    time.sleep(3)   # let reconnect loop spin a few times
+    # Poll until we catch it in DISCONNECTED state with cf >= 3.
+    # Polling is necessary because the window between backoff-wait ending and the
+    # next CONNECTING is short — a fixed sleep races between those two states.
+    deadline = time.time() + 30
+    caught_state = None
+    caught_cf = 0
+    caught_rc = 0
+    while time.time() < deadline:
+        with mgr._lock:
+            ws_state = mgr._ws_state
+            cf = mgr._consecutive_failures
+            rc = mgr._reconnect_count
+        if ws_state == WSState.DISCONNECTED and cf >= 3:
+            h = mgr.health()
+            assert not h.healthy, (
+                f"health() must be False when DISCONNECTED with cf={cf}"
+            )
+            caught_state, caught_cf, caught_rc = ws_state, cf, rc
+            break
+        time.sleep(0.1)
 
+    assert caught_state is not None, (
+        f"never reached DISCONNECTED+cf>=3 within 30s "
+        f"(last: state={ws_state.value}, cf={cf}, rc={rc})"
+    )
     h = mgr.health()
-    print(f"After 3s:     {h}")
-    assert not h.healthy, "must not be healthy against refused endpoint"
+    print(f"After failures: {h}")
     assert h.fatal is False, "WSManager must never self-declare fatal"
-
-    with mgr._lock:
-        rc = mgr._reconnect_count
-    assert rc >= 1, f"expected at least 1 reconnect attempt, got {rc}"
-    print(f"Reconnect count: {rc}")
+    assert caught_rc >= 3, f"expected at least 3 reconnect attempts, got {caught_rc}"
+    print(f"Reconnect count: {caught_rc}, consecutive_failures: {caught_cf}")
 
     mgr.stop(timeout=5)
     if mgr._thread is not None:
