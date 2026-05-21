@@ -29,6 +29,14 @@ def subscribe_payload(channels: list[dict]) -> str:
     })
 
 
+def unsubscribe_payload(channels: list[dict]) -> str:
+    """Build a Delta WS unsubscribe message (mirrors subscribe_payload)."""
+    return json.dumps({
+        "type": "unsubscribe",
+        "payload": {"channels": channels},
+    })
+
+
 def stream(
     url: str,
     channels: list[dict],

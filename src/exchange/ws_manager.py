@@ -28,7 +28,7 @@ from typing import Optional
 
 from websocket import WebSocketTimeoutException, create_connection
 
-from src.exchange.delta_ws import subscribe_payload
+from src.exchange.delta_ws import subscribe_payload, unsubscribe_payload
 from src.runtime.health import HealthStatus
 from src.state.market_state import MarketState
 
@@ -78,10 +78,13 @@ class WSManager:
     Lock discipline
     ---------------
     `_lock` guards: _ws_state, _msg_count, _last_msg_at, _reconnect_count,
-                    _consecutive_failures.
+                    _consecutive_failures, _subscribed_symbols, _live_ws.
     MarketState._lock is owned by MarketState and is NEVER held while _lock
     is held — preventing any lock-inversion deadlock.
     No I/O, no sleep, no external calls happen while _lock is held.
+    In particular, ws.send() in resubscribe() is always called AFTER _lock
+    is released — the live_ws reference is captured under the lock, then used
+    outside it.
 
     Args:
         url:                 Delta WS endpoint (testnet or live).
@@ -121,6 +124,19 @@ class WSManager:
         self._reconnect_count: int = 0         # total, monotonically increasing
         self._consecutive_failures: int = 0    # resets on first STREAMING message
 
+        # --- Subscription state — authoritative source of truth for reconnect ---
+        # Initialised from the constructor channels; updated by resubscribe().
+        # Every reconnect reads this set to build the subscribe payload, so
+        # correctness is guaranteed regardless of live-mutation outcomes.
+        self._subscribed_symbols: set[str] = {
+            s for ch in channels for s in ch.get("symbols", [])
+        }
+
+        # --- Live WS reference — set in _run_once, cleared in finally ---
+        # resubscribe() captures this under _lock and sends outside the lock.
+        # None when DISCONNECTED / between reconnects.
+        self._live_ws: Optional[object] = None
+
         # --- Thread management ---
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -156,6 +172,15 @@ class WSManager:
             self._thread = None
 
     # -----------------------------------------------------------------------
+    # Subscription state accessor  (safe from any thread)
+    # -----------------------------------------------------------------------
+
+    def subscribed_symbols(self) -> set[str]:
+        """Return a copy of the current authoritative subscription symbol set."""
+        with self._lock:
+            return set(self._subscribed_symbols)
+
+    # -----------------------------------------------------------------------
     # Health reporting  (safe to call from any thread, any time)
     # -----------------------------------------------------------------------
 
@@ -183,6 +208,7 @@ class WSManager:
             msg_count = self._msg_count
             reconnect_count = self._reconnect_count
             consec_failures = self._consecutive_failures
+            sub_count = len(self._subscribed_symbols)
 
         age_str = f"{time.time() - last_msg:.1f}s" if last_msg is not None else "never"
         healthy = (
@@ -191,7 +217,7 @@ class WSManager:
         )
         details = (
             f"state={ws_state.value} last_msg={age_str} "
-            f"msgs={msg_count} reconnects={reconnect_count}"
+            f"msgs={msg_count} reconnects={reconnect_count} subscribed={sub_count}"
         )
         return HealthStatus(
             name=self.COMPONENT_NAME,
@@ -200,6 +226,116 @@ class WSManager:
             details=details,
             last_check_at=datetime.now(timezone.utc),
         )
+
+    # -----------------------------------------------------------------------
+    # Live subscription mutation  (safe to call from any thread)
+    # -----------------------------------------------------------------------
+
+    def resubscribe(self, prev_symbols: list[str], new_symbols: list[str]) -> None:
+        """Diff-based live subscription mutation.
+
+        Called by ChainRefresher's on_change callback when the option universe
+        changes.  Computes the diff against the current authoritative
+        _subscribed_symbols (not the caller's prev_symbols, which may be stale).
+        This makes repeated calls with the same new_symbols idempotent.
+
+        State updates happen under _lock.  WS sends happen outside _lock —
+        the live_ws reference is captured under the lock, then used after release.
+
+        Reconnect semantics
+        -------------------
+        _subscribed_symbols is always committed before any live send attempt.
+        Every reconnect calls _current_channels() which reads _subscribed_symbols,
+        so the correct symbol set is restored regardless of whether the live
+        send succeeded, failed, or was skipped (wrong state / no socket).
+
+        Called while DISCONNECTED:  state updated; reconnect picks it up.
+        Called while CONNECTING:    state updated; subscribe payload for this
+                                    connection was already sent with old symbols;
+                                    next reconnect uses the new set.
+        Called while SUBSCRIBED:    state updated; live send skipped (not yet
+                                    STREAMING); next reconnect corrects.
+        Called while STREAMING:     state updated; live sub/unsub sent best-effort.
+        Send failure (any reason):  logged as WARNING; reconnect self-heals.
+
+        Args:
+            prev_symbols: symbol list before the universe change (logged only).
+            new_symbols:  desired new symbol set.
+        """
+        new_set = set(new_symbols)
+
+        # Single lock acquisition: diff against authoritative state, commit,
+        # snapshot ws_state and live_ws for post-lock use.
+        has_diff: bool
+        added: set[str]
+        removed: set[str]
+        ws_state: WSState
+        live_ws: object
+
+        with self._lock:
+            old_set = set(self._subscribed_symbols)
+            added = new_set - old_set
+            removed = old_set - new_set
+            has_diff = bool(added or removed)
+            if has_diff:
+                self._subscribed_symbols = new_set
+                ws_state = self._ws_state
+                live_ws = self._live_ws  # type: ignore[assignment]
+
+        if not has_diff:
+            logger.debug(
+                "[ws] resubscribe: no diff — no-op (subscribed=%d)", len(old_set)
+            )
+            return
+
+        # All logging and I/O outside the lock.
+        logger.info(
+            "[ws] resubscribe: +%d -%d symbols (subscribed %d -> %d)",
+            len(added), len(removed), len(old_set), len(new_set),
+        )
+        if added:
+            logger.info("[ws] resubscribe adding:   %s", sorted(added))
+        if removed:
+            logger.info("[ws] resubscribe removing: %s", sorted(removed))
+
+        if ws_state is not WSState.STREAMING or live_ws is None:
+            logger.info(
+                "[ws] resubscribe: state=%s — subscription updated, "
+                "changes deferred to next reconnect",
+                ws_state.value,
+            )
+            return
+
+        # Live mutation — best-effort, no lock held, separate sends for add/remove.
+        if added:
+            try:
+                live_ws.send(  # type: ignore[union-attr]
+                    subscribe_payload([{"name": "v2/ticker", "symbols": sorted(added)}])
+                )
+                logger.info(
+                    "[ws] resubscribe: live subscribe sent (%d symbols)", len(added)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[ws] resubscribe: live subscribe failed (%s: %s) "
+                    "— reconnect will resubscribe correctly",
+                    type(exc).__name__, exc,
+                )
+
+        if removed:
+            try:
+                live_ws.send(  # type: ignore[union-attr]
+                    unsubscribe_payload([{"name": "v2/ticker", "symbols": sorted(removed)}])
+                )
+                logger.info(
+                    "[ws] resubscribe: live unsubscribe sent (%d symbols)", len(removed)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[ws] resubscribe: live unsubscribe failed (%s: %s) "
+                    "— reconnect will restore correct state",
+                    type(exc).__name__, exc,
+                )
 
     # -----------------------------------------------------------------------
     # FSM helpers  (called from WS thread only, except health())
@@ -228,6 +364,17 @@ class WSManager:
         raw = min(self._base_backoff * (2 ** consecutive_failures), self._max_backoff)
         jitter = raw * 0.2 * (2 * random.random() - 1)
         return max(1.0, raw + jitter)
+
+    def _current_channels(self) -> list[dict]:
+        """Build channel payload from the authoritative subscription set.
+
+        Called at the start of each _run_once() cycle so every reconnect
+        subscribes exactly the current _subscribed_symbols, regardless of
+        any mutations that occurred during a prior connection.
+        """
+        with self._lock:
+            syms = sorted(self._subscribed_symbols)
+        return [{"name": "v2/ticker", "symbols": syms}]
 
     # -----------------------------------------------------------------------
     # Thread entry point — outer reconnect loop
@@ -297,12 +444,22 @@ class WSManager:
         Raises on any socket or protocol error; caller (_run) handles reconnect.
 
         Guarantee: websocket is always closed in finally, regardless of how
-        this method exits.  No state is leaked.
+        this method exits.  _live_ws is always cleared in finally, so
+        resubscribe() never holds a reference to a dead socket after reconnect.
         """
         ws = create_connection(self.url, timeout=10)
         ws.settimeout(self._recv_timeout)
+
+        # Register live reference before subscribe so resubscribe() can send
+        # mutations as soon as we enter STREAMING.  Cleared unconditionally in
+        # finally — before ws.close() — so callers that captured live_ws under
+        # lock will hit a closed socket (exception caught in resubscribe).
+        with self._lock:
+            self._live_ws = ws
+
         try:
-            ws.send(subscribe_payload(self.channels))
+            channels = self._current_channels()
+            ws.send(subscribe_payload(channels))
             self._set_state(WSState.SUBSCRIBED, reason="subscribe payload sent")
 
             while not self._stop.is_set():
@@ -343,7 +500,12 @@ class WSManager:
                 self._dispatch(msg)
 
         finally:
-            # Socket must always be closed, even if an exception is in flight.
+            # Clear _live_ws first so resubscribe() stops seeing this socket,
+            # then close it.  Any concurrent resubscribe() that already captured
+            # the reference will hit a send() error on the closed socket —
+            # caught and logged as a WARNING there.
+            with self._lock:
+                self._live_ws = None
             try:
                 ws.close()
             except Exception:
