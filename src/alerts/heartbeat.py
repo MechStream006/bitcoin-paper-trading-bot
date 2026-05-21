@@ -54,6 +54,7 @@ from src.state.market_state import MarketState
 
 if TYPE_CHECKING:
     from src.exchange.ws_manager import WSManager
+    from src.expiry.expiry_context import ExpiryContext
     from src.ingestion.chain_refresher import ChainRefresher
     from src.persistence.snapshot_writer import SnapshotWriter
 
@@ -99,6 +100,7 @@ class HeartbeatService:
         rate_limiter: RateLimiter,
         started_at: float,
         heartbeat_category: str = "heartbeat",
+        expiry_context: Optional["ExpiryContext"] = None,
     ) -> None:
         self._sender = sender
         self._ws_manager = ws_manager
@@ -108,6 +110,7 @@ class HeartbeatService:
         self._rate_limiter = rate_limiter
         self._started_at = started_at
         self._heartbeat_category = heartbeat_category
+        self._expiry_context = expiry_context
 
         self._lock = threading.Lock()
         self._total_sent: int = 0
@@ -229,6 +232,9 @@ class HeartbeatService:
             self._format_universe_line(),
         ]
 
+        for line in self._format_expiry_block():
+            lines.append(line)
+
         degraded = self._collect_degraded()
         if degraded:
             lines.append("")
@@ -293,10 +299,57 @@ class HeartbeatService:
         except Exception:
             return "universe     : [error reading snapshot]"
 
+    def _format_expiry_block(self) -> List[str]:
+        """Return 0, 1, or 2 lines for the expiry posture section."""
+        if self._expiry_context is None:
+            return []
+        try:
+            snap = self._expiry_context.current_snapshot()
+            if snap is None:
+                return ["expiry       : not yet observed"]
+
+            posture = snap.posture.value
+
+            if snap.nearest_settlement is not None and snap.seconds_to_nearest is not None:
+                secs = max(0.0, snap.seconds_to_nearest)
+                h = int(secs // 3600)
+                m = int((secs % 3600) // 60)
+                cls_str = snap.nearest_expiry_class.value if snap.nearest_expiry_class else "?"
+                nearest = (
+                    f"{cls_str}@{snap.nearest_settlement.strftime('%H:%MZ')}"
+                    f" ({h:02d}h{m:02d}m)"
+                )
+            else:
+                nearest = "none"
+
+            cycle_pct = f"cycle={snap.cycle_fraction:.0%}"
+
+            class_map = {cls.value: cnt for cls, cnt in snap.n_by_class}
+            d = class_map.get("DAILY", 0)
+            w = class_map.get("WEEKLY", 0)
+            m_cnt = class_map.get("MONTHLY", 0)
+            conf = sum(
+                1 for r in snap.records
+                if r.classification_mode.value == "CONFIRMED"
+            )
+            divs = len(snap.divergence_events)
+
+            return [
+                f"expiry       : {posture} | {nearest} | {cycle_pct}",
+                f"  classes    : D:{d} W:{w} M:{m_cnt} | CONF:{conf} | div:{divs}",
+            ]
+        except Exception:
+            return ["expiry       : [error reading context]"]
+
     def _collect_degraded(self) -> List[str]:
         """Return one-line summaries for all unhealthy tracked components."""
         result: List[str] = []
-        for comp in (self._ws_manager, self._snapshot_writer, self._chain_refresher):
+        components: list = [
+            self._ws_manager, self._snapshot_writer, self._chain_refresher,
+        ]
+        if self._expiry_context is not None:
+            components.append(self._expiry_context)
+        for comp in components:
             try:
                 h = comp.health()
                 if not h.healthy:
