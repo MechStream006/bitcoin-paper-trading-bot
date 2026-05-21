@@ -140,6 +140,10 @@ class ChainRefresher:
         self._snapshot: Optional[RefreshSnapshot] = None
         self._consecutive_failures: int = 0
 
+        # Prevents concurrent refresh() calls (e.g. settlement-triggered + scheduled).
+        # Non-blocking trylock: if already in progress, skip-if-busy returns last snapshot.
+        self._refresh_lock = threading.Lock()
+
         self._started: bool = False
 
     # -----------------------------------------------------------------------
@@ -214,13 +218,22 @@ class ChainRefresher:
         return list(snap.symbols) if snap is not None else []
 
     # -----------------------------------------------------------------------
-    # Refresh  (called by SchedulerService; must not be called concurrently)
+    # Refresh  (called by SchedulerService and settlement trigger)
     # -----------------------------------------------------------------------
 
-    def refresh(self) -> RefreshSnapshot:
+    def refresh(self, *, triggered_by: str = "scheduler") -> Optional[RefreshSnapshot]:
         """Fetch the chain, upsert instruments, recompute universe.
 
-        Phases
+        Thread-safe: guarded by _refresh_lock (skip-if-busy).  If a refresh is
+        already in progress (e.g. scheduled and settlement-triggered calls
+        overlap), the second call logs a skip and returns the last-known-good
+        snapshot.  No double REST call is made.
+
+        Args:
+            triggered_by: Label for log context ("scheduler" or "settlement").
+                          Helps distinguish refresh sources in post-incident review.
+
+        Phases (when not skipped)
         ------
         1. Capture previous snapshot reference under _lock (released immediately).
         2. REST: refresh_chain() — network call, no lock held.
@@ -241,6 +254,20 @@ class ChainRefresher:
         ComponentFailure  after failure_threshold consecutive full-cycle failures.
         Exception         the raw exception on failures below the threshold.
         """
+        if not self._refresh_lock.acquire(blocking=False):
+            logger.info(
+                "[chain_refresher] refresh already in progress — "
+                "skipping (triggered_by=%s)", triggered_by,
+            )
+            with self._lock:
+                return self._snapshot
+        try:
+            return self._do_refresh(triggered_by=triggered_by)
+        finally:
+            self._refresh_lock.release()
+
+    def _do_refresh(self, triggered_by: str = "scheduler") -> RefreshSnapshot:
+        """Execute the full refresh cycle.  Caller must hold _refresh_lock."""
         t0 = time.monotonic()
 
         # Phase 1: snapshot prev reference while lock is briefly held.
@@ -285,8 +312,9 @@ class ChainRefresher:
                 self._consecutive_failures = 0
 
             logger.info(
-                "[chain_refresher] ok: mark=%.0f universe=%d chain=%d in %.2fs",
-                mark, len(symbols), n_chain, duration,
+                "[chain_refresher] ok: mark=%.0f universe=%d chain=%d "
+                "in %.2fs (triggered_by=%s)",
+                mark, len(symbols), n_chain, duration, triggered_by,
             )
 
             # Phase 7: emit on_change OUTSIDE lock.

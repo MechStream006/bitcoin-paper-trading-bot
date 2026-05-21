@@ -75,6 +75,9 @@ from src.alerts.telegram import send_message
 from src.data.storage import get_connection, init_schema
 from src.exchange.delta_client import DeltaClient
 from src.exchange.ws_manager import WSManager
+from src.expiry.expiry_context import ExpiryContext
+from src.expiry.models import ExpiryConfig
+from src.reports.eod import ExpiryAnalyticsWriter
 from src.ingestion.chain_refresher import ChainRefresher
 from src.persistence.snapshot_writer import SnapshotWriter
 from src.runtime.health import HealthStatus
@@ -148,6 +151,7 @@ class Runtime:
         n_expiries: int = 3,
         snapshot_interval_sec: int = 60,
         chain_refresh_interval_sec: int = 3600,
+        expiry_observe_interval_sec: int = 300,
         heartbeat_interval_sec: int = 1800,
         warmup_coverage_pct: float = 0.8,
         warmup_timeout_sec: float = 120.0,
@@ -165,9 +169,10 @@ class Runtime:
         self._telegram_channel_id   = telegram_channel_id
         self._n_strikes             = n_strikes
         self._n_expiries            = n_expiries
-        self._snapshot_interval     = snapshot_interval_sec
+        self._snapshot_interval      = snapshot_interval_sec
         self._chain_refresh_interval = chain_refresh_interval_sec
-        self._heartbeat_interval    = heartbeat_interval_sec
+        self._expiry_observe_interval = expiry_observe_interval_sec
+        self._heartbeat_interval     = heartbeat_interval_sec
         self._warmup_coverage_pct   = warmup_coverage_pct
         self._warmup_timeout_sec    = warmup_timeout_sec
         self._sup_poll              = supervisor_poll_interval_sec
@@ -186,6 +191,8 @@ class Runtime:
         self._market_state:     Optional[MarketState]         = None
         self._ws_manager:       Optional[WSManager]           = None
         self._chain_refresher:  Optional[ChainRefresher]      = None
+        self._expiry_context:   Optional[ExpiryContext]       = None
+        self._analytics_writer: Optional[ExpiryAnalyticsWriter] = None
         self._snapshot_writer:  Optional[SnapshotWriter]      = None
         self._scheduler:        Optional[SchedulerService]    = None
         self._rate_limiter:     Optional[RateLimiter]         = None
@@ -282,6 +289,20 @@ class Runtime:
             len(universe), snap.mark_price, snap.n_chain,
         )
 
+        # 3b. ExpiryContext — observe-and-tag, no threads, no runtime control
+        expiry_log_path = self._db_path.parent / "logs" / "expiry_telemetry.jsonl"
+        analytics_writer = ExpiryAnalyticsWriter(expiry_log_path)
+        self._analytics_writer = analytics_writer
+
+        expiry_context = ExpiryContext(
+            chain_refresher=refresher,
+            config=ExpiryConfig(),
+            analytics_writer=analytics_writer,
+            on_settlement_trigger=self._on_settlement_trigger,
+        )
+        expiry_context.observe()   # initial classification while chain is fresh
+        self._expiry_context = expiry_context
+
         # 4. MarketState
         market_state = MarketState(universe=universe)
         self._market_state = market_state
@@ -313,6 +334,7 @@ class Runtime:
             chain_refresher=refresher,
             rate_limiter=rate_limiter,
             started_at=self._started_at,
+            expiry_context=expiry_context,
         )
         self._rate_limiter = rate_limiter
         self._heartbeat = heartbeat
@@ -332,6 +354,12 @@ class Runtime:
             seconds=self._chain_refresh_interval,
         )
         scheduler.register(
+            "expiry_observe",
+            expiry_context.observe,
+            trigger="interval",
+            seconds=self._expiry_observe_interval,
+        )
+        scheduler.register(
             "heartbeat",
             heartbeat.send_heartbeat,
             trigger="interval",
@@ -343,6 +371,13 @@ class Runtime:
             trigger="cron",
             hour=0,
             minute=0,
+        )
+        scheduler.register(
+            "expiry_cycle_eod",
+            expiry_context.emit_cycle_summary,
+            trigger="cron",
+            hour=12,
+            minute=5,
         )
         self._scheduler = scheduler
 
@@ -356,6 +391,7 @@ class Runtime:
         supervisor.register("ws_manager",      ws_manager,      restartable=True)
         supervisor.register("chain_refresher", refresher,       restartable=True)
         supervisor.register("snapshot_writer", snapshot_writer, restartable=True)
+        supervisor.register("expiry_context",  expiry_context,  restartable=False)
         supervisor.register("scheduler",       scheduler,       restartable=False)
         supervisor.register("heartbeat",       heartbeat,       restartable=False)
         self._supervisor = supervisor
@@ -364,7 +400,7 @@ class Runtime:
         self._install_signal_handlers()
 
         logger.info(
-            "[runtime] bootstrap complete: 5 components wired, universe=%d",
+            "[runtime] bootstrap complete: 6 components wired, universe=%d",
             len(universe),
         )
 
@@ -390,6 +426,7 @@ class Runtime:
         # Start data-ingestion components before warmup
         self._start_component("ws_manager",      self._ws_manager)
         self._start_component("chain_refresher", self._chain_refresher)
+        self._start_component("expiry_context",  self._expiry_context)
         self._start_component("snapshot_writer", self._snapshot_writer)
         self._start_component("heartbeat",       self._heartbeat)
 
@@ -575,24 +612,54 @@ class Runtime:
             self._conn = None
 
     # -----------------------------------------------------------------------
+    # Settlement trigger callback
+    # -----------------------------------------------------------------------
+
+    def _on_settlement_trigger(self) -> None:
+        """Called by ExpiryContext.emit_cycle_summary() when settlement crossings
+        were detected this cycle.
+
+        Triggers an immediate chain refresh so settled symbols are retired and
+        rollover symbols added through the existing _on_universe_change path.
+        ExpiryContext never names symbols to retire — ChainRefresher is the
+        authoritative universe source.  All reconciliation flows through the
+        established resubscribe() + reconcile_universe() machinery.
+        """
+        logger.info("[runtime] settlement trigger received — immediate chain refresh")
+        if self._chain_refresher is not None:
+            try:
+                self._chain_refresher.refresh(triggered_by="settlement")
+            except Exception as exc:
+                logger.error(
+                    "[runtime] settlement-triggered refresh failed: %s: %s",
+                    type(exc).__name__, exc,
+                )
+
+    # -----------------------------------------------------------------------
     # Universe change callback
     # -----------------------------------------------------------------------
 
     def _on_universe_change(
         self, prev_symbols: List[str], new_symbols: List[str]
     ) -> None:
-        """Logged when ChainRefresher detects a universe change.
+        """Called by ChainRefresher when the option universe changes.
 
-        WSManager does not dynamically resubscribe in Layer 2d; the new
-        universe takes effect on the next reconnect cycle.
+        Call order: resubscribe() first, reconcile_universe() second.
+        This minimises spurious 'not in universe' warnings: new symbols are
+        subscribed before MarketState accepts ticks; removed symbols stop
+        receiving ticks (eventually) before MarketState stops accepting them.
         """
         added   = len(set(new_symbols) - set(prev_symbols))
         removed = len(set(prev_symbols) - set(new_symbols))
         logger.info(
-            "[runtime] universe changed: +%d -%d symbols "
-            "(new universe active on next WS reconnect)",
+            "[runtime] universe changed: +%d -%d symbols — "
+            "triggering WS resubscribe + MS reconcile",
             added, removed,
         )
+        if self._ws_manager is not None:
+            self._ws_manager.resubscribe(prev_symbols, new_symbols)
+        if self._market_state is not None:
+            self._market_state.reconcile_universe(prev_symbols, new_symbols)
 
     # -----------------------------------------------------------------------
     # Sender adapter
