@@ -9,3 +9,7 @@ CLAUDE.md
 .vscode/
 .idea/
 .claude/
+
+# Research data lake — raw + derived are regenerable; calendar is tracked
+research/data/raw/
+research/data/derived/

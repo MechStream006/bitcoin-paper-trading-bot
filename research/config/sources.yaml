@@ -1,0 +1,49 @@
+# Phase A.1 free-tier data sources.
+# NO SECRETS — every endpoint below is public. A.1 needs no API keys.
+# This file is the single source of truth for what gets ingested; its
+# `version` is recorded in every provenance manifest (WI-6).
+version: 1
+
+date_range:
+  start: "2021-06-01"   # ~5 years back from project clock
+  end: "auto"           # resolved to yesterday (UTC) at run time
+
+datasets:
+  spot:
+    venue: binance
+    market: spot
+    symbol: BTCUSDT
+    interval: 1m
+    # Bulk monthly klines archive (preferred, no rate limits):
+    bulk_base_url: "https://data.binance.vision/data/spot/monthly/klines"
+    # CCXT fallback for months missing from the bulk archive:
+    ccxt_id: binance
+    ccxt_symbol: "BTC/USDT"
+
+  perp:
+    venue: binance
+    market: futures-um           # USDT-margined perpetual
+    symbol: BTCUSDT
+    interval: 1m
+    bulk_base_url: "https://data.binance.vision/data/futures/um/monthly/klines"
+    ccxt_id: binanceusdm
+    ccxt_symbol: "BTC/USDT:USDT"
+
+  funding:
+    venue: binance
+    market: futures-um
+    symbol: BTCUSDT
+    ccxt_id: binanceusdm
+    ccxt_symbol: "BTC/USDT:USDT"
+    cadence_hours: 8             # funding settles 00/08/16 UTC
+
+calendar:
+  path: data/calendar/macro_events.csv
+  event_types: [FOMC, CPI, HALVING]
+
+storage:
+  raw_dir: data/raw
+  derived_dir: data/derived
+  # Partition template used by storage/lake.py (WI-2):
+  partition: "{dataset}/{symbol}/year={year}/month={month:02d}"
+  compression: zstd

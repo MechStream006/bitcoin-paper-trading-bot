@@ -1,0 +1,8 @@
+# Phase A research dependencies — SEPARATE from the runtime requirements.txt.
+# Install into the existing `btc_bot` conda env. Nothing here touches the live bot.
+ccxt>=4.0
+duckdb>=0.10
+pyarrow>=15.0
+pandas>=2.0
+requests>=2.31
+pyyaml>=6.0
