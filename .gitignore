@@ -20,3 +20,8 @@ corpus_build*.log
 corpus_build*.err*
 perp_build*.log
 perp_build*.err*
+h4_build*.log
+h4_build*.err*
+
+# Hypothesis reports (charts + JSON) are regenerable
+research/reports/h4_basis_regimes/
