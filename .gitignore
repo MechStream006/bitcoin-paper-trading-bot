@@ -13,3 +13,7 @@ CLAUDE.md
 # Research data lake — raw + derived are regenerable; calendar is tracked
 research/data/raw/
 research/data/derived/
+
+# Build/run logs at repo root
+corpus_build*.log
+corpus_build*.err*

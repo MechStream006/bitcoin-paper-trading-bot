@@ -1,0 +1,95 @@
+{
+  "generated_at": "2026-06-09T16:50:12.955659+00:00",
+  "corpus_end_month": "2026-05",
+  "datasets": {
+    "spot": {
+      "partition_count": 65,
+      "first_partition": "2021-01",
+      "last_partition": "2026-05",
+      "total_rows": 2845807,
+      "first_timestamp": "2021-01-01 00:00:00 UTC",
+      "last_timestamp": "2026-05-31 23:59:00 UTC",
+      "wi6_manifests": 65,
+      "legacy_manifests": 0,
+      "disk_bytes": 103298927,
+      "disk_mb": 98.5
+    },
+    "funding": {
+      "partition_count": 77,
+      "first_partition": "2020-01",
+      "last_partition": "2026-05",
+      "total_rows": 7029,
+      "first_timestamp": "2020-01-01 00:00:00 UTC",
+      "last_timestamp": "2026-05-31 16:00:00 UTC",
+      "wi6_manifests": 77,
+      "legacy_manifests": 0,
+      "disk_bytes": 263498,
+      "disk_mb": 0.3
+    }
+  },
+  "quality": {
+    "total_partitions_checked": 142,
+    "total_passed": 142,
+    "total_failed": 0,
+    "total_critical": 0,
+    "total_warning": 34,
+    "by_dataset": {
+      "spot": {
+        "passed": 65,
+        "failed": 0,
+        "critical": 0,
+        "warning": 13,
+        "warnings": [
+          "2021-02: gap_detection: 1 gap(s) found; ~79 missing record(s); largest gap 4800s (expected 60s interval)",
+          "2021-03: gap_detection: 1 gap(s) found; ~90 missing record(s); largest gap 5460s (expected 60s interval)",
+          "2021-04: gap_detection: 2 gap(s) found; ~434 missing record(s); largest gap 17100s (expected 60s interva",
+          "2021-04: coverage_validation: Coverage 99.00% (42766/43200 expected rows for 2021-04 spot).",
+          "2021-07: outlier_annotation: 90 outlier(s) in 'close' outside 3\u00d7IQR [25026.4, 41942.9]; examples: ['42111.4',",
+          "2021-08: gap_detection: 1 gap(s) found; ~270 missing record(s); largest gap 16260s (expected 60s interva",
+          "2021-09: gap_detection: 1 gap(s) found; ~120 missing record(s); largest gap 7260s (expected 60s interval",
+          "2022-12: outlier_annotation: 92 outlier(s) in 'close' outside 3\u00d7IQR [15756.5, 18117]; examples: ['18121.2', '",
+          "2023-03: gap_detection: 1 gap(s) found; ~80 missing record(s); largest gap 4860s (expected 60s interval)",
+          "2024-08: outlier_annotation: 318 outlier(s) in 'close' outside 3\u00d7IQR [52309.8, 67780.3]; examples: ['52064', ",
+          "2025-02: outlier_annotation: 5300 outlier(s) in 'close' outside 3\u00d7IQR [89893.3, 103421]; examples: ['89670', ",
+          "2026-01: outlier_annotation: 185 outlier(s) in 'close' outside 3\u00d7IQR [78127.4, 103715]; examples: ['77755', '",
+          "2026-02: outlier_annotation: 133 outlier(s) in 'close' outside 3\u00d7IQR [57853, 79009]; examples: ['79018', '790"
+        ]
+      },
+      "funding": {
+        "passed": 77,
+        "failed": 0,
+        "critical": 0,
+        "warning": 21,
+        "warnings": [
+          "2020-01: outlier_annotation: 4 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.000308, 0.000644]; examples: ['",
+          "2020-02: outlier_annotation: 1 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00095106, 0.00185807]; examples",
+          "2020-03: outlier_annotation: 1 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.0009518, 0.00088885]; examples:",
+          "2020-04: outlier_annotation: 1 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00057822, 0.000608665]; example",
+          "2020-05: outlier_annotation: 17 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-2.764e-05, 0.00019573]; examples",
+          "2020-06: outlier_annotation: 18 outlier(s) in 'funding_rate' outside 3\u00d7IQR [5.339e-05, 0.000134958]; examples",
+          "2020-08: outlier_annotation: 3 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00054572, 0.00096096]; examples",
+          "2020-09: outlier_annotation: 6 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00017312, 0.00030484]; examples",
+          "2020-10: outlier_annotation: 4 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.000151, 0.00028825]; examples: ",
+          "2020-11: outlier_annotation: 2 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.000479292, 0.00087239]; example",
+          "2021-05: outlier_annotation: 1 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00087374, 0.00139832]; examples",
+          "2021-06: outlier_annotation: 1 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00035665, 0.000442487]; example",
+          "2022-05: outlier_annotation: 1 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.0002036, 0.0003277]; examples: ",
+          "2022-11: outlier_annotation: 3 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00024606, 0.00027887]; examples",
+          "2023-01: outlier_annotation: 4 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-1.36e-05, 0.0001852]; examples: [",
+          "2023-02: outlier_annotation: 1 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-3.934e-05, 0.000204505]; examples",
+          "2024-02: outlier_annotation: 10 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-2.105e-06, 0.00023614]; examples",
+          "2024-04: outlier_annotation: 4 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00012979, 0.000272343]; example",
+          "2024-11: outlier_annotation: 5 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-7.619e-05, 0.00033492]; examples:",
+          "2024-12: outlier_annotation: 21 outlier(s) in 'funding_rate' outside 3\u00d7IQR [6.655e-05, 0.0001446]; examples: ",
+          "2025-05: outlier_annotation: 1 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00011702, 0.00022164]; examples"
+        ]
+      }
+    }
+  },
+  "storage": {
+    "total_rows": 2852836,
+    "total_disk_bytes": 103562425,
+    "total_disk_mb": 98.8,
+    "total_disk_gb": 0.096
+  }
+}

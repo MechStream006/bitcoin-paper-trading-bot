@@ -134,9 +134,16 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     """
     Enforce dtypes, sort by open_time, and drop duplicate timestamps.
     open_time is stored as int64 milliseconds UTC (Binance native format).
+    NOTE: Binance Vision CSV files from 2025 onward use microsecond timestamps
+    (16-digit values) instead of milliseconds (13-digit). Detect by threshold
+    and divide by 1000 to normalize to milliseconds.
     """
     df = df[_COL_KEEP].copy()
     df["open_time"] = df["open_time"].astype("int64")
+    # Microsecond timestamps are > 1e15; millisecond timestamps for any date
+    # in our range (2017-2030) are < 2e12. Divide microseconds by 1000.
+    if len(df) > 0 and df["open_time"].max() > 1_500_000_000_000_000:
+        df["open_time"] = df["open_time"] // 1_000
     for col in ("open", "high", "low", "close", "volume"):
         df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
     df.sort_values("open_time", inplace=True)
