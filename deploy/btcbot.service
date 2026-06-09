@@ -1,0 +1,40 @@
+[Unit]
+Description=BTC Paper Trading Bot
+Documentation=file:/opt/btcbot/docs/runbook.md
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+
+# Activate venv by calling its Python directly
+ExecStart=/opt/btcbot/venv/bin/python -m src.main
+
+# Prevent Python from writing .pyc files — ProtectSystem=strict makes the
+# source tree read-only and .pyc write failures would otherwise generate noise.
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Restart unconditionally; 10s cooldown prevents restart storms
+Restart=always
+RestartSec=10
+
+# Give the bot 30s to drain (main.py handles SIGTERM → drain() → clean exit)
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot
+
+# Non-root hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# data/ must be writable (DB, logs, backups)
+ReadWritePaths=/opt/btcbot/data
+
+[Install]
+WantedBy=multi-user.target

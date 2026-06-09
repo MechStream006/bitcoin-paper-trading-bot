@@ -1,0 +1,15 @@
+[Unit]
+Description=BTC Bot daily SQLite backup — 02:00 UTC
+Documentation=file:/opt/btcbot/docs/runbook.md
+Requires=btcbot-backup.service
+
+[Timer]
+# 02:00 UTC — well clear of the 11:58–12:06 UTC settlement window
+OnCalendar=*-*-* 02:00:00 UTC
+# Up to 5 min random spread to avoid simultaneous disk I/O with other jobs
+RandomizedDelaySec=300
+# Run immediately on next start if the last scheduled run was missed
+Persistent=true
+
+[Install]
+WantedBy=timers.target

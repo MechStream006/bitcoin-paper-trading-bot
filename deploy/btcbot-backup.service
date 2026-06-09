@@ -1,0 +1,13 @@
+[Unit]
+Description=BTC Bot SQLite Backup (one-shot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+ExecStart=/opt/btcbot/venv/bin/python scripts/backup.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-backup

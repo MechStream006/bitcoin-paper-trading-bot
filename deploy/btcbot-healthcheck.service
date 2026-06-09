@@ -1,0 +1,14 @@
+[Unit]
+Description=BTC Bot Health Check (one-shot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+# --alert-on-warning sends Telegram on WARNING too (not just CRITICAL)
+ExecStart=/opt/btcbot/venv/bin/python scripts/healthcheck.py --alert-on-warning
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-healthcheck
