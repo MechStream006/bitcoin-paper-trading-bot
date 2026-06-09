@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-09T16:50:12.955659+00:00",
+  "generated_at": "2026-06-09T17:19:20.238164+00:00",
   "corpus_end_month": "2026-05",
   "datasets": {
     "spot": {
@@ -25,14 +25,26 @@
       "legacy_manifests": 0,
       "disk_bytes": 263498,
       "disk_mb": 0.3
+    },
+    "perp": {
+      "partition_count": 65,
+      "first_partition": "2021-01",
+      "last_partition": "2026-05",
+      "total_rows": 2846880,
+      "first_timestamp": "2021-01-01 00:00:00 UTC",
+      "last_timestamp": "2026-05-31 23:59:00 UTC",
+      "wi6_manifests": 65,
+      "legacy_manifests": 0,
+      "disk_bytes": 84662271,
+      "disk_mb": 80.7
     }
   },
   "quality": {
-    "total_partitions_checked": 142,
-    "total_passed": 142,
+    "total_partitions_checked": 207,
+    "total_passed": 207,
     "total_failed": 0,
     "total_critical": 0,
-    "total_warning": 34,
+    "total_warning": 40,
     "by_dataset": {
       "spot": {
         "passed": 65,
@@ -83,13 +95,27 @@
           "2024-12: outlier_annotation: 21 outlier(s) in 'funding_rate' outside 3\u00d7IQR [6.655e-05, 0.0001446]; examples: ",
           "2025-05: outlier_annotation: 1 outlier(s) in 'funding_rate' outside 3\u00d7IQR [-0.00011702, 0.00022164]; examples"
         ]
+      },
+      "perp": {
+        "passed": 65,
+        "failed": 0,
+        "critical": 0,
+        "warning": 6,
+        "warnings": [
+          "2021-07: outlier_annotation: 131 outlier(s) in 'close' outside 3\u00d7IQR [25015.8, 41919.9]; examples: ['41922.6'",
+          "2022-12: outlier_annotation: 84 outlier(s) in 'close' outside 3\u00d7IQR [15746, 18112.7]; examples: ['18116.5', '",
+          "2024-08: outlier_annotation: 317 outlier(s) in 'close' outside 3\u00d7IQR [52281.6, 67747.9]; examples: ['52052.1'",
+          "2025-02: outlier_annotation: 5301 outlier(s) in 'close' outside 3\u00d7IQR [89851, 103376]; examples: ['89598.1', ",
+          "2026-01: outlier_annotation: 188 outlier(s) in 'close' outside 3\u00d7IQR [78097, 103666]; examples: ['77708.4', '",
+          "2026-02: outlier_annotation: 186 outlier(s) in 'close' outside 3\u00d7IQR [57847.5, 78945.2]; examples: ['78990.6'"
+        ]
       }
     }
   },
   "storage": {
-    "total_rows": 2852836,
-    "total_disk_bytes": 103562425,
-    "total_disk_mb": 98.8,
-    "total_disk_gb": 0.096
+    "total_rows": 5699716,
+    "total_disk_bytes": 188224696,
+    "total_disk_mb": 179.5,
+    "total_disk_gb": 0.175
   }
 }

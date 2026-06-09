@@ -14,6 +14,9 @@ CLAUDE.md
 research/data/raw/
 research/data/derived/
 
-# Build/run logs at repo root
+# Build/run launchers and logs at repo root
+run_*.bat
 corpus_build*.log
 corpus_build*.err*
+perp_build*.log
+perp_build*.err*

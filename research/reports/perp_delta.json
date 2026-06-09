@@ -1,0 +1,146 @@
+{
+  "generated_at": "2026-06-09T17:19:20.195856+00:00",
+  "corpus_end_month": "2026-05",
+  "dataset": "perp",
+  "symbol": "BTCUSDT",
+  "partitions_added": 65,
+  "first_partition": "2021-01",
+  "last_partition": "2026-05",
+  "rows_added": 2846880,
+  "first_timestamp": "2021-01-01 00:00:00 UTC",
+  "last_timestamp": "2026-05-31 23:59:00 UTC",
+  "wi6_manifests": 65,
+  "disk_bytes": 84662271,
+  "disk_mb": 80.7,
+  "gauntlet": {
+    "partitions_checked": 65,
+    "passed": 65,
+    "failed": 0,
+    "total_critical": 0,
+    "total_warning": 6
+  },
+  "basis_verification": {
+    "status": "PASS",
+    "sample_window": "2024-01 to 2024-03",
+    "resolutions": {
+      "1m": {
+        "status": "PASS",
+        "rows": 131040,
+        "mean_basis_abs": 25.1496,
+        "mean_basis_pct": 0.03835,
+        "std_basis_abs": 32.7831,
+        "min_basis_abs": -451.19,
+        "max_basis_abs": 476.93
+      },
+      "1H": {
+        "status": "PASS",
+        "rows": 2184,
+        "mean_basis_abs": 25.1496,
+        "mean_basis_pct": 0.03835,
+        "std_basis_abs": 32.2117,
+        "min_basis_abs": -26.66,
+        "max_basis_abs": 179.13
+      },
+      "4H": {
+        "status": "PASS",
+        "rows": 546,
+        "mean_basis_abs": 25.1496,
+        "mean_basis_pct": 0.03835,
+        "std_basis_abs": 31.7868,
+        "min_basis_abs": -21.92,
+        "max_basis_abs": 120.58
+      },
+      "1D": {
+        "status": "PASS",
+        "rows": 91,
+        "mean_basis_abs": 25.1496,
+        "mean_basis_pct": 0.03835,
+        "std_basis_abs": 31.2219,
+        "min_basis_abs": -19.78,
+        "max_basis_abs": 85.31
+      }
+    }
+  },
+  "readiness": {
+    "funding_studies": {
+      "status": "READY",
+      "requirements_met": [
+        "spot_ohlcv",
+        "funding_rates",
+        "perp_ohlcv",
+        "continuous_basis"
+      ],
+      "missing": [],
+      "can_test": [
+        "H1: funding regime vs return distribution (Kruskal-Wallis)",
+        "H6: spot-funding correlation (Spearman + Newey-West OLS)",
+        "basis carry regime (perp-spot continuous basis)",
+        "funding rate persistence / autocorrelation"
+      ]
+    },
+    "basis_studies": {
+      "status": "READY",
+      "requirements_met": [
+        "spot_ohlcv",
+        "perp_ohlcv"
+      ],
+      "missing": [],
+      "can_test": [
+        "perp-spot basis level and sign distribution",
+        "basis as funding rate predictor (leads by ~8h)",
+        "basis regime classification",
+        "basis mean-reversion speed",
+        "basis divergence as signal (basis > threshold -> funding will spike)"
+      ],
+      "supported_resolutions": [
+        "1m",
+        "1H",
+        "4H",
+        "1D"
+      ]
+    },
+    "event_studies": {
+      "status": "READY",
+      "requirements_met": [
+        "spot_ohlcv",
+        "macro_calendar_101_events"
+      ],
+      "missing": [],
+      "can_test": [
+        "H2: FOMC/CPI pre/post drift (Binomial + Mann-Whitney)",
+        "H3: autocorrelation structure around events (Ljung-Box + AR1)",
+        "event-day return distribution vs. non-event",
+        "FOMC vs. CPI differential response",
+        "BTC halving event window (single event, indicative only)"
+      ],
+      "note": "Perp OHLCV also enables event-study on perp basis and funding rate behavior around macro events."
+    },
+    "volatility_studies": {
+      "status": "PARTIAL",
+      "requirements_met": [
+        "spot_ohlcv_realized_vol_derivable",
+        "perp_ohlcv_basis_vol_derivable"
+      ],
+      "missing": [
+        "implied_vol_surface (Deribit ATM IV history)",
+        "dvol_index (Deribit DVOL / BitVol BVIV)",
+        "put_call_skew (25-delta risk reversal history)",
+        "options_oi_by_strike"
+      ],
+      "can_test": [
+        "H3: realized vol autocorrelation (Ljung-Box + AR1)",
+        "vol regime classification (low / mid / high realized vol)",
+        "GARCH vol forecast vs. realized",
+        "vol clustering and regime persistence",
+        "basis vol and funding vol joint dynamics"
+      ],
+      "cannot_test": [
+        "H4: IV crush around daily expiry (requires implied vol)",
+        "variance risk premium (IV minus realized)",
+        "skew as tail-event predictor",
+        "term structure inversion signal"
+      ],
+      "recommendation": "Source Deribit daily ATM IV snapshots (free public API) and DVOL index to complete volatility study capability. Priority: H4 (IV crush) is blocked until this is added."
+    }
+  }
+}
