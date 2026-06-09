@@ -279,17 +279,19 @@ def _load_all_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     print(f"  funding_raw : {n_fund} partitions")
 
     # ---- Hourly basis (avg of per-minute differences) -------------------
+    # Use // (DuckDB integer-division) — plain / on BIGINT returns DOUBLE,
+    # which makes every minute a unique GROUP BY bucket.
     con.execute(f"""
     CREATE OR REPLACE VIEW basis_1h AS
     SELECT
-        CAST((CAST(s.open_time AS BIGINT) / 3600000) * 3600000 AS BIGINT) AS hour_ts,
-        AVG(CAST(p.close AS DOUBLE) - CAST(s.close AS DOUBLE))            AS basis_abs,
-        AVG((CAST(p.close AS DOUBLE)/CAST(s.close AS DOUBLE) - 1.0)*10000.0) AS basis_bps,
-        AVG(CAST(s.close AS DOUBLE))                                       AS spot_price,
-        COUNT(*)                                                            AS n_min
+        (s.open_time // 3600000) * 3600000 AS hour_ts,
+        AVG(p.close - s.close)              AS basis_abs,
+        AVG((p.close / s.close - 1.0) * 10000.0) AS basis_bps,
+        AVG(s.close)                        AS spot_price,
+        COUNT(*)                            AS n_min
     FROM spot_1m s
-    JOIN perp_1m p ON CAST(s.open_time AS BIGINT) = CAST(p.open_time AS BIGINT)
-    GROUP BY CAST(s.open_time AS BIGINT) / 3600000
+    JOIN perp_1m p ON s.open_time = p.open_time
+    GROUP BY s.open_time // 3600000
     HAVING COUNT(*) >= {MIN_MINS_1H}
     """)
 
@@ -320,13 +322,13 @@ def _load_all_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # ---- Daily mean basis -----------------------------------------------
     df_daily = query(con, """
     SELECT
-        CAST((hour_ts / 86400000) * 86400000 AS BIGINT) AS day_ts,
+        (hour_ts // 86400000) * 86400000 AS day_ts,
         AVG(basis_bps)   AS daily_mean_basis_bps,
         AVG(basis_abs)   AS daily_mean_basis_abs,
         AVG(spot_price)  AS daily_mean_spot,
         COUNT(*)         AS n_hours
     FROM basis_1h
-    GROUP BY hour_ts / 86400000
+    GROUP BY hour_ts // 86400000
     HAVING COUNT(*) >= 12
     ORDER BY day_ts
     """)
@@ -336,11 +338,11 @@ def _load_all_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     SELECT day_ts, last_close AS daily_close
     FROM (
         SELECT
-            CAST((CAST(open_time AS BIGINT)/86400000)*86400000 AS BIGINT) AS day_ts,
-            CAST(close AS DOUBLE) AS last_close,
+            (open_time // 86400000) * 86400000 AS day_ts,
+            close AS last_close,
             ROW_NUMBER() OVER (
-                PARTITION BY CAST(open_time AS BIGINT)/86400000
-                ORDER BY CAST(open_time AS BIGINT) DESC
+                PARTITION BY open_time // 86400000
+                ORDER BY open_time DESC
             ) AS rn
         FROM spot_1m
     )
