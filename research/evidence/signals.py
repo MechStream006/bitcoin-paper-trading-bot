@@ -523,9 +523,176 @@ GROUP3 = [
     ),
 ]
 
+# =============================================================================
+# Group 4 — Candlestick Evidence (textbook definitions, no tuning)
+# =============================================================================
+# Patterns fire on the completion day and are held 5 days. Candlestick signals
+# are event-sparse; several will fall below the 15-trade trust floor and be
+# capped at Weak by design. Failures here are recorded as valid negative
+# evidence, not optimized.
+
+def _candle_parts(m: pd.DataFrame):
+    o, h, l, c = m["open"], m["high"], m["low"], m["close"]
+    body  = c - o
+    abody = body.abs()
+    upper = h - np.maximum(o, c)
+    lower = np.minimum(o, c) - l
+    return o, h, l, c, body, abody, upper, lower
+
+
+def sig_engulfing(m: pd.DataFrame, body_atr: float = 0.0) -> pd.Series:
+    """Bullish/Bearish engulfing: current body engulfs prior opposite-color body."""
+    o, h, l, c, body, abody, upper, lower = _candle_parts(m)
+    atr = _atr(m, 14)
+    big = abody >= body_atr * atr
+    prev_bear = c.shift(1) < o.shift(1)
+    prev_bull = c.shift(1) > o.shift(1)
+    up = (c > o) & prev_bear & (c >= o.shift(1)) & (o <= c.shift(1)) & big
+    dn = (c < o) & prev_bull & (o >= c.shift(1)) & (c <= o.shift(1)) & big
+    pos = pd.Series(0.0, index=m.index)
+    pos[up] =  1.0
+    pos[dn] = -1.0
+    return pos
+
+
+def sig_pin_bar(m: pd.DataFrame, wick_ratio: float = 2.0) -> pd.Series:
+    """Pin bars: long lower wick (bullish hammer) / long upper wick (bearish star)."""
+    o, h, l, c, body, abody, upper, lower = _candle_parts(m)
+    bull = (lower >= wick_ratio * abody) & (lower >= wick_ratio * upper) & (abody > 0)
+    bear = (upper >= wick_ratio * abody) & (upper >= wick_ratio * lower) & (abody > 0)
+    pos = pd.Series(0.0, index=m.index)
+    pos[bull] =  1.0
+    pos[bear] = -1.0
+    return pos
+
+
+def sig_inside_bar(m: pd.DataFrame, sma_n: int = 50) -> pd.Series:
+    """Inside bar (consolidation): take the prevailing SMA-trend direction."""
+    o, h, l, c, *_ = _candle_parts(m)
+    inside = (h < h.shift(1)) & (l > l.shift(1))
+    sma = c.rolling(sma_n, min_periods=sma_n).mean()
+    pos = pd.Series(0.0, index=m.index)
+    pos[inside & (c > sma)] =  1.0
+    pos[inside & (c < sma)] = -1.0
+    pos[sma.isna()] = 0.0
+    return pos
+
+
+def sig_outside_bar(m: pd.DataFrame, body_atr: float = 0.0) -> pd.Series:
+    """Outside bar (range expansion): direction = candle color."""
+    o, h, l, c, body, abody, upper, lower = _candle_parts(m)
+    atr = _atr(m, 14)
+    big = abody >= body_atr * atr
+    outside = (h > h.shift(1)) & (l < l.shift(1))
+    pos = pd.Series(0.0, index=m.index)
+    pos[outside & (c > o) & big] =  1.0
+    pos[outside & (c < o) & big] = -1.0
+    return pos
+
+
+def sig_morning_star(m: pd.DataFrame, large: float = 0.5, star: float = 0.5) -> pd.Series:
+    """Morning star: large bear, small star, large bull recovering past day-1 midpoint."""
+    o, h, l, c, *_ = _candle_parts(m)
+    atr = _atr(m, 14)
+    o1, c1 = o.shift(2), c.shift(2)
+    o2, c2 = o.shift(1), c.shift(1)
+    day1 = (c1 < o1) & ((o1 - c1) >= large * atr)
+    star_sm = (c2 - o2).abs() <= star * atr
+    day3 = (c > o) & (c > (o1 + c1) / 2.0)
+    ms = day1 & star_sm & day3
+    pos = pd.Series(0.0, index=m.index)
+    pos[ms] = 1.0
+    return pos
+
+
+def sig_evening_star(m: pd.DataFrame, large: float = 0.5, star: float = 0.5) -> pd.Series:
+    """Evening star: large bull, small star, large bear breaking below day-1 midpoint."""
+    o, h, l, c, *_ = _candle_parts(m)
+    atr = _atr(m, 14)
+    o1, c1 = o.shift(2), c.shift(2)
+    o2, c2 = o.shift(1), c.shift(1)
+    day1 = (c1 > o1) & ((c1 - o1) >= large * atr)
+    star_sm = (c2 - o2).abs() <= star * atr
+    day3 = (c < o) & (c < (o1 + c1) / 2.0)
+    es = day1 & star_sm & day3
+    pos = pd.Series(0.0, index=m.index)
+    pos[es] = -1.0
+    return pos
+
+
+GROUP4 = [
+    SignalSpec(
+        name="Engulfing", group="G4 Candlestick",
+        rationale="An engulfing candle marks a decisive one-day shift in control; "
+                  "classically read as a short-term reversal signal.",
+        data_source="spot 1m -> daily OHLC",
+        feature_def="current body engulfs prior opposite-color body; long bullish, "
+                    "short bearish; 5-day hold.",
+        fn=sig_engulfing, params={"body_atr": 0.0},
+        variants=[{"body_atr": 0.5}, {"body_atr": 1.0}],
+        hold_days=5,
+    ),
+    SignalSpec(
+        name="Pin Bar", group="G4 Candlestick",
+        rationale="A long rejection wick signals failed continuation; hammers mark "
+                  "demand at lows, shooting stars mark supply at highs.",
+        data_source="spot 1m -> daily OHLC",
+        feature_def="wick >= ratio*body and >= ratio*opposite wick; long hammer, "
+                    "short shooting-star; 5-day hold.",
+        fn=sig_pin_bar, params={"wick_ratio": 2.0},
+        variants=[{"wick_ratio": 1.5}, {"wick_ratio": 2.5}, {"wick_ratio": 3.0}],
+        hold_days=5,
+    ),
+    SignalSpec(
+        name="Inside Bar", group="G4 Candlestick",
+        rationale="An inside bar marks volatility contraction; the common read is "
+                  "continuation in the prevailing trend after consolidation.",
+        data_source="spot 1m -> daily OHLC",
+        feature_def="high<prior high and low>prior low; take sign(close-SMA(n)); "
+                    "5-day hold.",
+        fn=sig_inside_bar, params={"sma_n": 50},
+        variants=[{"sma_n": 20}, {"sma_n": 100}, {"sma_n": 30}],
+        hold_days=5,
+    ),
+    SignalSpec(
+        name="Outside Bar", group="G4 Candlestick",
+        rationale="An outside bar engulfs the prior range on expanding volatility; "
+                  "the close color signals the side that won the expansion.",
+        data_source="spot 1m -> daily OHLC",
+        feature_def="high>prior high and low<prior low; long if close>open, short "
+                    "if close<open; 5-day hold.",
+        fn=sig_outside_bar, params={"body_atr": 0.0},
+        variants=[{"body_atr": 0.5}, {"body_atr": 1.0}],
+        hold_days=5,
+    ),
+    SignalSpec(
+        name="Morning Star", group="G4 Candlestick",
+        rationale="A three-candle bottoming pattern: capitulation, indecision, then "
+                  "decisive recovery; a classic bullish reversal.",
+        data_source="spot 1m -> daily OHLC",
+        feature_def="large bear day1, small star day2, large bull day3 recovering "
+                    "past day1 midpoint; long; 5-day hold.",
+        fn=sig_morning_star, params={"large": 0.5, "star": 0.5},
+        variants=[{"large": 0.75, "star": 0.5}, {"large": 0.5, "star": 0.3}],
+        hold_days=5,
+    ),
+    SignalSpec(
+        name="Evening Star", group="G4 Candlestick",
+        rationale="A three-candle topping pattern: euphoria, indecision, then "
+                  "decisive breakdown; a classic bearish reversal.",
+        data_source="spot 1m -> daily OHLC",
+        feature_def="large bull day1, small star day2, large bear day3 breaking "
+                    "below day1 midpoint; short; 5-day hold.",
+        fn=sig_evening_star, params={"large": 0.5, "star": 0.5},
+        variants=[{"large": 0.75, "star": 0.5}, {"large": 0.5, "star": 0.3}],
+        hold_days=5,
+    ),
+]
+
 REGISTRY = {
     "seeds":  SEEDS,
     "group1": GROUP1,
     "group2": GROUP2,
     "group3": GROUP3,
+    "group4": GROUP4,
 }
