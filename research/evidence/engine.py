@@ -142,11 +142,47 @@ def load_master() -> pd.DataFrame:
     )
     ORDER BY day_ts
     """)
+
+    # higher-timeframe closes for multi-timeframe structure (Group 5)
+    df_1h = query(con, """
+    SELECT (open_time // 3600000) * 3600000 AS h_ts,
+           LAST(close ORDER BY open_time ASC) AS c
+    FROM spot_1m GROUP BY open_time // 3600000 ORDER BY h_ts
+    """)
+    df_4h = query(con, """
+    SELECT (open_time // 14400000) * 14400000 AS h_ts,
+           LAST(close ORDER BY open_time ASC) AS c
+    FROM spot_1m GROUP BY open_time // 14400000 ORDER BY h_ts
+    """)
     con.close()
 
     m = df_ohlc.merge(df_fund, on="day_ts", how="left").merge(df_perp, on="day_ts", how="left")
     # perp basis vs spot (bps); positive = contango (perp rich)
     m["basis_bps"] = (m["perp_close"] / m["close"] - 1.0) * 10_000.0
+
+    # ---- higher-timeframe trend states (50/200 MA cross), sampled to end-of-day ----
+    def _tf_trend_daily(df_tf: pd.DataFrame, fast: int, slow: int) -> pd.Series:
+        c = df_tf["c"]
+        f = c.rolling(fast, min_periods=fast).mean()
+        s = c.rolling(slow, min_periods=slow).mean()
+        t = pd.Series(0.0, index=df_tf.index)
+        t[f > s] = 1.0
+        t[f < s] = -1.0
+        t[f.isna() | s.isna()] = 0.0
+        day = (df_tf["h_ts"] // 86_400_000) * 86_400_000
+        return t.groupby(day).last()
+
+    tr_1h = _tf_trend_daily(df_1h, 50, 200)
+    tr_4h = _tf_trend_daily(df_4h, 50, 200)
+    m["trend_1h"] = m["day_ts"].map(tr_1h).fillna(0.0)
+    m["trend_4h"] = m["day_ts"].map(tr_4h).fillna(0.0)
+    # 1D trend on daily bars (same 50/200 construction)
+    f1d = m["close"].rolling(50, min_periods=50).mean()
+    s1d = m["close"].rolling(200, min_periods=200).mean()
+    td = pd.Series(0.0, index=m.index)
+    td[f1d > s1d] = 1.0; td[f1d < s1d] = -1.0
+    td[f1d.isna() | s1d.isna()] = 0.0
+    m["trend_1d"] = td.values
     m["dt"]   = pd.to_datetime(m["day_ts"], unit="ms", utc=True)
     m["year"] = m["dt"].dt.year
     m = m.sort_values("day_ts").reset_index(drop=True)

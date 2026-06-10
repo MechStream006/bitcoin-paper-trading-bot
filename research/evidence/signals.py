@@ -689,10 +689,94 @@ GROUP4 = [
     ),
 ]
 
+# =============================================================================
+# Group 5 — Multi-Timeframe Structure
+# =============================================================================
+# Trend states (50/200 MA cross) precomputed per timeframe in the engine loader
+# (trend_1h, trend_4h, trend_1d), each sampled to end-of-day. The objective for
+# this group is INDEPENDENCE vs existing trend/regime signals, not raw Sharpe.
+
+def sig_trend_1h(m: pd.DataFrame) -> pd.Series:
+    return m["trend_1h"].astype(float)
+
+
+def sig_trend_4h(m: pd.DataFrame) -> pd.Series:
+    return m["trend_4h"].astype(float)
+
+
+def sig_trend_1d(m: pd.DataFrame) -> pd.Series:
+    return m["trend_1d"].astype(float)
+
+
+def sig_trend_alignment(m: pd.DataFrame) -> pd.Series:
+    """Confluence: long only when 1H, 4H and 1D trends all agree."""
+    a, b, c = m["trend_1h"], m["trend_4h"], m["trend_1d"]
+    pos = pd.Series(0.0, index=m.index)
+    pos[(a == 1) & (b == 1) & (c == 1)] = 1.0
+    pos[(a == -1) & (b == -1) & (c == -1)] = -1.0
+    return pos
+
+
+def sig_trend_misalignment(m: pd.DataFrame) -> pd.Series:
+    """Counter-move within the daily trend: buy dips in 1D uptrend, sell bounces in 1D downtrend."""
+    a, b, c = m["trend_1h"], m["trend_4h"], m["trend_1d"]
+    pos = pd.Series(0.0, index=m.index)
+    pos[(c == 1) & ((a == -1) | (b == -1))] = 1.0
+    pos[(c == -1) & ((a == 1) | (b == 1))] = -1.0
+    return pos
+
+
+GROUP5 = [
+    SignalSpec(
+        name="1H Trend", group="G5 Multi-Timeframe",
+        rationale="Intraday (hourly) trend state; tests whether short-timeframe "
+                  "structure carries information at the daily decision point.",
+        data_source="spot 1m -> 1H bars -> 50/200 MA cross, end-of-day sample",
+        feature_def="sign(SMA50_1h - SMA200_1h) sampled at last hour of each day.",
+        fn=sig_trend_1h, params={}, variants=[], hold_days=1,
+    ),
+    SignalSpec(
+        name="4H Trend", group="G5 Multi-Timeframe",
+        rationale="Swing (4-hour) trend state; intermediate horizon between "
+                  "intraday and daily structure.",
+        data_source="spot 1m -> 4H bars -> 50/200 MA cross, end-of-day sample",
+        feature_def="sign(SMA50_4h - SMA200_4h) sampled at last 4H bar of each day.",
+        fn=sig_trend_4h, params={}, variants=[], hold_days=1,
+    ),
+    SignalSpec(
+        name="1D Trend", group="G5 Multi-Timeframe",
+        rationale="Daily trend state (50/200 MA cross); included as the redundancy "
+                  "reference point for the multi-timeframe family.",
+        data_source="spot 1m -> daily close -> 50/200 MA cross",
+        feature_def="sign(SMA50_1d - SMA200_1d).",
+        fn=sig_trend_1d, params={}, variants=[], hold_days=1,
+    ),
+    SignalSpec(
+        name="Trend Alignment", group="G5 Multi-Timeframe",
+        rationale="Multi-timeframe confluence: trades only when intraday, swing and "
+                  "daily trends agree, on the thesis that aligned structure is higher "
+                  "conviction.",
+        data_source="trend_1h + trend_4h + trend_1d",
+        feature_def="long when all three trends = +1, short when all three = -1.",
+        fn=sig_trend_alignment, params={}, variants=[], hold_days=1,
+    ),
+    SignalSpec(
+        name="Trend Misalignment", group="G5 Multi-Timeframe",
+        rationale="Counter-trend pullback entry: when shorter timeframes diverge "
+                  "from the daily trend, fade the divergence in the daily direction "
+                  "(buy dips / sell bounces).",
+        data_source="trend_1h + trend_4h + trend_1d",
+        feature_def="long when 1D=+1 and a shorter TF=-1; short when 1D=-1 and a "
+                    "shorter TF=+1.",
+        fn=sig_trend_misalignment, params={}, variants=[], hold_days=1,
+    ),
+]
+
 REGISTRY = {
     "seeds":  SEEDS,
     "group1": GROUP1,
     "group2": GROUP2,
     "group3": GROUP3,
     "group4": GROUP4,
+    "group5": GROUP5,
 }
