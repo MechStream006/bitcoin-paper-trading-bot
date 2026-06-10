@@ -121,6 +121,9 @@ def _render_scoreboard(lib: dict) -> None:
                      f"Sharpe CV {_fmt(r['loo_sharpe_cv'],'.2f')}")
         lines.append(f"- **Stability score:** {_fmt(r['stability_score'],'.2f')}  |  "
                      f"**Evidence score:** {_fmt(r['evidence_score'],'.1f')}/100")
+        lines.append(f"- **Strategy-lens verdict:** {r['verdict']}")
+        if r.get("hypothesis_verdict"):
+            lines.append(f"- **Hypothesis verdict (original):** {r['hypothesis_verdict']}")
         lines.append("")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     with open(SCOREBOARD, "w", encoding="utf-8") as fh:

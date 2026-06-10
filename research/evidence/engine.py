@@ -87,6 +87,7 @@ class SignalSpec:
     params:      dict = field(default_factory=dict)
     variants:    list[dict] = field(default_factory=list)   # for sensitivity
     hold_days:   int = 1          # 1 = continuous daily; >1 = event hold horizon
+    hypothesis_verdict: str | None = None   # for seeds: original validated verdict
 
 
 # =============================================================================
@@ -128,9 +129,24 @@ def load_master() -> pd.DataFrame:
     HAVING COUNT(*) >= {MIN_DAILY_FUND}
     ORDER BY day_ts
     """)
+
+    register_view(con, "perp_1m", BASE_DIR, "perp", SYMBOL)
+    df_perp = query(con, """
+    SELECT day_ts, perp_close
+    FROM (
+        SELECT
+            (open_time // 86400000) * 86400000 AS day_ts,
+            LAST(close ORDER BY open_time ASC) AS perp_close
+        FROM perp_1m
+        GROUP BY open_time // 86400000
+    )
+    ORDER BY day_ts
+    """)
     con.close()
 
-    m = df_ohlc.merge(df_fund, on="day_ts", how="left")
+    m = df_ohlc.merge(df_fund, on="day_ts", how="left").merge(df_perp, on="day_ts", how="left")
+    # perp basis vs spot (bps); positive = contango (perp rich)
+    m["basis_bps"] = (m["perp_close"] / m["close"] - 1.0) * 10_000.0
     m["dt"]   = pd.to_datetime(m["day_ts"], unit="ms", utc=True)
     m["year"] = m["dt"].dt.year
     m = m.sort_values("day_ts").reset_index(drop=True)
@@ -457,4 +473,5 @@ def evaluate_signal(m: pd.DataFrame, spec: SignalSpec) -> dict:
         "stability_score": round(stability_score, 3),
         "evidence_score": round(evidence_score, 1),
         "verdict": verdict,
+        "hypothesis_verdict": spec.hypothesis_verdict,
     }

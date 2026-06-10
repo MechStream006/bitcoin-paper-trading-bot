@@ -128,6 +128,8 @@ SEEDS = [
         fn=sig_h5_vol_regimes,
         params={},
         variants=[],
+        hypothesis_verdict="Validated B (return-differential across vol terciles; "
+                           "strong as a conditioning variable, weak as a long-only rule)",
     ),
     SignalSpec(
         name="H6 Funding x Vol x Regime",
@@ -142,6 +144,8 @@ SEEDS = [
         params={},
         variants=[],
         hold_days=7,
+        hypothesis_verdict="Validated Strong (S1 walk-forward + regime validation: "
+                           "genuine non-bear edge, Sharpe ~1.8 @15bps on 7d holds)",
     ),
 ]
 
@@ -210,7 +214,173 @@ GROUP1 = [
     ),
 ]
 
+# =============================================================================
+# Group 2 — Funding & Derivatives
+# =============================================================================
+
+def _roll_q(s: pd.Series, win: int, p: float, minp: int = 126) -> pd.Series:
+    return s.rolling(win, min_periods=min(win, minp)).quantile(p)
+
+
+def sig_funding_level(m: pd.DataFrame, pctile: int = 33, rw: int = 252) -> pd.Series:
+    """Contrarian funding: long when funding is low (no crowded longs), short when high."""
+    f  = m["daily_mean_funding_bps"]
+    lo = _roll_q(f, rw, pctile / 100)
+    hi = _roll_q(f, rw, (100 - pctile) / 100)
+    pos = pd.Series(0.0, index=m.index)
+    pos[f < lo] = 1.0
+    pos[f > hi] = -1.0
+    pos[f.isna() | lo.isna() | hi.isna()] = 0.0
+    return pos
+
+
+def sig_funding_acceleration(m: pd.DataFrame, k: int = 3, pctile: int = 33,
+                             rw: int = 252) -> pd.Series:
+    """Contrarian on funding momentum: heating funding -> short, cooling -> long."""
+    df = m["daily_mean_funding_bps"] - m["daily_mean_funding_bps"].shift(k)
+    lo = _roll_q(df, rw, pctile / 100)
+    hi = _roll_q(df, rw, (100 - pctile) / 100)
+    pos = pd.Series(0.0, index=m.index)
+    pos[df < lo] = 1.0       # funding cooling fast -> bullish
+    pos[df > hi] = -1.0      # funding heating fast -> bearish
+    pos[df.isna() | lo.isna() | hi.isna()] = 0.0
+    return pos
+
+
+def sig_funding_divergence(m: pd.DataFrame, k: int = 7, rw: int = 252) -> pd.Series:
+    """Price/funding divergence: rally on low funding -> continue; rally on high funding -> fade."""
+    pmom = m["close"] / m["close"].shift(k) - 1.0
+    f    = m["daily_mean_funding_bps"]
+    med  = _roll_q(f, rw, 0.50)
+    hi   = _roll_q(f, rw, 0.67)
+    pos = pd.Series(0.0, index=m.index)
+    pos[(pmom > 0) & (f < med)] = 1.0    # healthy uptrend (not crowded)
+    pos[(pmom > 0) & (f > hi)]  = -1.0   # crowded rally -> exhaustion
+    pos[pmom.isna() | f.isna() | med.isna()] = 0.0
+    return pos
+
+
+def sig_basis_level(m: pd.DataFrame, pctile: int = 33, rw: int = 252) -> pd.Series:
+    """Contrarian basis: long in backwardation (fear), short in rich contango (greed)."""
+    b  = m["basis_bps"]
+    lo = _roll_q(b, rw, pctile / 100)
+    hi = _roll_q(b, rw, (100 - pctile) / 100)
+    pos = pd.Series(0.0, index=m.index)
+    pos[b < lo] = 1.0
+    pos[b > hi] = -1.0
+    pos[b.isna() | lo.isna() | hi.isna()] = 0.0
+    return pos
+
+
+def sig_basis_compression(m: pd.DataFrame, k: int = 3) -> pd.Series:
+    """Contango compressing (leverage unwinding) -> mean-reversion long; deepening backwardation -> short."""
+    b  = m["basis_bps"]
+    db = b - b.shift(k)
+    pos = pd.Series(0.0, index=m.index)
+    pos[(b > 0) & (db < 0)] = 1.0     # rich premium unwinding -> reversion up
+    pos[(b < 0) & (db < 0)] = -1.0    # backwardation deepening -> down
+    pos[b.isna() | db.isna()] = 0.0
+    return pos
+
+
+def sig_basis_expansion(m: pd.DataFrame, k: int = 3) -> pd.Series:
+    """Basis expanding (rising leverage demand) -> momentum long; backwardation easing -> long."""
+    b  = m["basis_bps"]
+    db = b - b.shift(k)
+    pos = pd.Series(0.0, index=m.index)
+    pos[(b > 0) & (db > 0)] = 1.0     # contango building -> momentum up
+    pos[(b < 0) & (db > 0)] = 1.0     # backwardation easing -> recovery up
+    pos[(b > 0) & (db < 0)] = -1.0    # premium fading -> down
+    pos[b.isna() | db.isna()] = 0.0
+    return pos
+
+
+GROUP2 = [
+    SignalSpec(
+        name="Funding Level",
+        group="G2 Funding & Derivatives",
+        rationale="Perp funding proxies leverage positioning; persistently high "
+                  "funding marks crowded longs (mean-reversion down), low/negative "
+                  "funding marks washed-out positioning (mean-reversion up).",
+        data_source="funding (Binance/CCXT) -> daily mean bps",
+        feature_def="long when funding < lower tercile of trailing rw days, short "
+                    "when > upper tercile; 7-day hold.",
+        fn=sig_funding_level, params={"pctile": 33, "rw": 252},
+        variants=[{"pctile": 25, "rw": 252}, {"pctile": 40, "rw": 252},
+                  {"pctile": 33, "rw": 180}, {"pctile": 33, "rw": 365}],
+        hold_days=7,
+    ),
+    SignalSpec(
+        name="Funding Acceleration",
+        group="G2 Funding & Derivatives",
+        rationale="The rate of change of funding captures positioning building or "
+                  "unwinding; rapidly heating funding precedes long squeezes, "
+                  "rapidly cooling funding precedes relief rallies.",
+        data_source="funding -> daily mean bps, k-day change",
+        feature_def="d(funding,k); long when change < lower tercile, short when > "
+                    "upper tercile; 7-day hold.",
+        fn=sig_funding_acceleration, params={"k": 3, "pctile": 33, "rw": 252},
+        variants=[{"k": 2, "pctile": 33, "rw": 252}, {"k": 5, "pctile": 33, "rw": 252},
+                  {"k": 3, "pctile": 25, "rw": 252}, {"k": 7, "pctile": 33, "rw": 252}],
+        hold_days=7,
+    ),
+    SignalSpec(
+        name="Funding Divergence",
+        group="G2 Funding & Derivatives",
+        rationale="A rally on low funding is organic and continues; a rally on high "
+                  "funding is leverage-driven and exhausts. Combines price momentum "
+                  "with funding state.",
+        data_source="spot close + funding",
+        feature_def="price k-day momentum gated by funding regime; long if up & "
+                    "funding<median, short if up & funding>upper-third; 7-day hold.",
+        fn=sig_funding_divergence, params={"k": 7, "rw": 252},
+        variants=[{"k": 5, "rw": 252}, {"k": 10, "rw": 252},
+                  {"k": 14, "rw": 252}, {"k": 7, "rw": 180}],
+        hold_days=7,
+    ),
+    SignalSpec(
+        name="Basis Level",
+        group="G2 Funding & Derivatives",
+        rationale="Perp-spot basis measures leverage demand; rich contango signals "
+                  "crowded longs (fade), backwardation signals fear (contrarian long). "
+                  "Expected to be collinear with funding.",
+        data_source="perp 1m + spot 1m -> daily basis bps",
+        feature_def="long when basis < lower tercile, short when > upper tercile; "
+                    "7-day hold.",
+        fn=sig_basis_level, params={"pctile": 33, "rw": 252},
+        variants=[{"pctile": 25, "rw": 252}, {"pctile": 40, "rw": 252},
+                  {"pctile": 33, "rw": 180}, {"pctile": 33, "rw": 365}],
+        hold_days=7,
+    ),
+    SignalSpec(
+        name="Basis Compression",
+        group="G2 Funding & Derivatives",
+        rationale="A compressing contango marks leverage unwinding that often "
+                  "precedes price stabilization; deepening backwardation marks "
+                  "accelerating fear.",
+        data_source="perp + spot -> daily basis bps, k-day change",
+        feature_def="long when basis>0 and falling; short when basis<0 and falling; "
+                    "7-day hold.",
+        fn=sig_basis_compression, params={"k": 3},
+        variants=[{"k": 2}, {"k": 5}, {"k": 7}, {"k": 10}],
+        hold_days=7,
+    ),
+    SignalSpec(
+        name="Basis Expansion",
+        group="G2 Funding & Derivatives",
+        rationale="An expanding basis reflects strengthening leverage demand and "
+                  "trend conviction; easing backwardation marks recovery.",
+        data_source="perp + spot -> daily basis bps, k-day change",
+        feature_def="long when basis rising (contango building or backwardation "
+                    "easing); short when contango fading; 7-day hold.",
+        fn=sig_basis_expansion, params={"k": 3},
+        variants=[{"k": 2}, {"k": 5}, {"k": 7}, {"k": 10}],
+        hold_days=7,
+    ),
+]
+
 REGISTRY = {
     "seeds":  SEEDS,
     "group1": GROUP1,
+    "group2": GROUP2,
 }
