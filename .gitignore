@@ -24,7 +24,15 @@ h4_build*.log
 h4_build*.err*
 h5_build*.log
 h5_build*.err*
+h1_build*.log
+h1_build*.err*
+h6_build*.log
+h6_build*.err*
+h6_validation*.log
+h6_validation*.err*
 
 # Hypothesis reports (charts + JSON) are regenerable
 research/reports/h4_basis_regimes/
 research/reports/h5_vol_regimes/
+research/reports/h1_funding_regimes/
+research/reports/h6_funding_vol_interaction/
