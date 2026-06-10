@@ -4,8 +4,14 @@ Creates a consistent hot backup using VACUUM INTO (SQLite 3.27+), writes a
 SHA-256 manifest, applies 7-daily/4-weekly/12-monthly rotation, then
 optionally runs a configurable off-host transfer command.
 
+Backs up two databases:
+  1. data/btc_trading.db         (Layer 2 live trading runtime)
+  2. research/data/forward_evidence.db  (Phase E forward evidence; --evidence)
+
 Usage:
     python scripts/backup.py [--db-path PATH] [--backup-dir PATH] [--dry-run]
+    python scripts/backup.py --evidence [--dry-run]
+    python scripts/backup.py --all [--dry-run]   # backs up both databases
 
 Environment variable:
     BACKUP_OFFHOST_CMD  Optional shell template with {file} and {manifest}
@@ -14,7 +20,7 @@ Environment variable:
 
 Exit codes:
     0  success
-    1  failure
+    1  one or more backups failed
 """
 from __future__ import annotations
 
@@ -54,8 +60,17 @@ def _row_counts(conn: sqlite3.Connection) -> dict[str, int]:
 
 
 def _ts_range(conn: sqlite3.Connection) -> dict[str, str | None]:
-    row = conn.execute("SELECT min(ts), max(ts) FROM option_quotes").fetchone()
-    return {"min": row[0], "max": row[1]}
+    # Try Layer 2 DB table first, then evidence DB table, then give up gracefully.
+    for sql in (
+        "SELECT min(ts), max(ts) FROM option_quotes",
+        "SELECT min(day_ts), max(day_ts) FROM corpus_daily",
+    ):
+        try:
+            row = conn.execute(sql).fetchone()
+            return {"min": row[0], "max": row[1]}
+        except Exception:
+            continue
+    return {"min": None, "max": None}
 
 
 def _git_sha() -> str:
@@ -83,17 +98,19 @@ def _load_env_var(key: str) -> str:
     return ""
 
 
-def _apply_retention(backup_dir: Path, now: datetime, dry_run: bool) -> None:
+def _apply_retention(backup_dir: Path, now: datetime, dry_run: bool,
+                     db_label: str = "btc_trading") -> None:
     """Delete backup files outside the retention window."""
-    backups = sorted(backup_dir.glob("btc_trading_*.db"))
+    backups = sorted(backup_dir.glob(f"{db_label}_*.db"))
     kept, deleted = [], []
 
     for f in backups:
-        # Filename: btc_trading_YYYYMMDD_HHMMSS.db
+        # Filename: {db_label}_YYYYMMDD_HHMMSS.db — find the 8-digit date part.
         try:
-            date_str = f.stem.split("_")[2]  # YYYYMMDD
+            parts = f.stem.split("_")
+            date_str = next(p for p in parts if p.isdigit() and len(p) == 8)
             bdate = datetime.strptime(date_str, "%Y%m%d").replace(tzinfo=timezone.utc)
-        except (ValueError, IndexError):
+        except (ValueError, StopIteration):
             kept.append(f)
             continue
 
@@ -119,7 +136,8 @@ def _apply_retention(backup_dir: Path, now: datetime, dry_run: bool) -> None:
     print(f"[retention] kept={len(kept)}  deleted={len(deleted)}")
 
 
-def run_backup(db_path: Path, backup_dir: Path, dry_run: bool) -> int:
+def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
+               db_label: str = "btc_trading") -> int:
     if not db_path.exists():
         print(f"[error] DB not found: {db_path}", file=sys.stderr)
         return 1
@@ -136,8 +154,8 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool) -> int:
     backup_dir.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     ts_str = now.strftime("%Y%m%d_%H%M%S")
-    backup_file  = backup_dir / f"btc_trading_{ts_str}.db"
-    manifest_file = backup_dir / f"btc_trading_{ts_str}.manifest.json"
+    backup_file  = backup_dir / f"{db_label}_{ts_str}.db"
+    manifest_file = backup_dir / f"{db_label}_{ts_str}.manifest.json"
 
     if dry_run:
         print(f"[DRY RUN] would create {backup_file}")
@@ -162,14 +180,15 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool) -> int:
     sha       = _sha256(backup_file)
     file_size = backup_file.stat().st_size
     manifest  = {
-        "backup_ts":              now.isoformat(),
-        "db_path":                str(db_path),
-        "backup_file":            str(backup_file),
-        "file_size_bytes":        file_size,
-        "sha256":                 sha,
-        "git_sha":                _git_sha(),
-        "row_counts":             counts,
-        "option_quotes_ts_range": ts_range,
+        "backup_ts":       now.isoformat(),
+        "db_path":         str(db_path),
+        "db_label":        db_label,
+        "backup_file":     str(backup_file),
+        "file_size_bytes": file_size,
+        "sha256":          sha,
+        "git_sha":         _git_sha(),
+        "row_counts":      counts,
+        "ts_range":        ts_range,
     }
     manifest_file.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
@@ -188,7 +207,7 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool) -> int:
                 file=sys.stderr,
             )
 
-    _apply_retention(backup_dir, now, dry_run=False)
+    _apply_retention(backup_dir, now, dry_run=False, db_label=db_label)
     print("[backup] done")
     return 0
 
@@ -204,11 +223,35 @@ def main() -> int:
         help="Directory to store backup files (default: data/backups/)",
     )
     parser.add_argument(
+        "--evidence", action="store_true",
+        help="Back up research/data/forward_evidence.db (instead of btc_trading.db)",
+    )
+    parser.add_argument(
+        "--all", dest="backup_all", action="store_true",
+        help="Back up both btc_trading.db and forward_evidence.db",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Show what would happen without writing anything",
     )
     args = parser.parse_args()
-    return run_backup(args.db_path, args.backup_dir, args.dry_run)
+
+    if args.evidence or args.backup_all:
+        evidence_db  = ROOT / "research" / "data" / "forward_evidence.db"
+        evidence_dir = ROOT / "data" / "evidence-backups"
+        rc_evidence  = run_backup(evidence_db, evidence_dir, args.dry_run,
+                                  db_label="evidence")
+        if args.evidence:
+            return rc_evidence
+
+    if not args.evidence:
+        rc_trading = run_backup(args.db_path, args.backup_dir, args.dry_run,
+                                db_label="btc_trading")
+        if args.backup_all:
+            return max(rc_trading, rc_evidence)     # type: ignore[possibly-undefined]
+        return rc_trading
+
+    return 0
 
 
 if __name__ == "__main__":

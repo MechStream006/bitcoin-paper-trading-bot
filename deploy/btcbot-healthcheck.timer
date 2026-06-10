@@ -5,7 +5,7 @@ Requires=btcbot-healthcheck.service
 
 [Timer]
 # Every 10 minutes, on the 10-minute mark
-OnCalendar=*:0/10
+OnCalendar=*-*-* *:0/10 UTC
 # Small random spread to avoid thundering-herd with other timers
 RandomizedDelaySec=30
 # Don't catch up on missed runs (health check is a point-in-time read)

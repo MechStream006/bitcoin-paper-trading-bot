@@ -1,13 +1,13 @@
 # Research dependencies — SEPARATE from the runtime requirements.txt.
 # Install into the existing `btc_bot` conda env. Nothing here touches the live bot.
-ccxt>=4.0
-duckdb>=0.10
-pyarrow>=15.0
-pandas>=2.0
-requests>=2.31
-pyyaml>=6.0
-# Phase B additions (statistical analysis + charting)
-scipy>=1.11
-statsmodels>=0.14
-matplotlib>=3.7
-numpy>=1.24
+# Pinned 2026-06-10 via: conda run -n btc_bot pip freeze
+ccxt==4.5.56
+duckdb==1.5.3
+pyarrow==24.0.0
+pandas==2.3.3
+requests==2.33.1
+PyYAML==6.0.3
+scipy==1.15.3
+statsmodels==0.14.6
+matplotlib==3.10.9
+numpy==2.2.6

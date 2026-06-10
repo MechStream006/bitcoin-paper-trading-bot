@@ -1,0 +1,39 @@
+[Unit]
+Description=BTC Forward Evidence — daily corpus refresh + evidence job
+Documentation=file:/opt/btcbot/deploy/install.md
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot/research
+
+# ADJUST THIS PATH to match your Miniconda/Anaconda installation.
+# Find it with: sudo -u btcbot conda run -n btc_bot which python
+# Common paths:
+#   /opt/miniconda3/envs/btc_bot/bin/python   (system-wide Miniconda)
+#   /home/btcbot/miniconda3/envs/btc_bot/bin/python  (user Miniconda)
+Environment=EVIDENCE_PYTHON=/opt/miniconda3/envs/btc_bot/bin/python
+
+# Step 1: refresh current month's parquet partitions from Binance/Deribit
+ExecStart=/opt/miniconda3/envs/btc_bot/bin/python forward_evidence/daily_ingest.py
+
+# Step 2: process new row into evidence DB (only runs if step 1 exits 0)
+ExecStart=/opt/miniconda3/envs/btc_bot/bin/python forward_evidence/daily_job.py
+
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-evidence
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# Both the main data dir and the research data dir must be writable.
+ReadWritePaths=/opt/btcbot/data /opt/btcbot/research/data
+
+[Install]
+WantedBy=multi-user.target

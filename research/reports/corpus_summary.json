@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-09T17:19:20.238164+00:00",
+  "generated_at": "2026-06-10T10:00:08.329482+00:00",
   "corpus_end_month": "2026-05",
   "datasets": {
     "spot": {
@@ -37,6 +37,17 @@
       "legacy_manifests": 0,
       "disk_bytes": 84662271,
       "disk_mb": 80.7
+    },
+    "dvol": {
+      "partition_count": 63,
+      "first_partition": "2021-03",
+      "last_partition": "2026-05",
+      "total_rows": 1895,
+      "first_timestamp": "2021-03-24 00:00:00 UTC",
+      "last_timestamp": "2026-05-31 00:00:00 UTC",
+      "disk_mb": 0.298,
+      "source": "deribit get_volatility_index_data",
+      "inception": "2021-03-24 00:00:00 UTC"
     }
   },
   "quality": {
@@ -109,6 +120,12 @@
           "2026-01: outlier_annotation: 188 outlier(s) in 'close' outside 3\u00d7IQR [78097, 103666]; examples: ['77708.4', '",
           "2026-02: outlier_annotation: 186 outlier(s) in 'close' outside 3\u00d7IQR [57847.5, 78945.2]; examples: ['78990.6'"
         ]
+      },
+      "dvol": {
+        "passed": 62,
+        "failed": 1,
+        "critical": 1,
+        "warning": 2
       }
     }
   },

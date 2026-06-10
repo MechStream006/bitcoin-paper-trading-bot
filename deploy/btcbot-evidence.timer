@@ -1,0 +1,20 @@
+[Unit]
+Description=BTC Forward Evidence — run daily at 00:05 UTC
+Documentation=file:/opt/btcbot/deploy/install.md
+
+[Timer]
+# 00:05 UTC gives Binance time to publish the final 1m candle of the day
+# and gives the 00:00 UTC daily_summary cron a 5-minute head start.
+OnCalendar=*-*-* 00:05:00 UTC
+
+# Persistent=true: if the server was down at 00:05, run immediately on next boot.
+# This guarantees no evidence days are silently skipped after maintenance.
+Persistent=true
+
+# Small jitter to avoid thundering-herd with other 00:05 jobs.
+RandomizedDelaySec=30
+
+Unit=btcbot-evidence.service
+
+[Install]
+WantedBy=timers.target
