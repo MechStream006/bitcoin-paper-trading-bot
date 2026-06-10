@@ -772,6 +772,136 @@ GROUP5 = [
     ),
 ]
 
+# =============================================================================
+# Group 6 — Positioning / Order-Flow Proxies (available data only)
+# =============================================================================
+# Tests whether order-flow / positioning proxies add a NEW information axis or
+# merely re-represent funding / basis / volatility / trend. Volume is the only
+# previously-unused data axis, so volume-based proxies are the real test.
+
+def _clv(m: pd.DataFrame) -> pd.Series:
+    """Close Location Value: where the close sits in the day's range. +1 top, -1 bottom."""
+    rng = (m["high"] - m["low"]).replace(0, np.nan)
+    return ((m["close"] - m["low"]) - (m["high"] - m["close"])) / rng
+
+
+def sig_clv_pressure(m: pd.DataFrame, n: int = 10) -> pd.Series:
+    """Intrabar buying/selling pressure: smoothed CLV. Long when persistently closing high."""
+    clv = _clv(m).rolling(n, min_periods=n).mean()
+    pos = pd.Series(0.0, index=m.index)
+    pos[clv > 0] = 1.0
+    pos[clv < 0] = -1.0
+    pos[clv.isna()] = 0.0
+    return pos
+
+
+def sig_chaikin_money_flow(m: pd.DataFrame, n: int = 20) -> pd.Series:
+    """Chaikin Money Flow: volume-weighted CLV. Long when money flow positive."""
+    clv = _clv(m).fillna(0.0)
+    mfv = clv * m["volume"]
+    cmf = mfv.rolling(n, min_periods=n).sum() / m["volume"].rolling(n, min_periods=n).sum()
+    pos = pd.Series(0.0, index=m.index)
+    pos[cmf > 0] = 1.0
+    pos[cmf < 0] = -1.0
+    pos[cmf.isna()] = 0.0
+    return pos
+
+
+def sig_obv_trend(m: pd.DataFrame, n: int = 20) -> pd.Series:
+    """On-Balance Volume momentum: long when OBV is rising over n days."""
+    direction = np.sign(m["close"].diff()).fillna(0.0)
+    obv = (direction * m["volume"]).cumsum()
+    chg = obv - obv.shift(n)
+    pos = pd.Series(0.0, index=m.index)
+    pos[chg > 0] = 1.0
+    pos[chg < 0] = -1.0
+    pos[chg.isna()] = 0.0
+    return pos
+
+
+def sig_volume_surge(m: pd.DataFrame, n: int = 20, mult: float = 1.5) -> pd.Series:
+    """Volume-confirmed breakout: on a volume spike, follow the day's direction."""
+    avg = m["volume"].rolling(n, min_periods=n).mean()
+    surge = m["volume"] > mult * avg
+    pos = pd.Series(0.0, index=m.index)
+    pos[surge & (m["close"] > m["open"])] = 1.0
+    pos[surge & (m["close"] < m["open"])] = -1.0
+    pos[avg.isna()] = 0.0
+    return pos
+
+
+def sig_funding_basis_composite(m: pd.DataFrame, rw: int = 252) -> pd.Series:
+    """Composite positioning index: z(funding)+z(basis), contrarian. Tests the
+    funding/basis collinearity directly."""
+    f = m["daily_mean_funding_bps"]
+    b = m["basis_bps"]
+    zf = (f - f.rolling(rw, min_periods=126).mean()) / f.rolling(rw, min_periods=126).std()
+    zb = (b - b.rolling(rw, min_periods=126).mean()) / b.rolling(rw, min_periods=126).std()
+    comp = (zf + zb) / 2.0
+    pos = pd.Series(0.0, index=m.index)
+    pos[comp < -0.5] = 1.0    # washed-out positioning -> contrarian long
+    pos[comp >  0.5] = -1.0   # crowded positioning -> contrarian short
+    pos[comp.isna()] = 0.0
+    return pos
+
+
+GROUP6 = [
+    SignalSpec(
+        name="CLV Pressure", group="G6 Positioning/Order-Flow",
+        rationale="Close location within the daily range proxies intraday buying vs "
+                  "selling pressure; persistent high closes signal demand. Uses price "
+                  "structure (a potentially new axis vs trend/level signals).",
+        data_source="spot 1m -> daily OHLC",
+        feature_def="smoothed Close Location Value over n days; long if >0, short if <0.",
+        fn=sig_clv_pressure, params={"n": 10},
+        variants=[{"n": 5}, {"n": 20}, {"n": 14}],
+        hold_days=1,
+    ),
+    SignalSpec(
+        name="Chaikin Money Flow", group="G6 Positioning/Order-Flow",
+        rationale="Volume-weighted close-location flow; the canonical OHLCV order-flow "
+                  "proxy. Volume is the only data axis untested elsewhere in the library.",
+        data_source="spot 1m -> daily OHLC + volume",
+        feature_def="CMF = sum(CLV*vol)/sum(vol) over n; long if >0, short if <0.",
+        fn=sig_chaikin_money_flow, params={"n": 20},
+        variants=[{"n": 10}, {"n": 30}, {"n": 14}],
+        hold_days=1,
+    ),
+    SignalSpec(
+        name="OBV Trend", group="G6 Positioning/Order-Flow",
+        rationale="On-balance volume accumulates signed volume; rising OBV signals "
+                  "accumulation. Tests whether volume direction is independent of price "
+                  "trend.",
+        data_source="spot 1m -> daily close + volume",
+        feature_def="OBV = cumsum(sign(dclose)*vol); long if OBV rising over n days.",
+        fn=sig_obv_trend, params={"n": 20},
+        variants=[{"n": 10}, {"n": 30}, {"n": 50}],
+        hold_days=1,
+    ),
+    SignalSpec(
+        name="Volume Surge", group="G6 Positioning/Order-Flow",
+        rationale="A volume spike marks conviction; trading the spike-day direction "
+                  "tests volume-confirmed initiation.",
+        data_source="spot 1m -> daily OHLC + volume",
+        feature_def="volume > mult * SMA(vol,n) -> follow candle color; 5-day hold.",
+        fn=sig_volume_surge, params={"n": 20, "mult": 1.5},
+        variants=[{"n": 20, "mult": 2.0}, {"n": 30, "mult": 1.5}, {"n": 10, "mult": 1.5}],
+        hold_days=5,
+    ),
+    SignalSpec(
+        name="Funding-Basis Composite", group="G6 Positioning/Order-Flow",
+        rationale="Combined funding+basis positioning index; explicitly tests whether "
+                  "merging the two collinear positioning measures adds anything beyond "
+                  "either alone.",
+        data_source="funding + perp/spot basis",
+        feature_def="z(funding)+z(basis) over rw; contrarian long when < -0.5, short "
+                    "when > +0.5; 7-day hold.",
+        fn=sig_funding_basis_composite, params={"rw": 252},
+        variants=[{"rw": 180}, {"rw": 365}],
+        hold_days=7,
+    ),
+]
+
 REGISTRY = {
     "seeds":  SEEDS,
     "group1": GROUP1,
@@ -779,4 +909,5 @@ REGISTRY = {
     "group3": GROUP3,
     "group4": GROUP4,
     "group5": GROUP5,
+    "group6": GROUP6,
 }

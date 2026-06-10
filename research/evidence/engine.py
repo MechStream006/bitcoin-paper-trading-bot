@@ -106,14 +106,15 @@ def load_master() -> pd.DataFrame:
     register_view(con, "funding_raw", BASE_DIR, "funding", SYMBOL)
 
     df_ohlc = query(con, """
-    SELECT day_ts, o AS open, h AS high, l AS low, c AS close
+    SELECT day_ts, o AS open, h AS high, l AS low, c AS close, v AS volume
     FROM (
         SELECT
             (open_time // 86400000) * 86400000 AS day_ts,
             FIRST(open  ORDER BY open_time ASC)  AS o,
             MAX(high)                            AS h,
             MIN(low)                             AS l,
-            LAST(close ORDER BY open_time ASC)   AS c
+            LAST(close ORDER BY open_time ASC)   AS c,
+            SUM(volume)                          AS v
         FROM spot_1m
         GROUP BY open_time // 86400000
     )
