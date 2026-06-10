@@ -379,8 +379,153 @@ GROUP2 = [
     ),
 ]
 
+# =============================================================================
+# Group 3 — Price Action
+# =============================================================================
+
+def _atr(m: pd.DataFrame, n: int) -> pd.Series:
+    h, l, c = m["high"], m["low"], m["close"]
+    pc = c.shift(1)
+    tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    return tr.rolling(n, min_periods=n).mean()
+
+
+def _rsi(close: pd.Series, n: int) -> pd.Series:
+    d  = close.diff()
+    up = d.clip(lower=0).rolling(n, min_periods=n).mean()
+    dn = (-d.clip(upper=0)).rolling(n, min_periods=n).mean()
+    rs = up / dn
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def sig_momentum(m: pd.DataFrame, k: int = 30) -> pd.Series:
+    """Time-series momentum: long if k-day return>0, short if <0."""
+    r = m["close"] / m["close"].shift(k) - 1.0
+    pos = pd.Series(0.0, index=m.index)
+    pos[r > 0] = 1.0
+    pos[r < 0] = -1.0
+    pos[r.isna()] = 0.0
+    return pos
+
+
+def sig_trend_continuation(m: pd.DataFrame, n: int = 20, thr: float = 0.30) -> pd.Series:
+    """Follow direction only when the trend is efficient (Kaufman efficiency ratio high)."""
+    change = (m["close"] - m["close"].shift(n)).abs()
+    path   = m["close"].diff().abs().rolling(n, min_periods=n).sum()
+    er     = change / path
+    direction = np.sign(m["close"] - m["close"].shift(n))
+    pos = pd.Series(0.0, index=m.index)
+    strong = er > thr
+    pos[strong] = direction[strong]
+    pos[er.isna()] = 0.0
+    return pos
+
+
+def sig_mean_reversion(m: pd.DataFrame, n: int = 14, lo: int = 30, hi: int = 70) -> pd.Series:
+    """RSI reversal: long when oversold (RSI<lo), short when overbought (RSI>hi)."""
+    rsi = _rsi(m["close"], n)
+    pos = pd.Series(0.0, index=m.index)
+    pos[rsi < lo] = 1.0
+    pos[rsi > hi] = -1.0
+    pos[rsi.isna()] = 0.0
+    return pos
+
+
+def sig_atr_expansion(m: pd.DataFrame, n: int = 14, lag: int = 10) -> pd.Series:
+    """Volatility-confirmed momentum: when ATR is expanding, follow price direction."""
+    atr = _atr(m, n)
+    expanding = atr > atr.shift(lag)
+    direction = np.sign(m["close"] - m["close"].shift(n))
+    pos = pd.Series(0.0, index=m.index)
+    pos[expanding] = direction[expanding]
+    pos[atr.isna() | atr.shift(lag).isna()] = 0.0
+    return pos
+
+
+def sig_atr_compression(m: pd.DataFrame, n: int = 14, lag: int = 10, sma_n: int = 50) -> pd.Series:
+    """Consolidation-continuation: when ATR contracts, hold the prevailing SMA-trend direction."""
+    atr = _atr(m, n)
+    compressing = atr < atr.shift(lag)
+    sma = m["close"].rolling(sma_n, min_periods=sma_n).mean()
+    pos = pd.Series(0.0, index=m.index)
+    pos[compressing & (m["close"] > sma)] = 1.0
+    pos[compressing & (m["close"] < sma)] = -1.0
+    pos[atr.isna() | sma.isna()] = 0.0
+    return pos
+
+
+GROUP3 = [
+    SignalSpec(
+        name="Momentum (TSMOM)",
+        group="G3 Price Action",
+        rationale="Time-series momentum: assets that have risen tend to keep "
+                  "rising over medium horizons; a robust, widely-documented effect "
+                  "across markets including crypto.",
+        data_source="spot 1m -> daily close",
+        feature_def="sign of k-day return; long if positive, short if negative.",
+        fn=sig_momentum, params={"k": 30},
+        variants=[{"k": 20}, {"k": 60}, {"k": 90}, {"k": 120}],
+        hold_days=1,
+    ),
+    SignalSpec(
+        name="Trend Continuation (ER)",
+        group="G3 Price Action",
+        rationale="Trends persist only when price moves efficiently; the Kaufman "
+                  "efficiency ratio filters choppy moves so the signal follows only "
+                  "clean, directional trends.",
+        data_source="spot 1m -> daily close",
+        feature_def="efficiency ratio = |net change| / sum|daily changes| over n; "
+                    "follow trend direction when ER>thr, else flat.",
+        fn=sig_trend_continuation, params={"n": 20, "thr": 0.30},
+        variants=[{"n": 14, "thr": 0.30}, {"n": 30, "thr": 0.30},
+                  {"n": 20, "thr": 0.20}, {"n": 20, "thr": 0.40}],
+        hold_days=1,
+    ),
+    SignalSpec(
+        name="Mean Reversion (RSI)",
+        group="G3 Price Action",
+        rationale="Short-horizon overextensions revert; oversold RSI marks "
+                  "capitulation (bounce), overbought RSI marks exhaustion (pullback).",
+        data_source="spot 1m -> daily close",
+        feature_def="RSI(n); long when RSI<lo, short when RSI>hi; 5-day hold.",
+        fn=sig_mean_reversion, params={"n": 14, "lo": 30, "hi": 70},
+        variants=[{"n": 7, "lo": 30, "hi": 70}, {"n": 21, "lo": 30, "hi": 70},
+                  {"n": 14, "lo": 25, "hi": 75}, {"n": 14, "lo": 35, "hi": 65}],
+        hold_days=5,
+    ),
+    SignalSpec(
+        name="ATR Expansion",
+        group="G3 Price Action",
+        rationale="Rising true-range accompanies decisive, conviction-driven moves; "
+                  "trading in the direction of price while volatility expands rides "
+                  "breakouts and trend accelerations.",
+        data_source="spot 1m -> daily OHLC",
+        feature_def="ATR(n) > ATR(n) lag bars ago -> follow sign of n-day return; "
+                    "else flat.",
+        fn=sig_atr_expansion, params={"n": 14, "lag": 10},
+        variants=[{"n": 10, "lag": 10}, {"n": 21, "lag": 10},
+                  {"n": 14, "lag": 5}, {"n": 14, "lag": 20}],
+        hold_days=1,
+    ),
+    SignalSpec(
+        name="ATR Compression",
+        group="G3 Price Action",
+        rationale="Contracting true-range marks consolidation that typically "
+                  "resolves in the direction of the prevailing trend (the volatility "
+                  "squeeze).",
+        data_source="spot 1m -> daily OHLC",
+        feature_def="ATR(n) < ATR(n) lag bars ago -> hold SMA(sma_n) trend "
+                    "direction; else flat.",
+        fn=sig_atr_compression, params={"n": 14, "lag": 10, "sma_n": 50},
+        variants=[{"n": 10, "lag": 10, "sma_n": 50}, {"n": 21, "lag": 10, "sma_n": 50},
+                  {"n": 14, "lag": 10, "sma_n": 30}, {"n": 14, "lag": 10, "sma_n": 100}],
+        hold_days=1,
+    ),
+]
+
 REGISTRY = {
     "seeds":  SEEDS,
     "group1": GROUP1,
     "group2": GROUP2,
+    "group3": GROUP3,
 }
