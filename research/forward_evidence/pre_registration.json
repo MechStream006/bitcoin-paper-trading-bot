@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "version": "1.0.0",
+  "pre_registration_date": "2026-06-10T16:50:41.111245+00:00",
+  "function_spec": {
+    "name": "H6 Funding \u00d7 Vol \u00d7 Market-Regime",
+    "version": "1.0.0",
+    "signal_class": "regime-conditional long-only",
+    "data_source": "Binance BTCUSDT spot close + USDT-perp daily mean funding bps",
+    "entry_condition": "vol_regime == 'medium' AND funding_regime == 'low' AND market_regime not in {'bear', 'unknown'}",
+    "direction": "long_only",
+    "hold_days": 7,
+    "exit_rule": "scheduled at entry + 7 calendar days; no intra-hold exits in Phase E demo",
+    "parameters": {
+      "RV_WINDOW": 21,
+      "REGIME_WINDOW": 252,
+      "REGIME_PCTILE": 33,
+      "SMA_WINDOW": 200,
+      "SLOPE_LAG": 20,
+      "HOLD_DAYS": 7,
+      "ANN": 365.0,
+      "MIN_HISTORY": 273
+    },
+    "regime_definitions": {
+      "vol_regime": "RV21 annualized (std of log-returns \u00d7 \u221a365); trailing 252d tercile. low < 33th pctile; high > 67th pctile.",
+      "funding_regime": "Binance USDT-perp daily mean funding rate \u00d7 10000 (bps); trailing 252d tercile, same boundaries.",
+      "market_regime": "SMA200 + 20d slope. bull = close > rising SMA200; bear = close < falling SMA200; else sideways. unknown until 220d history."
+    },
+    "cost_assumption_bps": 15,
+    "governance_phase": "Phase E forward evidence collection",
+    "pre_registration_date": "2026-06-10",
+    "lockbox_status": "spent in D.5 (2025-06-01 to 2026-05-31); never reused",
+    "evidence_basis": {
+      "IS_sharpe_7d": 2.22,
+      "DSR": 0.961,
+      "BH_p": 0.0065,
+      "phase_c_duration_peak_sharpe_1d": 3.49,
+      "lockbox_verdict": "REJECT BOTH (regime absent in -30.3% bear year)",
+      "integration_rec": "B: demo-only research strategy"
+    }
+  },
+  "artifact_hashes": {
+    "decision_function.py": "f78f0a52bfcd8add023222958a54dcf1f4359e11d76680dd211a6ded72c78aff",
+    "schema.sql": "8523ff6d070de70d7b52b17e3d29015da43e9e542d7678fe177a8be0096dc2f6",
+    "signals.py": "d2f1c9deccf2b4260a7c28ab62e7fa64408df68301d3ea5ebf14a3d49ab8c090",
+    "engine.py": "aa2cb34fc9793b81466f253065b5a0f7791cd096b58d95e9dd991fdb1ce4ffdb",
+    "governance.py": "a3759079fc909f88657b1138004704947befec775dc10090bb09d7a16af15c21",
+    "market_regimes.py": "98e1edb391d469cd90f9fccd35e1f8ca072e1cbd59476a34128dedb5e6786437"
+  },
+  "decision_function_hash": "f78f0a52bfcd8add023222958a54dcf1f4359e11d76680dd211a6ded72c78aff",
+  "promotion_criteria": {
+    "description": "Criteria to promote H6 from demo evidence to production consideration. All gates must pass simultaneously. Evaluated only after minimum sample reached.",
+    "minimum_trades": 30,
+    "gates": {
+      "G1_direction": {
+        "description": "Mean trade return > 0 (net of 15 bps cost)",
+        "threshold": "mean_net_return > 0"
+      },
+      "G2_power": {
+        "description": "t-test one-sided p < 0.10 (n=30 gives ~40% power at true SR=0.37/trade)",
+        "threshold": "t_test_p < 0.10"
+      },
+      "G3_regime_presence": {
+        "description": "At least 15 signal-days in non-bear conditions (regime not absent)",
+        "threshold": "non_bear_signal_days >= 15"
+      },
+      "G4_drawdown": {
+        "description": "Max drawdown < 25% during collection window",
+        "threshold": "max_drawdown < 0.25"
+      },
+      "G5_regime_stability": {
+        "description": "Regimes stable (vol, funding, market) for \u2265 80% of hold days",
+        "threshold": "regime_stability_pct >= 0.80"
+      }
+    },
+    "failure_analysis_required": true,
+    "notes": "n=30 is underpowered (power ~40% at per-trade SR=0.37). Failure to reject H0 at p<0.10 is NOT proof of no edge; record as 'insufficient evidence' not 'disproven'."
+  },
+  "collection_spec": {
+    "daily_job": {
+      "trigger": "once per day, after daily close is available (00:05 UTC)",
+      "data_inputs": [
+        "Binance BTCUSDT spot close (from 1m OHLCV, last bar of day)",
+        "Binance USDT-perp daily mean funding rate",
+        "Deribit DVOL close (if available)",
+        "StrataTrade funding bps (if API accessible; optional)"
+      ],
+      "steps": [
+        "1. Load last MIN_HISTORY rows from corpus",
+        "2. Call compute_h6_decision() -> signal + regimes",
+        "3. Write to corpus_daily, regime_states, signal_log",
+        "4. If h6_canonical=1 and not in_hold: open trade_entries row",
+        "5. If open trade and today = planned_exit_day: close trade_exits row",
+        "6. Fill forward labels for any horizon that has elapsed",
+        "7. Update mae_mfe_path for all open trades",
+        "8. Compute attribution at exit",
+        "9. Write run_log row with fn_hash + day_features_hash"
+      ]
+    },
+    "evidence_snapshots": {
+      "trigger": "monthly (first day of each month)",
+      "content": [
+        "Running IS metrics on all completed trades",
+        "DSR on trade returns (non-overlapping 7d)",
+        "Power analysis update (current n vs required n)",
+        "Regime-stability summary",
+        "Source-divergence summary (canonical vs shadow, if shadow available)"
+      ]
+    },
+    "dual_logging": {
+      "canonical": "Binance data \u2192 h6_canonical \u2192 all trade decisions",
+      "shadow": "StrataTrade funding bps (if available) \u2192 h6_shadow \u2192 logged only, never acts",
+      "divergence_metric": "regime_diverges in regime_states; agreement_rate in monthly snapshot"
+    },
+    "determinism_check": {
+      "mechanism": "fn_hash in run_log must match hash in pre_registration.json every run",
+      "alert": "if fn_hash mismatch: abort run, alert operator, do NOT write to signal_log"
+    }
+  },
+  "source_divergence_assessment": {
+    "date": "2026-06-10",
+    "conclusion": "Binance canonical; StrataTrade is execution venue only",
+    "market_regime_agreement": ">99% (SMA200 insensitive to <0.1% cross-exchange spread)",
+    "vol_regime_agreement": ">97% (RV21 insensitive to <0.1% spread)",
+    "funding_regime_agreement": "85-90% (cross-exchange funding correlation ~0.90-0.95 daily)",
+    "h6_trigger_agreement": "~84% (~4-5 disagreement days/year; ~1 trade/year timing diff)",
+    "resolution": "dual-logging: canonical from Binance; shadow from StrataTrade when available"
+  },
+  "lockbox_status": {
+    "window": "2025-06-01 to 2026-05-31",
+    "spent": true,
+    "verdict": "REJECT BOTH (Pure H6 and H6+ATR): 2 trades, both losses, regime absent in -30.3% bear year"
+  },
+  "notes": [
+    "Do not modify decision_function.py after this registration.",
+    "Any parameter change requires VERSION bump + new registration.",
+    "fn_hash in run_log must match decision_function_hash every run.",
+    "h6_shadow is logged for divergence tracking only; never drives decisions.",
+    "Forward evidence window: from first collection day onward."
+  ]
+}
