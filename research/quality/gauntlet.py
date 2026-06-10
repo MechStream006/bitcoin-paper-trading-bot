@@ -31,16 +31,19 @@ _INTERVAL_MS: dict[str, int] = {
     "spot":    60_000,
     "perp":    60_000,
     "funding": 28_800_000,
+    "dvol":    86_400_000,   # Deribit DVOL daily index
 }
 _RECORDS_PER_DAY: dict[str, int] = {
     "spot":    1_440,
     "perp":    1_440,
     "funding": 3,
+    "dvol":    1,
 }
 _PRIMARY_COL: dict[str, str] = {
     "spot":    "close",
     "perp":    "close",
     "funding": "funding_rate",
+    "dvol":    "close",
 }
 
 # ── Timestamp sanity bounds (ms) ──────────────────────────────────────────────
