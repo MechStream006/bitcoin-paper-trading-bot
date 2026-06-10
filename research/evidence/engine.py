@@ -155,6 +155,16 @@ def load_master() -> pd.DataFrame:
            LAST(close ORDER BY open_time ASC) AS c
     FROM spot_1m GROUP BY open_time // 14400000 ORDER BY h_ts
     """)
+
+    # DVOL (Deribit 30d implied-vol index), daily, symbol "BTC"
+    try:
+        register_view(con, "dvol_daily", BASE_DIR, "dvol", "BTC")
+        df_dvol = query(con, """
+        SELECT open_time AS day_ts, close AS dvol_close
+        FROM dvol_daily ORDER BY open_time
+        """)
+    except Exception:
+        df_dvol = pd.DataFrame(columns=["day_ts", "dvol_close"])
     con.close()
 
     m = df_ohlc.merge(df_fund, on="day_ts", how="left").merge(df_perp, on="day_ts", how="left")
@@ -216,6 +226,31 @@ def load_master() -> pd.DataFrame:
     mkt      = build_market_regimes(close_dt)
     mkt_map  = {k.normalize(): v for k, v in mkt.to_dict().items()}
     m["market_regime"] = m["dt"].dt.normalize().dt.tz_localize(None).map(mkt_map).fillna("unknown")
+
+    # ---- DVOL / implied-vol continuous features (reduced options-vol program) ----
+    m = m.merge(df_dvol, on="day_ts", how="left")
+    dvol = m["dvol_close"]                       # DVOL in vol points
+    m["dvol_frac"] = dvol / 100.0                # -> fraction, to match RV
+    # RV30 (horizon-matched to DVOL's 30d), annualized fraction
+    m["rv30"] = (m["log_ret"].rolling(30, min_periods=30).std() * np.sqrt(ANN)).values
+    # ATR ratio (volatility-dynamics continuous feature), ATR14 vs 10 bars ago
+    pc = m["close"].shift(1)
+    tr = pd.concat([(m["high"] - m["low"]), (m["high"] - pc).abs(),
+                    (m["low"] - pc).abs()], axis=1).max(axis=1)
+    atr14 = tr.rolling(14, min_periods=14).mean()
+    m["atr_ratio"] = (atr14 / atr14.shift(10) - 1.0).values
+    # DVOL trailing percentile rank and IV-rank (min-max), 252d backward
+    m["dvol_pctile"] = dvol.rolling(252, min_periods=126).apply(
+        lambda x: float((x[-1] >= x).mean()), raw=True).values
+    dmin = dvol.rolling(252, min_periods=126).min()
+    dmax = dvol.rolling(252, min_periods=126).max()
+    m["dvol_ivrank"] = ((dvol - dmin) / (dmax - dmin)).values
+    # Vol-of-vol: 21d std of DVOL daily log-changes
+    dvol_lr = np.log(dvol / dvol.shift(1))
+    m["vol_of_vol"] = dvol_lr.rolling(21, min_periods=21).std().values
+    # Variance risk premium: spread (primary) and log-ratio (variant)
+    m["vrp_spread"]   = (m["dvol_frac"] - m["rv30"]).values
+    m["vrp_logratio"] = np.log(m["dvol_frac"] / m["rv30"]).values
 
     _CACHE["master"] = m.copy()
     return m

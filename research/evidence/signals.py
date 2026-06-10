@@ -902,6 +902,118 @@ GROUP6 = [
     ),
 ]
 
+# =============================================================================
+# DVOL family — Reduced Options-Volatility Evidence Program (HV-1, HV-2, HV-3)
+# =============================================================================
+
+def sig_implied_vol_regime(m: pd.DataFrame, pctile: int = 33,
+                           method: str = "percentile") -> pd.Series:
+    """HV-1: implied-vol-managed long. Long when DVOL is NOT in the top tercile."""
+    col = m["dvol_pctile"] if method == "percentile" else m["dvol_ivrank"]
+    thresh = (100 - pctile) / 100.0          # top-tercile boundary
+    pos = pd.Series(0.0, index=m.index)
+    pos[col <= thresh] = 1.0
+    pos[col.isna()] = 0.0
+    return pos
+
+
+def sig_vrp_spread(m: pd.DataFrame, pctile: int = 33, rw: int = 252) -> pd.Series:
+    """HV-2 primary: VRP spread (DVOL-RV30). Long when premium rich (contrarian)."""
+    v  = m["vrp_spread"]
+    lo = _roll_q(v, rw, pctile / 100)
+    hi = _roll_q(v, rw, (100 - pctile) / 100)
+    pos = pd.Series(0.0, index=m.index)
+    pos[v > hi] = 1.0      # rich premium / fear -> contrarian long
+    pos[v < lo] = -1.0     # cheap premium / complacency -> short
+    pos[v.isna() | lo.isna() | hi.isna()] = 0.0
+    return pos
+
+
+def sig_vrp_logratio(m: pd.DataFrame, pctile: int = 33, rw: int = 252) -> pd.Series:
+    """HV-2 variant: VRP log-ratio ln(DVOL/RV30). Level-neutral premium."""
+    v  = m["vrp_logratio"]
+    lo = _roll_q(v, rw, pctile / 100)
+    hi = _roll_q(v, rw, (100 - pctile) / 100)
+    pos = pd.Series(0.0, index=m.index)
+    pos[v > hi] = 1.0
+    pos[v < lo] = -1.0
+    pos[v.isna() | lo.isna() | hi.isna()] = 0.0
+    return pos
+
+
+def sig_vol_of_vol(m: pd.DataFrame, pctile: int = 33, rw: int = 252) -> pd.Series:
+    """HV-3: regime stability. Long when vol-of-vol low (stable), short when high."""
+    v  = m["vol_of_vol"]
+    lo = _roll_q(v, rw, pctile / 100)
+    hi = _roll_q(v, rw, (100 - pctile) / 100)
+    pos = pd.Series(0.0, index=m.index)
+    pos[v < lo] = 1.0
+    pos[v > hi] = -1.0
+    pos[v.isna() | lo.isna() | hi.isna()] = 0.0
+    return pos
+
+
+HV1 = SignalSpec(
+    name="HV-1 Implied Vol Regime",
+    group="DVOL Options-Vol",
+    rationale="DVOL (30d implied vol) is the forward-looking risk gauge; staying "
+              "long only outside the top implied-vol tercile is the implied analogue "
+              "of the H5 realized-vol-managed premium.",
+    data_source="Deribit DVOL daily index",
+    feature_def="long when trailing-252 DVOL percentile <= (1 - pctile); flat else.",
+    fn=sig_implied_vol_regime, params={"pctile": 33, "method": "percentile"},
+    variants=[{"pctile": 25, "method": "percentile"},
+              {"pctile": 40, "method": "percentile"},
+              {"pctile": 33, "method": "ivrank"}],
+    hold_days=1,
+)
+
+HV2_SPREAD = SignalSpec(
+    name="HV-2 VRP Spread",
+    group="DVOL Options-Vol",
+    rationale="Variance risk premium (implied minus trailing realized) is the "
+              "canonical options edge; a rich premium prices fear and tends to "
+              "precede positive forward returns. Spread form (absolute, vol points).",
+    data_source="Deribit DVOL + spot RV30",
+    feature_def="VRP = DVOL_frac - RV30 (ex-ante, trailing RV); long when VRP in "
+                "top tercile, short in bottom.",
+    fn=sig_vrp_spread, params={"pctile": 33, "rw": 252},
+    variants=[{"pctile": 25, "rw": 252}, {"pctile": 40, "rw": 252},
+              {"pctile": 33, "rw": 365}],
+    hold_days=1,
+)
+
+HV2_LOGRATIO = SignalSpec(
+    name="HV-2 VRP LogRatio",
+    group="DVOL Options-Vol",
+    rationale="Level-neutral VRP: ln(DVOL/RV30) cancels the common vol level "
+              "multiplicatively, isolating proportional richness. Pre-registered "
+              "robustness variant of HV-2 (one discovery, not two).",
+    data_source="Deribit DVOL + spot RV30",
+    feature_def="ln(DVOL_frac / RV30) (ex-ante, trailing RV); long top tercile, "
+                "short bottom.",
+    fn=sig_vrp_logratio, params={"pctile": 33, "rw": 252},
+    variants=[{"pctile": 25, "rw": 252}, {"pctile": 40, "rw": 252},
+              {"pctile": 33, "rw": 365}],
+    hold_days=1,
+)
+
+HV3 = SignalSpec(
+    name="HV-3 Vol-of-Vol",
+    group="DVOL Options-Vol",
+    rationale="Volatility of DVOL marks instability of the risk regime; rising "
+              "vol-of-vol signals uncertainty/convexity demand. Evaluated primarily "
+              "as a conditioning variable.",
+    data_source="Deribit DVOL daily index",
+    feature_def="21d std of DVOL daily log-changes; long when low tercile (stable), "
+                "short when high.",
+    fn=sig_vol_of_vol, params={"pctile": 33, "rw": 252},
+    variants=[{"pctile": 25, "rw": 252}, {"pctile": 40, "rw": 252}],
+    hold_days=1,
+)
+
+DVOL_FAMILY = [HV1, HV2_SPREAD, HV2_LOGRATIO, HV3]
+
 REGISTRY = {
     "seeds":  SEEDS,
     "group1": GROUP1,
@@ -910,4 +1022,5 @@ REGISTRY = {
     "group4": GROUP4,
     "group5": GROUP5,
     "group6": GROUP6,
+    "dvol":   DVOL_FAMILY,
 }
