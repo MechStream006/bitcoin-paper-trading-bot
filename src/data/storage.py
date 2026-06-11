@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE TABLE IF NOT EXISTS option_quotes (
     instrument_id INTEGER NOT NULL,
     ts            TEXT    NOT NULL,
+    exch_ts       INTEGER,
     spot_price    REAL,
     mark_price    REAL,
     close         REAL,
@@ -128,6 +129,13 @@ CREATE TABLE IF NOT EXISTS funding_snapshots (
     funding_interval          INTEGER,
     PRIMARY KEY (symbol, ts)
 );
+
+CREATE TABLE IF NOT EXISTS instrument_map_log (
+    seen_date TEXT    NOT NULL,
+    id        INTEGER NOT NULL,
+    symbol    TEXT    NOT NULL,
+    PRIMARY KEY (seen_date, id)
+);
 """
 
 
@@ -136,6 +144,21 @@ def _to_float(x) -> float | None:
         return None
     try:
         return float(x)
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_int(x) -> int | None:
+    """Coerce to int, tolerating native ints and numeric strings.
+
+    Delta sends the option-ticker `timestamp` as a native int (microseconds
+    since epoch), but other numeric fields arrive as strings; handle both so
+    a future payload-shape change does not silently drop exch_ts.
+    """
+    if x is None:
+        return None
+    try:
+        return int(float(x))
     except (ValueError, TypeError):
         return None
 
@@ -155,16 +178,17 @@ def write_option_quote(
     conn.execute(
         """
         INSERT OR REPLACE INTO option_quotes
-        (instrument_id, ts, spot_price, mark_price, close,
+        (instrument_id, ts, exch_ts, spot_price, mark_price, close,
          best_bid, best_ask, bid_qty, ask_qty,
          mark_iv, bid_iv, ask_iv,
          delta, gamma, theta, vega, rho,
          oi, oi_contracts, oi_value_usd,
          volume_24h)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             instrument_id, ts,
+            _to_int(ticker_msg.get("timestamp")),
             _to_float(ticker_msg.get("spot_price")),
             _to_float(ticker_msg.get("mark_price")),
             _to_float(ticker_msg.get("close")),

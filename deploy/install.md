@@ -120,6 +120,8 @@ sudo cp /opt/btcbot/deploy/btcbot-healthcheck.service  /etc/systemd/system/
 sudo cp /opt/btcbot/deploy/btcbot-healthcheck.timer    /etc/systemd/system/
 sudo cp /opt/btcbot/deploy/btcbot-evidence.service     /etc/systemd/system/
 sudo cp /opt/btcbot/deploy/btcbot-evidence.timer       /etc/systemd/system/
+sudo cp /opt/btcbot/deploy/btcbot-mapsnap.service      /etc/systemd/system/
+sudo cp /opt/btcbot/deploy/btcbot-mapsnap.timer        /etc/systemd/system/
 
 sudo systemctl daemon-reload
 ```
@@ -145,6 +147,10 @@ sudo systemctl start  btcbot-healthcheck.timer
 # Forward evidence timer (runs daily at 00:05 UTC)
 sudo systemctl enable btcbot-evidence.timer
 sudo systemctl start  btcbot-evidence.timer
+
+# Instrument id->symbol map snapshot timer (runs daily at 12:30 UTC)
+sudo systemctl enable btcbot-mapsnap.timer
+sudo systemctl start  btcbot-mapsnap.timer
 ```
 
 ---
@@ -223,14 +229,19 @@ Off-host failure is non-fatal — the local backup is always written first.
 
 ```bash
 cd /opt/btcbot
+sudo systemctl stop btcbot
+sudo -u btcbot /opt/btcbot/venv/bin/python scripts/backup.py --all   # snapshot first
 sudo -u btcbot git pull --ff-only
 sudo -u btcbot /opt/btcbot/venv/bin/pip install -r requirements.txt
+
+# Apply any pending schema migrations (idempotent — safe to run every update):
+sudo -u btcbot /opt/btcbot/venv/bin/python scripts/migrate.py
 
 # If deploy/*.service or deploy/*.timer files changed, re-copy and reload:
 # sudo cp /opt/btcbot/deploy/btcbot*.service /etc/systemd/system/
 # sudo cp /opt/btcbot/deploy/btcbot*.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 
-sudo systemctl restart btcbot
+sudo systemctl start btcbot
 sudo systemctl status btcbot
 ```

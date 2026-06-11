@@ -1,0 +1,16 @@
+[Unit]
+Description=BTC Bot instrument map snapshot — daily 12:30 UTC
+Documentation=file:/opt/btcbot/deploy/install.md
+Requires=btcbot-mapsnap.service
+
+[Timer]
+# 12:30 UTC — after the 12:00 settlement + 12:05 reconcile, so the snapshot
+# reflects the post-rollover universe (clear of the 11:58-12:06 dead zone).
+OnCalendar=*-*-* 12:30:00 UTC
+# Small spread to avoid disk I/O contention with other jobs.
+RandomizedDelaySec=60
+# Run on next boot if the scheduled time was missed (no silently skipped days).
+Persistent=true
+
+[Install]
+WantedBy=timers.target
