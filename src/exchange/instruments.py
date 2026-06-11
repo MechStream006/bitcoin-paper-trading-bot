@@ -18,7 +18,12 @@ def refresh_chain(client: DeltaClient, conn: sqlite3.Connection) -> int:
     Returns the number of BTC option products written.
     """
     resp = client.get_products(contract_types="call_options,put_options", states="live")
-    products = resp.get("result", []) if isinstance(resp, dict) else []
+    products = resp.get("result") if isinstance(resp, dict) else None
+    if not isinstance(products, list):
+        raise ValueError(
+            f"refresh_chain: unexpected response from {client.base_url} "
+            f"(result={products!r})"
+        )
     btc_options = [
         p for p in products
         if (p.get("underlying_asset") or {}).get("symbol") == "BTC"
@@ -33,7 +38,12 @@ def refresh_chain(client: DeltaClient, conn: sqlite3.Connection) -> int:
 def get_btc_mark_price(client: DeltaClient) -> float:
     """Current BTC perpetual mark price (testnet symbol BTCUSDT — see CLAUDE.md §11)."""
     resp = client.get_ticker("BTCUSDT")
-    result = resp.get("result", {}) if isinstance(resp, dict) else {}
+    result = resp.get("result") if isinstance(resp, dict) else None
+    if not isinstance(result, dict):
+        raise ValueError(
+            f"get_btc_mark_price: unexpected response from {client.base_url} "
+            f"(result={result!r})"
+        )
     return float(result["mark_price"])
 
 
@@ -97,5 +107,10 @@ def fetch_chain_quotes(client: DeltaClient) -> dict[str, dict]:
         contract_types="call_options,put_options",
         underlying_asset_symbols="BTC",
     )
-    result = resp.get("result", []) if isinstance(resp, dict) else []
+    result = resp.get("result") if isinstance(resp, dict) else None
+    if not isinstance(result, list):
+        raise ValueError(
+            f"fetch_chain_quotes: unexpected response from {client.base_url} "
+            f"(result={result!r})"
+        )
     return {t.get("symbol"): t for t in result if t.get("symbol")}

@@ -9,7 +9,7 @@ load_dotenv(ROOT / ".env")
 
 DELTA_API_KEY = os.getenv("DELTA_API_KEY", "")
 DELTA_API_SECRET = os.getenv("DELTA_API_SECRET", "")
-DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://testnet-api.delta.exchange")
+DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
 DELTA_WS_URL = os.getenv("DELTA_WS_URL", "wss://testnet-socket.delta.exchange")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
