@@ -27,7 +27,7 @@ class MarketState:
 
     Args:
         universe: Initial option symbols to track.  Funding symbols like
-                  BTCUSDT are stored unconditionally in funding regardless
+                  BTCUSD are stored unconditionally in funding regardless
                   of this list.
 
     Lock discipline
@@ -79,7 +79,7 @@ class MarketState:
             logger.warning("[market_state] update_ticker: %s not in universe, ignoring", symbol)
 
     def update_funding(self, symbol: str, payload: dict) -> None:
-        """Store the latest funding_rate payload for `symbol` (e.g. BTCUSDT)."""
+        """Store the latest funding_rate payload for `symbol` (e.g. BTCUSD)."""
         now = time.monotonic()
         with self._lock:
             self._funding[symbol] = payload
@@ -115,7 +115,7 @@ class MarketState:
           - freshness_sec(sym)   returns None
 
         Funding state (_funding, _funding_ts) is keyed by perpetual symbols
-        (e.g. BTCUSDT), not option symbols.  It is never touched here.
+        (e.g. BTCUSD), not option symbols.  It is never touched here.
 
         Dependency direction
         --------------------
@@ -279,7 +279,7 @@ if __name__ == "__main__":
 
     ms.update_ticker("C-BTC-95000-280526", {"mark_price": "95100.5", "greeks": {"delta": "0.52"}})
     ms.update_ticker("P-BTC-95000-280526", {"mark_price": "400.0"})
-    ms.update_funding("BTCUSDT", {"funding_rate": "0.0001"})
+    ms.update_funding("BTCUSD", {"funding_rate": "0.0001"})
 
     print(f"coverage      : {ms.coverage_pct():.1%}")
     fresh = ms.freshness_sec("C-BTC-95000-280526")

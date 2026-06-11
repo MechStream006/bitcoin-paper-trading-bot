@@ -387,9 +387,9 @@ if __name__ == "__main__":
         "oi": "0", "oi_contracts": "5", "oi_value_usd": "475502.5",
         "volume": "12",
     })
-    ms.update_funding("BTCUSDT", {
+    ms.update_funding("BTCUSD", {
         "type": "funding_rate",
-        "symbol": "BTCUSDT",
+        "symbol": "BTCUSD",
         "funding_rate": "0.0001",
         "funding_rate_8h": "0.0003",
         "predicted_funding_rate": "0.00012",

@@ -36,8 +36,8 @@ def refresh_chain(client: DeltaClient, conn: sqlite3.Connection) -> int:
 
 
 def get_btc_mark_price(client: DeltaClient) -> float:
-    """Current BTC perpetual mark price (testnet symbol BTCUSDT — see CLAUDE.md §11)."""
-    resp = client.get_ticker("BTCUSDT")
+    """Current BTC perpetual mark price (testnet symbol BTCUSD — see CLAUDE.md §11)."""
+    resp = client.get_ticker("BTCUSD")
     result = resp.get("result") if isinstance(resp, dict) else None
     if not isinstance(result, dict):
         raise ValueError(
