@@ -12,6 +12,8 @@ Schema versions
             - collection_metrics table        (per-cycle coverage/skip/fail)
   2 -> 3  Freshness observability:
             - collection_metrics.stale_count INTEGER  (stalls hidden by coverage)
+  3 -> 4  Daily certifier infrastructure:
+            - daily_certifier_log table       (per-day evidence admissibility verdicts)
 
 Run from the repo root (bot stopped is recommended but not required — the
 ALTER is a metadata-only operation under WAL):
@@ -31,7 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-TARGET_VERSION = 3
+TARGET_VERSION = 4
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -127,6 +129,34 @@ def migrate(conn: sqlite3.Connection, *, dry_run: bool = False) -> int:
         print("  + PRAGMA user_version = 3")
         if not dry_run:
             conn.execute("PRAGMA user_version = 3")
+
+    # --- 3 -> 4 -----------------------------------------------------------
+    need_certifier_log = not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='daily_certifier_log'"
+    ).fetchone()
+
+    if need_certifier_log:
+        print("  + CREATE TABLE daily_certifier_log")
+        if not dry_run:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_certifier_log (
+                    day               TEXT NOT NULL PRIMARY KEY,
+                    run_ts            TEXT NOT NULL,
+                    verdict           TEXT NOT NULL,
+                    platform          TEXT,
+                    certifier_version TEXT,
+                    checks_json       TEXT NOT NULL
+                )
+                """
+            )
+    else:
+        print("  = daily_certifier_log already present")
+
+    if version < 4:
+        print("  + PRAGMA user_version = 4")
+        if not dry_run:
+            conn.execute("PRAGMA user_version = 4")
 
     if not dry_run:
         conn.commit()

@@ -141,6 +141,19 @@ CREATE TABLE IF NOT EXISTS instrument_map_log (
     PRIMARY KEY (seen_date, id)
 );
 
+-- One row per certified day. Written by scripts/certify_day.py.
+-- Append-only: INSERT OR REPLACE on re-run (run_ts records the latest run).
+-- Research store reads verdict + platform to gate evidence admissibility.
+-- GREEN = all Tier-A checks pass.  AMBER = requires adjudication.  RED = non-admissible.
+CREATE TABLE IF NOT EXISTS daily_certifier_log (
+    day               TEXT NOT NULL PRIMARY KEY,  -- YYYY-MM-DD UTC
+    run_ts            TEXT NOT NULL,              -- ISO-8601 UTC, certifier run time
+    verdict           TEXT NOT NULL,              -- GREEN / AMBER / RED
+    platform          TEXT,                       -- testnet / mainnet
+    certifier_version TEXT,                       -- git SHA
+    checks_json       TEXT NOT NULL               -- JSON: {check_id: {result, value, threshold, note, provisional}}
+);
+
 -- One row per SnapshotWriter cycle. Persists per-cycle collection quality so
 -- coverage is auditable retrospectively from the DB alone (journald rotates).
 -- coverage_pct is a fraction in [0.0, 1.0]. wrote/skipped/failed are option_quote

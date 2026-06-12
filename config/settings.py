@@ -18,3 +18,9 @@ TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
 ENV = os.getenv("ENV", "dev")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DB_PATH = ROOT / os.getenv("DB_PATH", "data/btc_trading.db")
+
+# Platform discriminator — "testnet" or "mainnet".
+# Default is "testnet" (safe-fail: evidence never silently promoted to mainnet
+# status by misconfiguration). Set PLATFORM=mainnet in .env only after the
+# mainnet collector is validated and the certifier thresholds are calibrated.
+PLATFORM = os.getenv("PLATFORM", "testnet")
