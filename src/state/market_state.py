@@ -216,6 +216,15 @@ class MarketState:
         with self._lock:
             return len(self._universe)
 
+    def reconcile_count(self) -> int:
+        """Number of non-no-op reconcile_universe() calls since construction.
+
+        Monotonic. Persisted per snapshot cycle so a coverage dip can be
+        correlated with a universe change after the fact.
+        """
+        with self._lock:
+            return self._reconcile_count
+
     # ------------------------------------------------------------------
     # Observability
     # ------------------------------------------------------------------

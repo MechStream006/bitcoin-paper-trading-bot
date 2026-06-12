@@ -136,7 +136,29 @@ CREATE TABLE IF NOT EXISTS instrument_map_log (
     symbol    TEXT    NOT NULL,
     PRIMARY KEY (seen_date, id)
 );
+
+-- One row per SnapshotWriter cycle. Persists per-cycle collection quality so
+-- coverage is auditable retrospectively from the DB alone (journald rotates).
+-- coverage_pct is a fraction in [0.0, 1.0]. wrote/skipped/failed are option_quote
+-- counts (funding is a single symbol, excluded from coverage accounting).
+CREATE TABLE IF NOT EXISTS collection_metrics (
+    ts              TEXT    NOT NULL PRIMARY KEY,
+    universe_size   INTEGER,
+    coverage_pct    REAL,
+    wrote           INTEGER,
+    skipped         INTEGER,
+    failed          INTEGER,
+    reconcile_count INTEGER
+);
 """
+
+# exch_ts sanity band (microseconds since epoch).
+#   1e15 µs  = 2001-09-09   — anything below is almost certainly milliseconds
+#              (the documented Binance ms/µs failure mode) or otherwise corrupt.
+#   1e16 µs  = 2286-11-20   — anything at/above is likely nanoseconds or corrupt.
+# Live BTC option timestamps sit around 1.78e15 (year 2026), well inside the band.
+EXCH_TS_MIN = 1_000_000_000_000_000
+EXCH_TS_MAX = 10_000_000_000_000_000
 
 
 def _to_float(x) -> float | None:
@@ -161,6 +183,28 @@ def _to_int(x) -> int | None:
         return int(float(x))
     except (ValueError, TypeError):
         return None
+
+
+def coerce_exch_ts(raw) -> int | None:
+    """Coerce a raw `timestamp` field to a band-validated exch_ts.
+
+    Returns the integer microsecond timestamp when it parses AND falls inside
+    the sane band [EXCH_TS_MIN, EXCH_TS_MAX). Returns None when the value is
+    absent, unparseable, or out of band — an out-of-band value (e.g. Delta
+    silently switching to milliseconds, as Binance once did) is treated as
+    "no valid exchange timestamp" rather than stored as a wrong-magnitude
+    number that would silently poison the wall_ts - exch_ts staleness proxy.
+
+    Pure function — no logging. Callers that want to alert on rejections
+    (e.g. SnapshotWriter) re-check with this helper and emit an aggregated
+    warning, so a systematic format shift does not flood the log per-row.
+    """
+    v = _to_int(raw)
+    if v is None:
+        return None
+    if v < EXCH_TS_MIN or v >= EXCH_TS_MAX:
+        return None
+    return v
 
 
 def write_option_quote(
@@ -188,7 +232,7 @@ def write_option_quote(
         """,
         (
             instrument_id, ts,
-            _to_int(ticker_msg.get("timestamp")),
+            coerce_exch_ts(ticker_msg.get("timestamp")),
             _to_float(ticker_msg.get("spot_price")),
             _to_float(ticker_msg.get("mark_price")),
             _to_float(ticker_msg.get("close")),
@@ -209,6 +253,31 @@ def write_option_quote(
             _to_float(ticker_msg.get("oi_value_usd")),
             _to_float(ticker_msg.get("volume")),
         ),
+    )
+
+
+def write_collection_metrics(
+    conn: sqlite3.Connection,
+    ts: str,
+    universe_size: int,
+    coverage_pct: float,
+    wrote: int,
+    skipped: int,
+    failed: int,
+    reconcile_count: int,
+) -> None:
+    """Insert one collection_metrics row for a SnapshotWriter cycle.
+
+    Keyed on ts (one cycle = one batch timestamp). INSERT OR REPLACE so a
+    retried cycle with the same ts overwrites rather than errors.
+    """
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO collection_metrics
+        (ts, universe_size, coverage_pct, wrote, skipped, failed, reconcile_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (ts, universe_size, coverage_pct, wrote, skipped, failed, reconcile_count),
     )
 
 

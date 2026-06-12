@@ -41,7 +41,14 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.data.storage import write_funding_snapshot, write_option_quote
+from src.data.storage import (
+    EXCH_TS_MAX,
+    EXCH_TS_MIN,
+    coerce_exch_ts,
+    write_collection_metrics,
+    write_funding_snapshot,
+    write_option_quote,
+)
 from src.runtime.errors import ComponentFailure
 from src.runtime.health import HealthStatus
 from src.state.market_state import MarketState
@@ -205,6 +212,12 @@ class SnapshotWriter:
         tickers = self._state.all_tickers()
         fundings = self._state.all_funding()
 
+        # Capture coverage metrics at the same instant as the ticker pull so
+        # the persisted collection_metrics row is self-consistent.
+        universe_size = self._state.universe_size()
+        coverage_pct = self._state.coverage_pct()
+        reconcile_count = self._state.reconcile_count()
+
         # ------------------------------------------------------------------
         # Phase 3: load current instrument symbol->id map from DB.
         #          Single SELECT covers any chain refreshes since last snapshot.
@@ -222,6 +235,7 @@ class SnapshotWriter:
         #          rows that did write.
         # ------------------------------------------------------------------
         wrote_q, skipped_q, failed_q = 0, 0, 0
+        exch_ts_bad = 0  # tickers whose timestamp is present but out of sane band
 
         for sym, msg in tickers.items():
             iid = instrument_map.get(sym)
@@ -231,6 +245,11 @@ class SnapshotWriter:
                     "[snapshot_writer] skipping %s — not in instruments table", sym
                 )
                 continue
+            # exch_ts guard: count (don't log per-row) so a systematic format
+            # shift surfaces as one aggregated warning, not a per-symbol flood.
+            raw_ts = msg.get("timestamp")
+            if raw_ts is not None and coerce_exch_ts(raw_ts) is None:
+                exch_ts_bad += 1
             try:
                 write_option_quote(self._conn, iid, ts, msg)
                 wrote_q += 1
@@ -256,6 +275,24 @@ class SnapshotWriter:
                     "[snapshot_writer] funding_snapshot write failed for %s: %s: %s",
                     sym, type(exc).__name__, exc,
                 )
+
+        # ------------------------------------------------------------------
+        # Phase 5b: persist per-cycle collection metrics (best-effort).
+        #           Written into the same transaction as the quotes so it is
+        #           atomic with them, but wrapped so a metrics failure NEVER
+        #           jeopardizes the core corpus — observability must not
+        #           endanger data collection.
+        # ------------------------------------------------------------------
+        try:
+            write_collection_metrics(
+                self._conn, ts, universe_size, coverage_pct,
+                wrote_q, skipped_q, failed_q, reconcile_count,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[snapshot_writer] collection_metrics write failed "
+                "(non-fatal): %s: %s", type(exc).__name__, exc,
+            )
 
         # ------------------------------------------------------------------
         # Phase 6: COMMIT — all-or-nothing for the rows that reached here.
@@ -284,6 +321,15 @@ class SnapshotWriter:
             self._total_rows_written += total_wrote
             self._last_snapshot_at = time.time()
             self._last_snapshot_rows = total_wrote
+
+        # Aggregated exch_ts guard warning (one line per cycle, never per-row).
+        if exch_ts_bad:
+            logger.warning(
+                "[snapshot_writer] %d/%d exch_ts values out of sane band "
+                "[%d, %d) this cycle — possible Delta timestamp format change "
+                "(stored as NULL)",
+                exch_ts_bad, wrote_q, EXCH_TS_MIN, EXCH_TS_MAX,
+            )
 
         result = SnapshotResult(
             ts=ts,

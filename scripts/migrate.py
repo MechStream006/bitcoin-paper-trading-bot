@@ -8,6 +8,8 @@ Schema versions
   0 -> 1  Tier-0 observability:
             - option_quotes.exch_ts INTEGER  (exchange tick time, microseconds)
             - instrument_map_log table        (daily id->symbol snapshots)
+  1 -> 2  Collection-quality observability:
+            - collection_metrics table        (per-cycle coverage/skip/fail)
 
 Run from the repo root (bot stopped is recommended but not required — the
 ALTER is a metadata-only operation under WAL):
@@ -27,7 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-TARGET_VERSION = 1
+TARGET_VERSION = 2
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -75,6 +77,35 @@ def migrate(conn: sqlite3.Connection, *, dry_run: bool = False) -> int:
         print("  + PRAGMA user_version = 1")
         if not dry_run:
             conn.execute("PRAGMA user_version = 1")
+
+    # --- 1 -> 2 -----------------------------------------------------------
+    need_metrics = not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_metrics'"
+    ).fetchone()
+
+    if need_metrics:
+        print("  + CREATE TABLE collection_metrics")
+        if not dry_run:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS collection_metrics (
+                    ts              TEXT    NOT NULL PRIMARY KEY,
+                    universe_size   INTEGER,
+                    coverage_pct    REAL,
+                    wrote           INTEGER,
+                    skipped         INTEGER,
+                    failed          INTEGER,
+                    reconcile_count INTEGER
+                )
+                """
+            )
+    else:
+        print("  = collection_metrics already present")
+
+    if version < 2:
+        print("  + PRAGMA user_version = 2")
+        if not dry_run:
+            conn.execute("PRAGMA user_version = 2")
 
     if not dry_run:
         conn.commit()
