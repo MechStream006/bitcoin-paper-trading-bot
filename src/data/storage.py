@@ -118,6 +118,10 @@ CREATE TABLE IF NOT EXISTS option_quotes (
     FOREIGN KEY (instrument_id) REFERENCES instruments(id)
 );
 
+-- DORMANT / NOT-YET-WIRED (see CLAUDE.md "Dormant: funding_snapshots not wired").
+-- The live runtime subscribes only v2/ticker over options; no funding_rate
+-- channel is subscribed, so this table is intentionally empty at Layer 2d.
+-- The write path (write_funding_snapshot) is exercised by tests only.
 CREATE TABLE IF NOT EXISTS funding_snapshots (
     symbol                    TEXT    NOT NULL,
     ts                        TEXT    NOT NULL,
@@ -141,6 +145,12 @@ CREATE TABLE IF NOT EXISTS instrument_map_log (
 -- coverage is auditable retrospectively from the DB alone (journald rotates).
 -- coverage_pct is a fraction in [0.0, 1.0]. wrote/skipped/failed are option_quote
 -- counts (funding is a single symbol, excluded from coverage accounting).
+--
+-- coverage_pct measures "ever-ticked-and-still-in-universe", NOT freshness, so it
+-- stays 1.0 during a ticker stall. stale_count is the freshness counterpart:
+-- universe symbols with no tick within STALE_THRESHOLD_SEC at sample time. The
+-- pair disambiguates: coverage_pct<1 => some symbol never ticked (new/dead);
+-- coverage_pct=1 AND stale_count>0 => symbols ticked once but are now stale.
 CREATE TABLE IF NOT EXISTS collection_metrics (
     ts              TEXT    NOT NULL PRIMARY KEY,
     universe_size   INTEGER,
@@ -148,7 +158,8 @@ CREATE TABLE IF NOT EXISTS collection_metrics (
     wrote           INTEGER,
     skipped         INTEGER,
     failed          INTEGER,
-    reconcile_count INTEGER
+    reconcile_count INTEGER,
+    stale_count     INTEGER
 );
 """
 
@@ -265,6 +276,7 @@ def write_collection_metrics(
     skipped: int,
     failed: int,
     reconcile_count: int,
+    stale_count: int,
 ) -> None:
     """Insert one collection_metrics row for a SnapshotWriter cycle.
 
@@ -274,10 +286,12 @@ def write_collection_metrics(
     conn.execute(
         """
         INSERT OR REPLACE INTO collection_metrics
-        (ts, universe_size, coverage_pct, wrote, skipped, failed, reconcile_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (ts, universe_size, coverage_pct, wrote, skipped, failed,
+         reconcile_count, stale_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (ts, universe_size, coverage_pct, wrote, skipped, failed, reconcile_count),
+        (ts, universe_size, coverage_pct, wrote, skipped, failed,
+         reconcile_count, stale_count),
     )
 
 

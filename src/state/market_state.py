@@ -27,8 +27,11 @@ class MarketState:
 
     Args:
         universe: Initial option symbols to track.  Funding symbols like
-                  BTCUSD are stored unconditionally in funding regardless
-                  of this list.
+                  BTCUSD would be stored unconditionally in funding regardless
+                  of this list — but funding is DORMANT at Layer 2d: no
+                  funding_rate channel is subscribed, so update_funding is
+                  never called in the live runtime (see CLAUDE.md "Dormant:
+                  funding_snapshots not wired").
 
     Lock discipline
     ---------------
@@ -79,7 +82,11 @@ class MarketState:
             logger.warning("[market_state] update_ticker: %s not in universe, ignoring", symbol)
 
     def update_funding(self, symbol: str, payload: dict) -> None:
-        """Store the latest funding_rate payload for `symbol` (e.g. BTCUSD)."""
+        """Store the latest funding_rate payload for `symbol` (e.g. BTCUSD).
+
+        DORMANT at Layer 2d: no funding_rate channel is subscribed, so this is
+        called by tests only, never by the live WS thread (see CLAUDE.md).
+        """
         now = time.monotonic()
         with self._lock:
             self._funding[symbol] = payload

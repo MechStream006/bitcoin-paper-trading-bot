@@ -55,6 +55,13 @@ from src.state.market_state import MarketState
 
 logger = logging.getLogger(__name__)
 
+# Freshness threshold for the persisted stale_count metric. A universe symbol
+# with no tick within this many seconds is counted stale. 30s matches the value
+# HeartbeatService already uses for its operator-facing "N stale" line, so the
+# persisted metric and the live heartbeat agree. mark_price cadence is ~3s
+# (CLAUDE.md §13), so 30s = ~10 missed updates before a symbol is flagged.
+STALE_THRESHOLD_SEC = 30.0
+
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -217,6 +224,9 @@ class SnapshotWriter:
         universe_size = self._state.universe_size()
         coverage_pct = self._state.coverage_pct()
         reconcile_count = self._state.reconcile_count()
+        # Freshness counterpart to coverage_pct: symbols with no recent tick.
+        # Exposes ticker stalls that coverage_pct (ever-ticked) would hide.
+        stale_count = len(self._state.stale_symbols(STALE_THRESHOLD_SEC))
 
         # ------------------------------------------------------------------
         # Phase 3: load current instrument symbol->id map from DB.
@@ -262,6 +272,10 @@ class SnapshotWriter:
 
         # ------------------------------------------------------------------
         # Phase 5: write funding_snapshots
+        # DORMANT at Layer 2d: no funding_rate channel is subscribed, so
+        # `fundings` is empty in the live runtime and this loop is a no-op.
+        # Kept wired so collection begins automatically if/when a funding
+        # subscription is added (deferred future work — see CLAUDE.md).
         # ------------------------------------------------------------------
         wrote_f, failed_f = 0, 0
 
@@ -286,7 +300,7 @@ class SnapshotWriter:
         try:
             write_collection_metrics(
                 self._conn, ts, universe_size, coverage_pct,
-                wrote_q, skipped_q, failed_q, reconcile_count,
+                wrote_q, skipped_q, failed_q, reconcile_count, stale_count,
             )
         except Exception as exc:
             logger.warning(

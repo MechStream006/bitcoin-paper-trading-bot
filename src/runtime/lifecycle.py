@@ -308,6 +308,12 @@ class Runtime:
         self._market_state = market_state
 
         # 5. WSManager
+        # NOTE (funding is DORMANT — see CLAUDE.md "Dormant: funding_snapshots
+        # not wired"): only v2/ticker over the option universe is subscribed.
+        # No funding_rate channel and no BTCUSD perp are subscribed, so
+        # funding_snapshots is intentionally never populated at Layer 2d. The
+        # update_funding / write_funding_snapshot path exists but is unfed.
+        # Wiring funding collection is deferred future work, not a bug.
         channels = [{"name": "v2/ticker", "symbols": universe}]
         ws_manager = WSManager(
             url=self._delta_ws_url,

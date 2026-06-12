@@ -10,6 +10,8 @@ Schema versions
             - instrument_map_log table        (daily id->symbol snapshots)
   1 -> 2  Collection-quality observability:
             - collection_metrics table        (per-cycle coverage/skip/fail)
+  2 -> 3  Freshness observability:
+            - collection_metrics.stale_count INTEGER  (stalls hidden by coverage)
 
 Run from the repo root (bot stopped is recommended but not required — the
 ALTER is a metadata-only operation under WAL):
@@ -29,7 +31,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-TARGET_VERSION = 2
+TARGET_VERSION = 3
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -106,6 +108,25 @@ def migrate(conn: sqlite3.Connection, *, dry_run: bool = False) -> int:
         print("  + PRAGMA user_version = 2")
         if not dry_run:
             conn.execute("PRAGMA user_version = 2")
+
+    # --- 2 -> 3 -----------------------------------------------------------
+    metrics_cols = _columns(conn, "collection_metrics")
+    # Guard: only meaningful if collection_metrics exists (it does after 1->2).
+    need_stale = bool(metrics_cols) and "stale_count" not in metrics_cols
+
+    if need_stale:
+        print("  + ALTER collection_metrics ADD COLUMN stale_count INTEGER")
+        if not dry_run:
+            conn.execute(
+                "ALTER TABLE collection_metrics ADD COLUMN stale_count INTEGER"
+            )
+    else:
+        print("  = collection_metrics.stale_count already present")
+
+    if version < 3:
+        print("  + PRAGMA user_version = 3")
+        if not dry_run:
+            conn.execute("PRAGMA user_version = 3")
 
     if not dry_run:
         conn.commit()
