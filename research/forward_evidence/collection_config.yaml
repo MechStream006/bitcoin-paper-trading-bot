@@ -1,0 +1,41 @@
+---
+# Forward evidence collection configuration.
+# Single source of truth for economic assumptions shared across H5, G1, G3.
+# Changes to cost_bps or schedule require a governance review note in CLAUDE.md §16.
+
+schedule:
+  utc_hour: 1
+  utc_minute: 0
+  # DQ4 resolution (2026-06-15): Binance REST API publishes completed 1m candles
+  # with zero lag after 00:00:00 UTC. The CCXT fallback in ingest/binance_ohlcv.py
+  # fetches the current month's data. 01:00 UTC provides a 60-minute margin.
+  # PRE-CONDITION: a Parquet ingest job (ingest/binance_ohlcv.py) must complete
+  # before this runner fires. Recommended ingest schedule: 00:30 UTC daily.
+  # If no automated ingest exists, run ingest manually between 00:15-00:45 UTC
+  # and consider moving collection to 02:00 UTC.
+
+signals:
+  h5_vol_regime:
+    cost_bps: 15.0
+    pre_reg_file: forward_evidence/pre_registration_h5_vol_regime.json
+    decision_function_file: forward_evidence/decision_function_h5.py
+    decision_function_module: forward_evidence.decision_function_h5
+
+  g1_market_regime_sma200:
+    cost_bps: 15.0
+    pre_reg_file: forward_evidence/pre_registration_g1_market_regime_sma200.json
+    decision_function_file: forward_evidence/decision_function_g1_market_regime.py
+    decision_function_module: forward_evidence.decision_function_g1_market_regime
+
+  g3_momentum_tsmom:
+    cost_bps: 15.0
+    pre_reg_file: forward_evidence/pre_registration_g3_tsmom.json
+    decision_function_file: forward_evidence/decision_function_g3_tsmom.py
+    decision_function_module: forward_evidence.decision_function_g3_tsmom
+
+ohlcv:
+  # Relative to the research/ root directory.
+  # Parquet layout: {parquet_dir}/year=YYYY/month=MM/data.parquet
+  # Columns: open_time (int64 ms UTC), open, high, low, close, volume (all float64 except open_time)
+  parquet_dir: data/raw/spot/BTCUSDT
+  symbol: BTCUSDT

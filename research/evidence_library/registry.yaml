@@ -1,0 +1,890 @@
+# Evidence Library — Signal Registry
+# Human-editable source of truth. Git-tracked.
+# Machine validation: python report.py --check
+#
+# State transitions must be supported by a pinned_run in ledger.db.
+# After running seed_from_scoreboard.py, fill in pinned_run UUIDs from its output.
+#
+# Initial states assigned 2026-06-13 by applying the frozen Candidate gate
+# retroactively to the 34-signal Phase B battery (evidence_library.json, 2026-06-10).
+# See governance session 2026-06-13 for threshold justification.
+#
+# GOVERNANCE NOTES:
+# - 7 signals pass Candidate gate (not 6 from FINAL_AUDIT).
+# - ATR Expansion and ATR Compression: sensitivity=50% fails 60% gate (gray zone,
+#   not auto-DQ). Both remain discovery. FINAL_AUDIT included them editorially
+#   before the Candidate gate was frozen — the frozen gate is authoritative.
+# - TSMOM, 4H Trend, Trend Regime MA: pass Candidate gate; excluded from FINAL_AUDIT
+#   editorially. Now formally Candidate.
+# - Inside Bar (0% sensitivity), OBV Trend (33%), Breakout Donchian (25%): auto-DQ E3.
+# - Volatility Regime: clone of H5 Vol Regimes (identical metrics, r≈1.0): auto-DQ clone.
+
+# =============================================================================
+# CANDIDATES (7 signals — pass frozen Candidate gate as of 2026-06-13)
+# =============================================================================
+
+h6_funding_vol_regime:
+  display_name: "H6 Funding x Vol x Regime"
+  hypothesis: "Medium-vol + low-funding + non-bear market precedes positive BTC drift."
+  direction: long
+  rationale: >
+    Low perp funding marks absent crowded longs; medium vol avoids both sleepy low-vol
+    regimes and panic high-vol regimes; SMA200 gate prevents bear-market entries.
+  mechanism: positioning/carry
+  data_source: "spot 1m + funding (Binance/CCXT)"
+  feature_def: "long when vol_regime==medium AND funding_regime==low AND market_regime != bear; 7-day hold"
+  group: "Seed (validated)"
+  state: candidate
+  state_since: "2026-06-13"
+  state_reason: >
+    Passes Edge-Candidate gate: Sharpe 0.90 ≥ 0.30, WF 2/3=67% ≥ 50%,
+    Sens 100% ≥ 60%, LOO 100% ≥ 67%, break-even 100bps ≥ 15bps, structural ✓.
+    Pre-registration exists; live-forward collection active.
+  role:
+    - edge
+  provenance: offline-corpus
+  pinned_run: 6b29cb25-d5c0-458a-913b-de714344802b
+  preregistration:
+    path: "research/forward_evidence/pre_registration.json"
+    hash: "f78f0a52bfcd8add023222958a54dcf1f4359e11d76680dd211a6ded72c78aff"
+  weaknesses:
+    - "OOS Sharpe -0.15 (IS/OOS sign disagreement); IS likely rich relative to battery population"
+    - "n=22 trades underpowered; lockbox verdict REJECT BOTH (only 2 trades in sealed window)"
+    - "Validated gate blocked until live-forward OOS accumulates"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g1_market_regime_sma200:
+  display_name: "Market Regime (SMA200 slope)"
+  hypothesis: "BTC above a rising SMA200 is in a structurally bullish regime; below a falling SMA200, bearish."
+  direction: long/short
+  rationale: >
+    Long-horizon trend filter: price above rising SMA200 marks structurally bullish conditions.
+    Widely documented across assets; primary role is as a conditioning gate for other signals.
+  mechanism: trend/regime
+  data_source: "spot 1m -> daily close"
+  feature_def: "long when close>SMA(200) AND SMA rising over 20d; short when close<SMA AND SMA falling; flat otherwise"
+  group: G1 Market Structure
+  state: candidate
+  state_since: "2026-06-13"
+  state_reason: >
+    Passes Feature-Candidate gate: OOS Sharpe +0.49 > 0, Sens 100% ≥ 60%.
+    Also borderline Edge-Candidate: Sharpe 0.41 ≥ 0.30, WF 2/4=50% (borderline).
+    Assigned Feature role per FINAL_AUDIT conditioning judgment.
+  role:
+    - feature
+  provenance: offline-corpus
+  pinned_run: e4074104-be78-46b0-896d-8f6e374f4981
+  preregistration:
+    path: "research/forward_evidence/pre_registration_g1_market_regime_sma200.json"
+    hash: "a3310aa790b7722ee794d2efda6174b130ff36c711bc439446ead4f5b4ad1375"
+  weaknesses:
+    - "WF 50% borderline (exactly at threshold); 2 of 4 years negative"
+    - "MaxDD 57.4% — high drawdown as standalone edge"
+    - "Pre-registered 2026-06-14; Validated gate requires live-forward collection"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+h5_vol_regime:
+  display_name: "H5 Volatility Regimes"
+  hypothesis: "Top-tercile realized-vol regimes carry poor risk-adjusted forward returns; avoiding them harvests a vol-managed premium."
+  direction: long
+  rationale: >
+    Avoiding high-vol environments (top tercile of trailing 252d RV21) provides
+    risk-adjusted outperformance. Strong as a conditioning gate; weak as a long-only rule.
+  mechanism: vol-regime/risk-management
+  data_source: "spot 1m -> daily close (Binance Vision)"
+  feature_def: "RV21d annualized; long when RV not in top tercile of trailing 252d; flat otherwise"
+  group: "Seed (validated)"
+  state: candidate
+  state_since: "2026-06-13"
+  state_reason: >
+    Passes Feature-Candidate gate: OOS Sharpe +0.68 > 0, Sens 100% ≥ 60%.
+    Original hypothesis study H5 labeled 'Validated B' (conditioning variable).
+    IS/OOS sign disagrees (IS -0.06, OOS +0.68) — effect visible in OOS not IS.
+  role:
+    - feature
+  provenance: offline-corpus
+  pinned_run: 036349a1-d49f-465e-9533-62d547d566db
+  preregistration:
+    path: "research/forward_evidence/pre_registration_h5_vol_regime.json"
+    hash: "fc1720ccb3d9adf99ddcee2e7d9d4d8d655e3ce7ffff4e28b7fd432d0f18a2be"
+  weaknesses:
+    - "IS Sharpe -0.06 (IS/OOS sign disagreement); effect only visible in OOS window"
+    - "LOO consistency 67% (exactly at threshold); Sharpe CV 2.45 (high instability)"
+    - "MaxDD 79.6% — very high drawdown as standalone rule"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g2_funding_level:
+  display_name: "Funding Level"
+  hypothesis: "Persistently low/negative perp funding marks washed-out positioning and precedes upward drift."
+  direction: long/short
+  rationale: >
+    Perp funding proxies aggregate leverage positioning; sustained low funding
+    (bottom tercile) signals absence of crowded longs and precedes recoveries.
+    Primarily a conditioning variable (H1 hypothesis basis).
+  mechanism: positioning/carry
+  data_source: "funding (Binance/CCXT) -> daily mean bps"
+  feature_def: "long when funding < lower tercile of trailing 252d, short when > upper tercile; 7-day hold"
+  group: G2 Funding & Derivatives
+  state: candidate
+  state_since: "2026-06-13"
+  state_reason: >
+    Passes Feature-Candidate gate: OOS Sharpe +0.11 > 0, Sens 75% ≥ 60%.
+    Standalone Sharpe 0.23 < 0.30 (fails Edge gate). Feature role confirmed
+    by FINAL_AUDIT and H1 hypothesis study.
+  role:
+    - feature
+  provenance: offline-corpus
+  pinned_run: cc916a89-ba48-4816-8bbe-73af6f3ae315
+  preregistration: null
+  weaknesses:
+    - "OOS Sharpe +0.11 is marginal; WF 3/6=50% borderline"
+    - "Bull regime Sharpe -0.36 (mean-reverts poorly in bull); sideways 2.21 (concentrated)"
+    - "Redundant at r≥0.70 with Funding-Basis Composite (cluster head)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g5_trend_4h:
+  display_name: "4H Trend"
+  hypothesis: "Intermediate (4-hour) trend state carries information about the next day's direction."
+  direction: long/short
+  rationale: >
+    Swing-horizon trend state (50/200 MA cross on 4H bars sampled at end of day);
+    tests whether intermediate structure is informative beyond the daily regime.
+  mechanism: trend/momentum
+  data_source: "spot 1m -> 4H bars -> 50/200 MA cross, end-of-day sample"
+  feature_def: "sign(SMA50_4h - SMA200_4h) sampled at last 4H bar of each day"
+  group: G5 Multi-Timeframe
+  state: candidate
+  state_since: "2026-06-13"
+  state_reason: >
+    Passes Feature-Candidate gate: OOS Sharpe +0.54 > 0, Sens 100% ≥ 60%.
+    FINAL_AUDIT excluded editorially ("weak, not worth ML inclusion") before
+    Candidate gate was frozen. Formal gate is authoritative.
+  role:
+    - feature
+  provenance: offline-corpus
+  pinned_run: ca05220e-457d-4735-b009-40a8746ad5a4
+  preregistration: null
+  weaknesses:
+    - "Excluded from FINAL_AUDIT editorially; ML inclusion re-evaluated at Validation"
+    - "Correlated at r≥0.70 with Momentum TSMOM (cluster head in FINAL_AUDIT); independence check fires at Validated gate"
+    - "Sideways regime Sharpe -0.75 (mean-reverts badly in choppy markets)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g3_momentum_tsmom:
+  display_name: "Momentum (TSMOM)"
+  hypothesis: "BTC prices that have risen over a medium horizon tend to continue rising."
+  direction: long/short
+  rationale: >
+    Time-series momentum: sign of k-day return as position; a robust, widely-documented
+    effect across assets including crypto.
+  mechanism: momentum/trend-following
+  data_source: "spot 1m -> daily close"
+  feature_def: "sign of k-day return; long if positive, short if negative"
+  group: G3 Price Action
+  state: candidate
+  state_since: "2026-06-13"
+  state_reason: >
+    Passes Edge-Candidate gate: Sharpe 0.35 ≥ 0.30, WF 3/6=50% ≥ 50%,
+    Sens 100% ≥ 60%, LOO 83% ≥ 67%, break-even 30bps ≥ 15bps, structural ✓.
+    FINAL_AUDIT excluded as redundant with 4H Trend (r≥0.70). Clone DQ at
+    Candidate gate is r≥0.90 only; r=0.70 fires at Validated gate.
+  role:
+    - edge
+  provenance: offline-corpus
+  pinned_run: c75f6a4e-256a-47c0-8840-7fe8714a9dbf
+  preregistration:
+    path: "research/forward_evidence/pre_registration_g3_tsmom.json"
+    hash: "90865666cf83c6a1972ba5d0ce7fb8d4694cd2281c9f5654cd99042940a5b7c4"
+  weaknesses:
+    - "Correlated at r≥0.70 with 4H Trend; independence check fires at Validated gate"
+    - "Sideways regime Sharpe -0.95 (trend-following collapses in choppy markets)"
+    - "OOS Sharpe +0.07 marginal; 2026 YTD -1.33 (recent degradation)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g1_trend_regime_ma_cross:
+  display_name: "Trend Regime (MA cross)"
+  hypothesis: "When a fast MA leads a slow MA, momentum tends to persist."
+  direction: long/short
+  rationale: >
+    Fast/slow SMA crossover as a trend-persistence filter; tests whether MA-cross
+    structure adds information beyond the SMA200 slope regime.
+  mechanism: trend/momentum
+  data_source: "spot 1m -> daily close"
+  feature_def: "SMA(fast) vs SMA(slow); long if fast>slow, short if fast<slow"
+  group: G1 Market Structure
+  state: candidate
+  state_since: "2026-06-13"
+  state_reason: >
+    Passes Feature-Candidate gate: OOS Sharpe +0.87 > 0, Sens 100% ≥ 60%.
+    FINAL_AUDIT excluded editorially ("weak, not worth ML inclusion").
+    Formal gate is authoritative. Structural sign failed (important weakness).
+  role:
+    - feature
+  provenance: offline-corpus
+  pinned_run: abc6078e-0dce-4c89-b73f-c1aa9467e795
+  preregistration: null
+  weaknesses:
+    - "Structural-event sign NOT preserved (clean Sharpe -0.13); edge collapses around major BTC events"
+    - "Only 23 trades; n too low for robust per-trade distribution"
+    - "Likely correlated with g1_market_regime_sma200; VIF check needed"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+# =============================================================================
+# DISQUALIFIED (4 signals — hard DQ conditions triggered)
+# =============================================================================
+
+g4_inside_bar:
+  display_name: "Inside Bar"
+  hypothesis: "An inside bar marks volatility contraction; price continues in the prevailing trend after consolidation."
+  direction: long/short
+  rationale: "Inside bar = high < prior high and low > prior low; direction taken from sign of close vs SMA(n)."
+  mechanism: price-action/continuation
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "high<prior high and low>prior low; take sign(close-SMA(n)); 5-day hold"
+  group: G4 Candlestick
+  state: disqualified
+  state_since: "2026-06-13"
+  state_reason: >
+    Hard DQ E3: sensitivity 0% — zero variants sign-stable. Knife-edge threshold < 40%.
+    Additionally: FINAL_AUDIT note that Inside Bar is a disguised trend-follower
+    (construction uses sign(close-SMA50) on inside-bar days).
+  role: []
+  provenance: offline-corpus
+  pinned_run: 3b8bcaee-a116-4b98-b631-ae7e1e22c11d
+  preregistration: null
+  weaknesses: []
+  dq_reasons:
+    - "E3: sensitivity 0% < 40% knife-edge threshold"
+    - "Disguised trend-follower: signal is sign(close-SMA50) on inside-bar filter days"
+  supersedes: null
+  superseded_by: null
+
+g6_obv_trend:
+  display_name: "OBV Trend"
+  hypothesis: "Rising OBV signals accumulation; volume direction leads price."
+  direction: long
+  rationale: "On-balance volume accumulates signed volume; rising OBV marks demand accumulation."
+  mechanism: order-flow/volume
+  data_source: "spot 1m -> daily close + volume"
+  feature_def: "OBV = cumsum(sign(dclose)*vol); long if OBV rising over n days"
+  group: G6 Positioning/Order-Flow
+  state: disqualified
+  state_since: "2026-06-13"
+  state_reason: "Hard DQ E3: sensitivity 33% < 40% knife-edge threshold."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 15a98761-8ba1-4635-8dd2-9c0007abf042
+  preregistration: null
+  weaknesses: []
+  dq_reasons:
+    - "E3: sensitivity 33% < 40% knife-edge threshold"
+    - "Negative Sharpe -0.52; consistently loses across all regimes"
+  supersedes: null
+  superseded_by: null
+
+g1_breakout_donchian:
+  display_name: "Breakout Regime (Donchian)"
+  hypothesis: "Range breakouts signal regime shifts; new N-day highs/lows tend to extend."
+  direction: long/short
+  rationale: "Donchian channel breakout: long when close > prior-N high, short below prior-N low."
+  mechanism: trend-following/breakout
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "stateful: long when close>prior-N high, short when close<prior-N low, hold until opposite break"
+  group: G1 Market Structure
+  state: disqualified
+  state_since: "2026-06-13"
+  state_reason: "Hard DQ E3: sensitivity 25% < 40% knife-edge threshold."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 4e6cae28-8a1a-4c9c-bd2b-1147b496a21b
+  preregistration: null
+  weaknesses: []
+  dq_reasons:
+    - "E3: sensitivity 25% < 40% knife-edge threshold"
+    - "OOS Sharpe -0.04 (near zero); structural sign not preserved"
+  supersedes: null
+  superseded_by: null
+
+g1_volatility_regime:
+  display_name: "Volatility Regime"
+  hypothesis: "Top-tercile realized-vol regimes mark risk-off conditions with poor forward returns."
+  direction: long
+  rationale: "Vol-managed long: long when realized vol is not in the top tercile of trailing 252d window."
+  mechanism: vol-regime/risk-management
+  data_source: "spot 1m -> daily close"
+  feature_def: "RV(rv_win) annualized; long when RV not in top tercile of trailing window; flat otherwise"
+  group: G1 Market Structure
+  state: disqualified
+  state_since: "2026-06-13"
+  state_reason: >
+    Clone DQ: identical metrics to h5_vol_regime (same RV21/252d construction,
+    correlation r≈1.0). Absorbed into h5_vol_regime as cluster head.
+    DQ threshold: clone r ≥ 0.90.
+  role: []
+  provenance: offline-corpus
+  pinned_run: 8261cea1-253d-4e37-a631-52a28fffbf65
+  preregistration: null
+  weaknesses: []
+  dq_reasons:
+    - "Clone of h5_vol_regime: metrics identical, r≈1.0 ≥ 0.90 clone threshold"
+  supersedes: null
+  superseded_by: null
+
+# =============================================================================
+# DISCOVERY — gray zone (sensitivity 40-60%; failed Candidate gate, not auto-DQ)
+# =============================================================================
+
+g3_atr_expansion:
+  display_name: "ATR Expansion"
+  hypothesis: "Rising true-range accompanies conviction-driven moves; trading direction of price during vol expansion rides breakouts."
+  direction: long/short
+  rationale: "ATR(n) > ATR(n) lag bars ago -> follow sign of n-day return. Captures trend acceleration."
+  mechanism: price-action/volatility
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "ATR(n) > ATR(n) lag bars ago -> follow sign(n-day return); else flat"
+  group: G3 Price Action
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: >
+    Sensitivity 50% — gray zone (above 40% auto-DQ, below 60% Candidate gate threshold).
+    Battery profile otherwise strong: Sharpe 0.48, OOS 0.67, LOO 100%, WF 67%.
+    Requires 3+ sensitivity variants all sign-stable to reach 60% threshold or
+    re-parameterization study. Note: FINAL_AUDIT included this editorially before
+    the Candidate gate was frozen.
+  role:
+    - edge
+  provenance: offline-corpus
+  pinned_run: be1849d4-ada6-434d-8732-e1e836dae5f6
+  preregistration: null
+  weaknesses:
+    - "Sensitivity 50% fails Candidate gate (gray zone 40-60%)"
+    - "FINAL_AUDIT included editorially; formal gate not met"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g3_atr_compression:
+  display_name: "ATR Compression"
+  hypothesis: "Contracting true-range marks consolidation that resolves in the prevailing trend direction (volatility squeeze)."
+  direction: long/short
+  rationale: "ATR(n) < ATR(n) lag bars ago -> hold SMA trend direction. Captures pre-breakout setups."
+  mechanism: price-action/volatility
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "ATR(n) < ATR(n) lag bars ago -> hold SMA(sma_n) trend direction; else flat"
+  group: G3 Price Action
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: >
+    Sensitivity 50% — gray zone (above 40% auto-DQ, below 60% Candidate gate threshold).
+    Same situation as g3_atr_expansion.
+  role:
+    - feature
+  provenance: offline-corpus
+  pinned_run: 3fa9d836-a011-4251-9ae3-c93b5d63925f
+  preregistration: null
+  weaknesses:
+    - "Sensitivity 50% fails Candidate gate (gray zone 40-60%)"
+    - "Bear regime Sharpe -0.27; does not work in trending-down markets"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g6_funding_basis_composite:
+  display_name: "Funding-Basis Composite"
+  hypothesis: "Combined funding+basis positioning index adds information beyond either alone."
+  direction: long/short
+  rationale: "z(funding)+z(basis) over rw; contrarian long when < -0.5, short when > +0.5."
+  mechanism: positioning/carry
+  data_source: "funding + perp/spot basis"
+  feature_def: "z(funding)+z(basis) over rw; contrarian long when < -0.5, short when > +0.5; 7-day hold"
+  group: G6 Positioning/Order-Flow
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: >
+    Sensitivity 50% — gray zone. Additionally, FINAL_AUDIT identified it as
+    redundant with g2_funding_level (r≥0.70). Independence check would fire at
+    Validated gate even if Candidate gate were passed.
+  role:
+    - feature
+  provenance: offline-corpus
+  pinned_run: a6bed269-1d07-4e83-a2f0-56bc77b02f1e
+  preregistration: null
+  weaknesses:
+    - "Sensitivity 50% fails Candidate gate (gray zone 40-60%)"
+    - "Redundant with g2_funding_level at r≥0.70; independence check at Validated gate"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g3_trend_continuation_er:
+  display_name: "Trend Continuation (ER)"
+  hypothesis: "Trends persist only when price moves efficiently; Kaufman efficiency ratio filters choppy markets."
+  direction: long/short
+  rationale: "ER = |net change| / sum|daily changes|; follow trend only when ER > threshold."
+  mechanism: trend/efficiency
+  data_source: "spot 1m -> daily close"
+  feature_def: "efficiency ratio = |net change| / sum|daily changes| over n; follow trend when ER>thr, else flat"
+  group: G3 Price Action
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: >
+    Sensitivity 50% — gray zone. Also: negative Sharpe -0.24 fails edge threshold.
+    No feature path (OOS -0.11 negative).
+  role: []
+  provenance: offline-corpus
+  pinned_run: 3a80db88-11ea-4c44-b404-d94d56bad736
+  preregistration: null
+  weaknesses:
+    - "Sensitivity 50% fails Candidate gate (gray zone 40-60%)"
+    - "Negative Sharpe -0.24 and negative OOS -0.11; no viable role"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+# =============================================================================
+# DISCOVERY — battery failed (negative effect or insufficient edge)
+# Signals that went through the battery but found no evidence of edge.
+# Not disqualified (no hard DQ conditions triggered).
+# State: discovery — screened, no evidence found.
+# =============================================================================
+
+g2_basis_expansion:
+  display_name: "Basis Expansion"
+  hypothesis: "An expanding contango reflects strengthening leverage demand and trend conviction."
+  direction: long/short
+  rationale: "Long when basis rising (contango building or backwardation easing)."
+  mechanism: derivatives/basis
+  data_source: "perp + spot -> daily basis bps, k-day change"
+  feature_def: "long when basis rising; short when contango fading; 7-day hold"
+  group: G2 Funding & Derivatives
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "OOS Sharpe -0.31 (negative); LOO sign consistency 67% barely meets threshold but OOS negative blocks Feature path."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 916567a7-c4e1-4e64-afed-153b15f96a5d
+  preregistration: null
+  weaknesses:
+    - "OOS -0.31 negative; IS/OOS sign disagrees"
+    - "LOO Sharpe CV 3.58 (extremely high instability)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g4_morning_star:
+  display_name: "Morning Star"
+  hypothesis: "Three-candle bottoming pattern (capitulation, indecision, recovery) signals bullish reversal."
+  direction: long
+  rationale: "Large bear day1, small star day2, large bull day3 recovering past day1 midpoint."
+  mechanism: price-action/reversal
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "large bear day1, small star day2, large bull day3 recovering past day1 midpoint; long; 5-day hold"
+  group: G4 Candlestick
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.38 and OOS -0.19 (both negative). No standalone edge; no conditioning use."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 7a23ecbd-cd42-47d6-9ae5-54832da2b151
+  preregistration: null
+  weaknesses:
+    - "Negative Sharpe -0.38 and OOS -0.19"
+    - "Part of candlestick reversal family — high-confidence negative finding (see FINAL_AUDIT §5)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g4_pin_bar:
+  display_name: "Pin Bar"
+  hypothesis: "A long rejection wick signals failed continuation; hammers mark demand, shooting stars mark supply."
+  direction: long/short
+  rationale: "Wick >= ratio*body and >= ratio*opposite wick; long hammer, short shooting-star."
+  mechanism: price-action/reversal
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "wick >= ratio*body and >= ratio*opposite wick; long hammer, short shooting-star; 5-day hold"
+  group: G4 Candlestick
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.19 and OOS -0.25 (both negative). Negative finding: candlestick reversal family."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 1d111f3e-5a19-4f94-9ee1-3486dc755fda
+  preregistration: null
+  weaknesses:
+    - "Negative Sharpe -0.19 and OOS -0.25 across all regimes"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g4_outside_bar:
+  display_name: "Outside Bar"
+  hypothesis: "An outside bar engulfs the prior range on expanding volatility; close color signals the winning side."
+  direction: long/short
+  rationale: "high>prior high and low<prior low; long if close>open, short if close<open."
+  mechanism: price-action/reversal
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "high>prior high and low<prior low; long if close>open, short if close<open; 5-day hold"
+  group: G4 Candlestick
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.12 and OOS -0.32. Negative finding: candlestick reversal family."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 5a0003ff-3256-416a-b3c7-debd6a4517e5
+  preregistration: null
+  weaknesses:
+    - "Negative Sharpe and OOS; LOO sign consistency only 67%"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g2_funding_acceleration:
+  display_name: "Funding Acceleration"
+  hypothesis: "Rapidly heating funding precedes long squeezes; rapidly cooling funding precedes relief rallies."
+  direction: long/short
+  rationale: "d(funding,k); long when change < lower tercile, short when > upper tercile; 7-day hold."
+  mechanism: positioning/carry
+  data_source: "funding -> daily mean bps, k-day change"
+  feature_def: "d(funding,k); long when change < lower tercile, short when > upper tercile; 7-day hold"
+  group: G2 Funding & Derivatives
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "OOS Sharpe -1.00 (severe IS/OOS gap: IS +0.53 vs OOS -1.00). Classic overfitting signal."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 87d86090-f271-467d-8c33-32baaa3a3497
+  preregistration: null
+  weaknesses:
+    - "IS/OOS gap: IS +0.53 → OOS -1.00; classic overfitting to IS window"
+    - "Stability score 0.52; 2025-2026 sharply negative (-1.27 and -0.76)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g3_mean_reversion_rsi:
+  display_name: "Mean Reversion (RSI)"
+  hypothesis: "Short-horizon RSI overextensions revert; oversold marks capitulation, overbought marks exhaustion."
+  direction: long/short
+  rationale: "RSI(n); long when RSI<lo, short when RSI>hi; 5-day hold."
+  mechanism: mean-reversion
+  data_source: "spot 1m -> daily close"
+  feature_def: "RSI(n); long when RSI<lo, short when RSI>hi; 5-day hold"
+  group: G3 Price Action
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.29; OOS -0.19. High-confidence negative: BTC daily mean-reversion has no edge (see FINAL_AUDIT §5)."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 61d522e7-89b5-4379-b00d-5b2159810e5a
+  preregistration: null
+  weaknesses:
+    - "Two independent constructions (RSI + BB fade) both fail → domain-level negative finding"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g5_trend_misalignment:
+  display_name: "Trend Misalignment"
+  hypothesis: "When shorter timeframes diverge from the daily trend, fade the divergence in the daily direction."
+  direction: long/short
+  rationale: "long when 1D=+1 and shorter TF=-1; short when 1D=-1 and shorter TF=+1 (counter-trend pullback)."
+  mechanism: multi-timeframe/mean-reversion
+  data_source: "trend_1h + trend_4h + trend_1d"
+  feature_def: "long when 1D=+1 and a shorter TF=-1; short when 1D=-1 and shorter TF=+1"
+  group: G5 Multi-Timeframe
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.19 and OOS -0.50. Multi-timeframe structure negative finding."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 563f905a-77ae-42b6-9a4c-a720e9a20a50
+  preregistration: null
+  weaknesses:
+    - "Negative Sharpe and OOS; WF 2/6"
+    - "Multi-timeframe family high-confidence negative (see FINAL_AUDIT §5)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g6_volume_surge:
+  display_name: "Volume Surge"
+  hypothesis: "A volume spike marks conviction; trading the spike-day direction tests volume-confirmed initiation."
+  direction: long/short
+  rationale: "volume > mult * SMA(vol,n) -> follow candle color; 5-day hold."
+  mechanism: order-flow/volume
+  data_source: "spot 1m -> daily OHLC + volume"
+  feature_def: "volume > mult * SMA(vol,n) -> follow candle color; 5-day hold"
+  group: G6 Positioning/Order-Flow
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.41 and OOS -0.91. Volume/order-flow family high-confidence negative finding."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 4f29d74a-86a2-41a0-b9b8-e527339f5646
+  preregistration: null
+  weaknesses:
+    - "Negative Sharpe -0.41 and OOS -0.91; all volume proxies negative"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g4_evening_star:
+  display_name: "Evening Star"
+  hypothesis: "Three-candle topping pattern (euphoria, indecision, breakdown) signals bearish reversal."
+  direction: short
+  rationale: "Large bull day1, small star day2, large bear day3 breaking below day1 midpoint."
+  mechanism: price-action/reversal
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "large bull day1, small star day2, large bear day3 breaking below day1 midpoint; short; 5-day hold"
+  group: G4 Candlestick
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.05 and OOS -0.16. LOO sign consistency 50% (below threshold). Candlestick reversal negative."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 779c82db-edef-4a0b-bf9b-ad55848ff37e
+  preregistration: null
+  weaknesses:
+    - "LOO sign consistency 50% (below 67% threshold); Sharpe CV 5.30 (extreme instability)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g4_engulfing:
+  display_name: "Engulfing"
+  hypothesis: "An engulfing candle marks a decisive shift in control; signals short-term reversal."
+  direction: long/short
+  rationale: "Current body engulfs prior opposite-color body; long bullish, short bearish; 5-day hold."
+  mechanism: price-action/reversal
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "current body engulfs prior opposite-color body; long bullish, short bearish; 5-day hold"
+  group: G4 Candlestick
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.62 and OOS -0.12 (both negative). WF 1/6 (worst in battery). Actively loses."
+  role: []
+  provenance: offline-corpus
+  pinned_run: fa509875-4b6b-4f60-8413-8af2abb448b3
+  preregistration: null
+  weaknesses:
+    - "Sharpe -0.62; WF 1/6; active loser"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g5_trend_1h:
+  display_name: "1H Trend"
+  hypothesis: "Intraday hourly trend state carries information at the daily decision point."
+  direction: long/short
+  rationale: "sign(SMA50_1h - SMA200_1h) sampled at last hour of each day."
+  mechanism: multi-timeframe/trend
+  data_source: "spot 1m -> 1H bars -> 50/200 MA cross, end-of-day sample"
+  feature_def: "sign(SMA50_1h - SMA200_1h) sampled at last hour of each day"
+  group: G5 Multi-Timeframe
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.18 and OOS -0.34. Multi-timeframe structure adds no incremental information."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 775db096-06f1-4aea-8163-53c816b699d5
+  preregistration: null
+  weaknesses:
+    - "Negative Sharpe and OOS; WF 1/6"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g6_clv_pressure:
+  display_name: "CLV Pressure"
+  hypothesis: "Close location within the daily range proxies intraday buying vs selling pressure."
+  direction: long/short
+  rationale: "Smoothed Close Location Value over n days; long if >0, short if <0."
+  mechanism: order-flow/price-structure
+  data_source: "spot 1m -> daily OHLC"
+  feature_def: "smoothed Close Location Value over n days; long if >0, short if <0"
+  group: G6 Positioning/Order-Flow
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.61 and OOS -0.54. Volume/order-flow family negative finding."
+  role: []
+  provenance: offline-corpus
+  pinned_run: daaab03a-de52-43da-85d1-e8b224eca150
+  preregistration: null
+  weaknesses:
+    - "Sharpe -0.61; MaxDD 95% (effectively ruins portfolio); WF 1/6"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g2_basis_compression:
+  display_name: "Basis Compression"
+  hypothesis: "Compressing contango marks leverage unwinding; deepening backwardation marks accelerating fear."
+  direction: long/short
+  rationale: "Long when basis>0 and falling; short when basis<0 and falling; 7-day hold."
+  mechanism: derivatives/basis
+  data_source: "perp + spot -> daily basis bps, k-day change"
+  feature_def: "long when basis>0 and falling; short when basis<0 and falling; 7-day hold"
+  group: G2 Funding & Derivatives
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.26 and OOS -0.08 (both negative). WF 1/5."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 399908e9-5ab3-4f74-b4e3-a780d6821598
+  preregistration: null
+  weaknesses:
+    - "Negative Sharpe and OOS; WF 1/5"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g1_range_regime_bb:
+  display_name: "Range Regime (BB fade)"
+  hypothesis: "In range-bound conditions price mean-reverts to its moving average; fade Bollinger extremes."
+  direction: long/short
+  rationale: "z=(close-SMA(win))/STD(win); long when z<-k, short when z>+k."
+  mechanism: mean-reversion
+  data_source: "spot 1m -> daily close"
+  feature_def: "z=(close-SMA(win))/STD(win); long when z<-k, short when z>+k"
+  group: G1 Market Structure
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.30; OOS +0.00 (zero). High-confidence negative: BTC mean-reversion has no edge."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 17f0536f-f664-49eb-8882-68018aa51753
+  preregistration: null
+  weaknesses:
+    - "Two independent constructions (RSI + BB fade) both fail → domain-level negative"
+    - "WF 2/6; stability score 0.58"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g2_funding_divergence:
+  display_name: "Funding Divergence"
+  hypothesis: "A rally on low funding is organic and continues; a rally on high funding is leverage-driven and exhausts."
+  direction: long/short
+  rationale: "Price k-day momentum gated by funding regime; directional interaction hypothesis."
+  mechanism: positioning/carry
+  data_source: "spot close + funding"
+  feature_def: "price k-day momentum gated by funding regime; long if up & funding<median, short if up & funding>upper-third; 7-day hold"
+  group: G2 Funding & Derivatives
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.16 and OOS -0.16 (both negative). Structural sign not preserved."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 9101b51b-73d9-4eca-822f-cfeb62d13952
+  preregistration: null
+  weaknesses:
+    - "Negative Sharpe and OOS; structural sign not preserved"
+    - "Redundant with g2_funding_level at r≥0.70 (FINAL_AUDIT)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g6_chaikin_money_flow:
+  display_name: "Chaikin Money Flow"
+  hypothesis: "Volume-weighted close-location flow is the canonical OHLCV order-flow proxy."
+  direction: long/short
+  rationale: "CMF = sum(CLV*vol)/sum(vol) over n; long if >0, short if <0."
+  mechanism: order-flow/volume
+  data_source: "spot 1m -> daily OHLC + volume"
+  feature_def: "CMF = sum(CLV*vol)/sum(vol) over n; long if >0, short if <0"
+  group: G6 Positioning/Order-Flow
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.06 and OOS -0.38. Sensitivity 67% (passes gate) but negative effect; no edge."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 65293bbc-113f-42eb-900b-5b905e5633c0
+  preregistration: null
+  weaknesses:
+    - "OOS -0.38; volume/order-flow negative finding confirmed by multiple constructions"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g5_trend_1d:
+  display_name: "1D Trend"
+  hypothesis: "Daily 50/200 MA cross; included as the multi-timeframe redundancy reference point."
+  direction: long/short
+  rationale: "sign(SMA50_1d - SMA200_1d); the daily baseline for multi-timeframe family."
+  mechanism: trend/momentum
+  data_source: "spot 1m -> daily close -> 50/200 MA cross"
+  feature_def: "sign(SMA50_1d - SMA200_1d)"
+  group: G5 Multi-Timeframe
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe +0.04 (near zero) and OOS -0.25. LOO sign consistency 50% (below threshold). Only 11 trades."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 4446b8b7-97f0-4741-8c9e-f525e5172de7
+  preregistration: null
+  weaknesses:
+    - "LOO sign consistency 50%; n=11 trades (lowest in battery)"
+    - "Redundant with g1_market_regime_sma200 at r≥0.70 (FINAL_AUDIT)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g5_trend_alignment:
+  display_name: "Trend Alignment"
+  hypothesis: "Multi-timeframe confluence: when all three timeframes agree, conviction is higher."
+  direction: long/short
+  rationale: "long when all three trends = +1, short when all three = -1 (confluence filter)."
+  mechanism: multi-timeframe/trend
+  data_source: "trend_1h + trend_4h + trend_1d"
+  feature_def: "long when all three trends = +1, short when all three = -1"
+  group: G5 Multi-Timeframe
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe +0.03 (near zero) and OOS -0.15. LOO sign consistency 33% (far below threshold). Structural sign not preserved."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 9a906f33-bbe1-40cf-8159-c294b2dcaf3d
+  preregistration: null
+  weaknesses:
+    - "LOO sign consistency 33% — collapses when any year removed"
+    - "Multi-timeframe family negative finding"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
+g2_basis_level:
+  display_name: "Basis Level"
+  hypothesis: "Perp-spot basis measures leverage demand; rich contango signals crowded longs, backwardation signals fear."
+  direction: long/short
+  rationale: "long when basis < lower tercile, short when > upper tercile; 7-day hold."
+  mechanism: derivatives/basis
+  data_source: "perp 1m + spot 1m -> daily basis bps"
+  feature_def: "long when basis < lower tercile, short when > upper tercile; 7-day hold"
+  group: G2 Funding & Derivatives
+  state: discovery
+  state_since: "2026-06-13"
+  state_reason: "Sharpe -0.22 and OOS -0.97 (severe OOS failure). Collinear with funding."
+  role: []
+  provenance: offline-corpus
+  pinned_run: 58654db6-7753-42ef-914c-bc850de116d3
+  preregistration: null
+  weaknesses:
+    - "OOS -0.97; IS/OOS severely disagree"
+    - "Collinear with g2_funding_level (as expected from H1/H4 hypothesis studies)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null

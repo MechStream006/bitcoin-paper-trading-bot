@@ -1,0 +1,98 @@
+# Frozen governance thresholds for the Evidence Library.
+# Do NOT modify without a governance review session.
+# Frozen: 2026-06-13
+# Justification: see governance session 2026-06-13
+
+version: "1.0"
+frozen_date: "2026-06-13"
+
+candidate:
+  edge:
+    # Full-sample Sharpe at REALISTIC_COST bps — sign must match pre-stated direction
+    min_sharpe: 0.30
+    # Fraction of WF folds with Sharpe > 0
+    min_wf_agreement: 0.50
+    # Fraction of sensitivity variants sign-stable
+    min_sensitivity: 0.60
+    # Fraction of LOO folds with same sign as full-sample
+    min_loo_consistency: 0.67
+    # Break-even cost (bps) at which Sharpe crosses 0
+    min_breakeven_bps: 15
+    # Structural-event robustness: sign must be preserved after excluding ±7d around events
+    structural_sign_required: true
+    # Observation floors for event-driven signals
+    min_discrete_events: 10
+    min_events_after_exclusion: 8
+    # Observation floors for continuous/regime signals
+    min_active_days: 60
+    # Corpus coverage
+    min_calendar_years: 2
+    min_regimes: 2
+
+  feature:
+    # Conditioning/explanatory role (weaker standalone, used as ML input)
+    min_sensitivity: 0.60
+    min_wf_sign_consistency: 0.50
+    # Proxy: positive OOS Sharpe stands in for bootstrap CI excluding zero
+    # (proper bootstrap test run at Validation gate)
+    oos_positive_proxy: true
+    # Clone DQ at candidacy (independence check at 0.70 deferred to Validation)
+    max_clone_r: 0.90
+
+  hard_dq:
+    # Automatic disqualification — knife-edge parameter sensitivity
+    knife_edge_sensitivity: 0.40
+    # Clone of an existing signal (correlation at or above this threshold)
+    clone_r: 0.90
+
+validated:
+  edge:
+    # At least one run must have provenance != offline-corpus
+    requires_non_offline_provenance: true
+    # BH-FDR p-value threshold (q=0.10)
+    max_bh_p: 0.10
+    # Signal must be independent of other validated signals
+    max_pairwise_r: 0.70
+    # Deflated Sharpe: probability of beating selection-bias-adjusted benchmark
+    min_dsr_prob: 0.50
+
+  feature:
+    requires_non_offline_provenance: true
+    max_bh_p: 0.10
+    max_pairwise_r: 0.70
+    # Added 2026-06-13: makes DSR requirement explicit for feature signals.
+    # The intent was always to require DSR for all validated signals (Fix 1,
+    # 2026-06-13 audit). Previously this was enforced via a Python hardcoded
+    # default in check_validated_preconditions(); now the YAML is authoritative.
+    min_dsr_prob: 0.50
+
+promotion_ready:
+  min_calendar_months: 6
+  # Break-even cost must be >= 2x realistic_cost_bps
+  min_breakeven_multiple: 2.0
+  max_forward_drawdown: 0.25
+
+production_ready:
+  min_forward_trades: 30
+  requires_live_reconciliation: true
+  requires_mainnet_provenance: true
+
+governance:
+  # Must match engine.REALISTIC_COST
+  realistic_cost_bps: 15
+  # Must match engine.ANN
+  ann: 365
+  # Must match governance.bh_fdr default q parameter
+  fdr_q: 0.10
+  # Must match governance.high_pairs default thresh
+  independence_r: 0.70
+  # Clone cut (Candidate gate only)
+  clone_r: 0.90
+
+ml_readiness:
+  # ML review may be triggered when validated family count reaches this band
+  target_low: 10
+  target_high: 20
+  # ML-readiness consumes the Validated set (both edge and feature roles)
+  # Promotion-ready and Production-ready are NOT required for ML review
+  gating_state: validated

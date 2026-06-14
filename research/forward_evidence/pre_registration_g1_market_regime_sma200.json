@@ -1,0 +1,281 @@
+{
+  "schema_version": 1,
+  "version": "1.0.0",
+  "signal_id": "g1_market_regime_sma200",
+  "pre_registration_date": "2026-06-14T17:48:39+00:00",
+  "artifact_hashes": {
+    "signals.py": "d2f1c9deccf2b4260a7c28ab62e7fa64408df68301d3ea5ebf14a3d49ab8c090",
+    "engine.py": "aa2cb34fc9793b81466f253065b5a0f7791cd096b58d95e9dd991fdb1ce4ffdb",
+    "governance.py": "a3759079fc909f88657b1138004704947befec775dc10090bb09d7a16af15c21",
+    "hash_note": "SHA-256 of LF-normalised bytes (CRLF->LF) at 2026-06-14T17:48:39+00:00"
+  },
+  "hypothesis": {
+    "statement": "When BTC is in a structurally bullish regime (price above a rising SMA200), forward risk-adjusted returns are positive; when in a structurally bearish regime (price below a falling SMA200), forward returns are negative. The SMA200 slope + price position identifies macro trend regime and carries robust directional information at daily resolution.",
+    "direction": "long_short",
+    "expected_sign": "positive mean return while long (bull regime); negative mean return while short (bear regime); flat (no position) in sideways",
+    "mechanism": "trend/regime persistence",
+    "mechanism_detail": "The SMA200 is a long-horizon trend filter that proxies the structural balance of buyers and sellers. Price above a rising SMA200 reflects persistent demand excess, self-reinforcing through capital inflows, institutional accumulation, and momentum traders. The slope condition (SMA rising over 20 days) eliminates false bullish signals during brief rallies in downtrends and vice versa. The 'sideways' flat period (SMA direction disagrees with price position) avoids choppy transition zones where regime is ambiguous. This is a well-documented effect across assets (Faber 2007, Clare et al. 2017) applied to BTC's binary trend structure.",
+    "null_hypothesis": "7-day forward BTC returns are identically distributed across SMA200 bull, bear, and sideways regimes; the SMA200 slope carries no directional information.",
+    "role": "feature",
+    "role_note": "Assigned Feature role per FINAL_AUDIT conditioning judgment. Also borderline edge (full-sample Sharpe 0.414 >= 0.30) but WF only 2/4 = 50% (exactly at threshold). Primary value as a macro regime gate for ML and for conditioning other signals (h6 already embeds this signal as its bear-regime filter)."
+  },
+  "function_spec": {
+    "name": "Market Regime (SMA200 slope)",
+    "version": "1.0.0",
+    "signal_class": "trend-regime long/short/flat",
+    "data_source": "Binance BTCUSDT spot close (1m OHLCV resampled to daily close)",
+    "decision_function_file": "forward_evidence/decision_function_g1_market_regime.py",
+    "decision_function_hash": "a3310aa790b7722ee794d2efda6174b130ff36c711bc439446ead4f5b4ad1375",
+    "entry_condition_long": "close > SMA(200) AND SMA(200) rising over lag=20 days",
+    "entry_condition_short": "close < SMA(200) AND SMA(200) falling over lag=20 days",
+    "flat_condition": "price and SMA slope disagree (transition/sideways zone) OR insufficient history",
+    "direction": "long_short",
+    "hold_days": 7,
+    "exit_rule": "scheduled exit at entry + 7 calendar days; regime re-evaluated at exit for re-entry decision",
+    "parameters": {
+      "WIN": 200,
+      "LAG": 20,
+      "ANN": 365.0,
+      "HOLD_DAYS": 7,
+      "MIN_HISTORY": 220
+    },
+    "regime_definitions": {
+      "bull": "close > SMA(WIN) AND SMA(WIN) > SMA(WIN).shift(LAG)",
+      "bear": "close < SMA(WIN) AND SMA(WIN) < SMA(WIN).shift(LAG)",
+      "sideways": "price and slope contradict — close > SMA but SMA falling, OR close < SMA but SMA rising"
+    },
+    "sensitivity_variants": [
+      {
+        "WIN": 150,
+        "LAG": 20,
+        "label": "v1_win150"
+      },
+      {
+        "WIN": 250,
+        "LAG": 20,
+        "label": "v2_win250"
+      },
+      {
+        "WIN": 200,
+        "LAG": 10,
+        "label": "v3_lag10"
+      },
+      {
+        "WIN": 200,
+        "LAG": 30,
+        "label": "v4_lag30"
+      }
+    ],
+    "cost_assumption_bps": 15,
+    "governance_phase": "Phase F forward evidence collection",
+    "lockbox_status": "none — no lockbox was held for this signal"
+  },
+  "evidence_basis": {
+    "corpus": "Binance BTCUSDT 2021-01-01 to 2026-05-31 (Phase B battery)",
+    "n_trades_IS": 29,
+    "IS_sharpe": 0.3836,
+    "full_sample_sharpe_15bps": 0.4138,
+    "OOS_sharpe": 0.4929,
+    "OOS_IS_agree": true,
+    "WF_pass": "2/4",
+    "wf_pass_frac": 0.5,
+    "wf_folds": {
+      "2021": -1.87,
+      "2023": 0.654,
+      "2024": 1.281,
+      "2025": -0.398
+    },
+    "sens_pass_frac": 1.0,
+    "sens_results": [
+      {
+        "params": {
+          "WIN": 150,
+          "LAG": 20
+        },
+        "sharpe": 0.277
+      },
+      {
+        "params": {
+          "WIN": 250,
+          "LAG": 20
+        },
+        "sharpe": 0.707
+      },
+      {
+        "params": {
+          "WIN": 200,
+          "LAG": 10
+        },
+        "sharpe": 0.249
+      },
+      {
+        "params": {
+          "WIN": 200,
+          "LAG": 30
+        },
+        "sharpe": 0.323
+      }
+    ],
+    "loo_sign_consistency": 1.0,
+    "loo_sharpe_cv": 0.567,
+    "loo_sharpe": {
+      "2021": 0.813,
+      "2022": 0.113,
+      "2023": 0.365,
+      "2024": 0.2,
+      "2025": 0.555,
+      "2026": 0.391
+    },
+    "breakeven_cost_bps": 100,
+    "max_dd_pct": 57.4,
+    "struct_sign_ok": true,
+    "struct_clean_sharpe": 0.095,
+    "struct_ratio": 0.23,
+    "stability_score": 0.875,
+    "regime_sharpe": {
+      "bull": 0.456,
+      "sideways": null,
+      "bear": 0.631
+    },
+    "dsr_prob": 0.2788,
+    "dsr_prob_note": "IS only, n_trials=34 (frozen), cost_bps=15, hold_days=1. Fails Validated gate — expected; gate evaluated on forward returns.",
+    "bh_p": 0.1305,
+    "bh_p_note": "IS only. 1 - PSR(forward=0). BH rank 3/34; reject=False at q=0.10.",
+    "candidate_gate_result": "PASS Feature gate — OOS Sharpe +0.493 > 0, Sensitivity 100%. Also borderline Edge gate (Sharpe 0.414, WF 50% exactly at threshold).",
+    "notable_flags": [
+      "LOO STRONG: consistency=100% (all 6 LOO folds positive). Sharpe CV=0.567 (stable). This is the strongest structural robustness in the candidate set.",
+      "STRUCTURAL CONCERN: clean_sharpe (0.095) << full_sharpe (0.414). struct_ratio=0.23. When structural event windows (halvings, exchange collapses) are excluded, Sharpe drops 77%. Performance is heavily concentrated in structural event periods.",
+      "WF BORDERLINE: only 2 of 4 WF folds positive (2021 and 2025 negative). Exactly at 50% gate threshold.",
+      "NO SIDEWAYS TRADES: regime_sharpe sideways is null — the signal never fires in sideways mode, which is by design but means no sideways evidence exists.",
+      "INFREQUENT SIGNAL: n_trades=29 over 5 years (~6/year). Evidence accumulation is slow."
+    ]
+  },
+  "observation_floors": {
+    "minimum_trades": 30,
+    "minimum_calendar_months_before_assessment": 60,
+    "minimum_bull_regime_entries": 3,
+    "minimum_bear_regime_entries": 3,
+    "minimum_regimes_observed": 2,
+    "rationale": "n_trades=29 over 5 IS years implies ~5.8 trades/year forward. 30 forward trades requires approximately 5.2 years (62 months) — rounded to 60 months as the practical assessment floor. This is the single most important operational constraint on this signal's evidence timeline. A prior draft had 48 months here; that figure was inconsistent with the 30-trade minimum at 5.8/year and has been corrected. BOTH bull and bear regime entries are required: 3 minimum each. A one-sided collection (e.g., only bull entries during a prolonged bull market) is not sufficient evidence for promotion."
+  },
+  "promotion_criteria": {
+    "description": "Criteria to advance g1_market_regime_sma200 from Candidate to Validated. Feature role requires consistent conditioning information across both bull and bear regime observations.",
+    "minimum_trades": 30,
+    "gates": {
+      "G1_long_direction": {
+        "description": "Mean 7-day forward return while in bull regime (long) > 0 net of 15bps",
+        "threshold": "mean_net_return_bull > 0"
+      },
+      "G2_short_direction": {
+        "description": "Mean 7-day forward return while in bear regime (short) > 0 net of 15bps (i.e., short position profits)",
+        "threshold": "mean_net_return_bear > 0"
+      },
+      "G3_regime_coverage": {
+        "description": "At least 3 bull AND 3 bear regime entries observed (both regimes required for balanced assessment)",
+        "threshold": "bull_entries >= 3 AND bear_entries >= 3"
+      },
+      "G4_drawdown": {
+        "description": "Max drawdown across all trades < 35%",
+        "threshold": "max_drawdown < 0.35"
+      },
+      "G5_structural_assessment": {
+        "description": "Assess whether forward edge holds during non-halving periods (IS edge concentrated in structural events per struct_ratio=0.23)",
+        "threshold": "sharpe_excluding_structural_events > 0 (informational gate — negative finding is valid evidence, not disqualifying, but must be documented)"
+      }
+    },
+    "dsr_bh_requirement": "dsr_prob >= 0.50 AND bh_p <= 0.10 on forward trade returns at Validated gate (thresholds.yaml validated.feature)",
+    "provenance_requirement": "pinned_run provenance must be live-forward or mainnet",
+    "failure_analysis_required": true,
+    "notes": [
+      "The 48-month evidence horizon is not a gate — it is an expectation. Assessment may happen earlier if n=30 is reached, but the structural event concern (R1) means short-window evidence is suspect.",
+      "G2 (short direction) is the harder gate given BTC's structural bullish bias. Failure at G2 while G1 passes means 'regime long works, regime short does not'. This is still valid feature information.",
+      "G5 is informational only. If IS edge is entirely in structural event windows and forward evidence in non-event periods is negative, document as a qualified finding, not disqualification.",
+      "Pairwise r with h6 (which embeds this signal as its bear-filter) will likely be >= 0.70 in trend-consistent environments. Independence check is expected to fire at Validated gate — see R3.",
+      "PAIRWISE INDEPENDENCE: max_pairwise_r < 0.70 with all concurrently-Validated families is required at the Validated gate per thresholds.yaml validated.feature. Enforcement is deferred to the Proposal 1 implementation (see CLAUDE.md §16), but the requirement is binding. Compute and record pairwise r with h6 and with g1_trend_regime_ma_cross before any Validated promotion attempt."
+    ]
+  },
+  "collection_spec": {
+    "daily_job": {
+      "trigger": "once per day after daily close available (00:05 UTC)",
+      "data_inputs": [
+        "Binance BTCUSDT spot close (last bar of day from 1m OHLCV)"
+      ],
+      "steps": [
+        "1. Load last MIN_HISTORY (220) rows of spot close from corpus",
+        "2. Compute SMA(200) on daily close",
+        "3. Compute SMA slope: SMA(today) vs SMA(today - LAG=20)",
+        "4. Determine regime: bull if close>SMA AND SMA_rising, bear if close<SMA AND SMA_falling, else sideways",
+        "5. Log regime state to regime_states with fn_hash",
+        "6. If regime==bull AND not in_hold: open LONG trade_entries row (hold=7d)",
+        "7. If regime==bear AND not in_hold: open SHORT trade_entries row (hold=7d)",
+        "8. If open trade and today == planned_exit: close trade_exits row; log exit regime",
+        "9. Fill forward labels for 1d, 3d, 7d horizons on elapsed trades",
+        "10. Update mae_mfe_path for open trades",
+        "11. Write run_log row with fn_hash + day_features_hash"
+      ]
+    },
+    "evidence_snapshots": {
+      "trigger": "quarterly (evidence accumulation is slow — monthly would create noise on low n)",
+      "content": [
+        "Running Sharpe on bull trades (long entries) and bear trades (short entries) separately",
+        "Regime entry count: bull entries, bear entries, sideways periods",
+        "DSR on non-overlapping 7-day return blocks across all trades (when n >= 10)",
+        "Structural event overlay: identify if any collection period includes a known structural event (halving, major exchange collapse)",
+        "Power analysis: current n vs 30-trade floor; estimated quarters to floor"
+      ]
+    },
+    "determinism_check": {
+      "mechanism": "fn_hash in run_log must match decision_function_hash every run",
+      "alert": "fn_hash mismatch: abort run, alert operator, do NOT write to signal_log"
+    }
+  },
+  "source_divergence_assessment": {
+    "date": "2026-06-14",
+    "data_source": "Binance BTCUSDT spot close (single source)",
+    "conclusion": "Single-source signal. SMA200 is insensitive to cross-exchange price differences (<0.1% typical spread). No divergence risk.",
+    "cross_exchange_agreement": ">99% for SMA200 (slope and price-vs-SMA relationship stable across exchanges)"
+  },
+  "known_risks": [
+    {
+      "id": "R1",
+      "risk": "STRUCTURAL EVENT CONCENTRATION: clean_sharpe=0.095 vs full_sharpe=0.414 (struct_ratio=0.23). 77% of the IS Sharpe comes from periods around structural events (halvings, FTX collapse, etc.). In a forward window without a structural event, the expected Sharpe may be near 0.10, not 0.41.",
+      "severity": "HIGH",
+      "monitoring": "Track whether any major structural BTC events occur during collection. If forward evidence is strong in event periods only, document explicitly in the Validated promotion dossier."
+    },
+    {
+      "id": "R2",
+      "risk": "EVIDENCE ACCUMULATION SPEED: n_trades=29 over 5 IS years implies ~6 trades/year. The 30-trade floor requires approximately 5 years of forward collection. This is the longest evidence timeline in the candidate set.",
+      "severity": "HIGH",
+      "monitoring": "Report trade count at every quarterly snapshot. Do not attempt promotion before n=30."
+    },
+    {
+      "id": "R3",
+      "risk": "PAIRWISE INDEPENDENCE: g1_market_regime_sma200 is the bear-market filter embedded in h6. Return correlation with h6 is likely >= 0.70 in aligned market conditions. The independence check at Validated gate will likely fire.",
+      "severity": "MEDIUM",
+      "monitoring": "Compute pairwise r with h6 and with g1_trend_regime_ma_cross at the quarterly snapshot. If r >= 0.70 with both, only one can be promoted without an independence gate override."
+    },
+    {
+      "id": "R4",
+      "risk": "ONE-SIDED EVIDENCE: BTC may stay in bull regime for 2-3 years (as in 2020-2021). If collection window is predominantly bull regime, n=30 will be reached but bear-regime evidence will be absent.",
+      "severity": "MEDIUM",
+      "monitoring": "Track bear regime entries separately. Promotion gate G3 requires bear_entries >= 3. If only bull entries are observed, the signal cannot be promoted until bear regime entries accumulate — even if n >= 30."
+    },
+    {
+      "id": "R5",
+      "risk": "WF BORDERLINE: WF 50% (exactly at threshold; 2021 and 2025 both negative). In an environment similar to 2021 (early bull with high vol and crypto-native dynamics), the signal may fail.",
+      "severity": "LOW",
+      "monitoring": "Track WF-fold-equivalent performance in each calendar year of forward collection."
+    }
+  ],
+  "lockbox_status": {
+    "window": null,
+    "spent": false,
+    "notes": "No lockbox was held for g1_market_regime_sma200. This signal was evaluated in-sample over the full 2021-2026 corpus. Forward evidence begins from registration date."
+  },
+  "notes": [
+    "Do not modify sig_market_regime or the SMA200/lag=20 construction after registration. Parameter changes require VERSION bump and new registration.",
+    "The structural event concentration (struct_ratio=0.23) is the most important research integrity concern for this signal. It does not disqualify the signal but must be explicitly tracked and disclosed in any promotion dossier.",
+    "LOO consistency = 100% (all 6 LOO folds positive) is a genuine strength and warrants the registration despite the structural concern.",
+    "The realistic evidence timeline is 4-6 years. Pre-registering now captures the entire forward collection window. Delaying registration loses months that cannot be recovered."
+  ]
+}

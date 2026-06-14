@@ -1,0 +1,259 @@
+{
+  "_draft": true,
+  "_draft_note": "DRAFT — do not register until all REQUIRED fields are resolved and operator approves.",
+  "_draft_date": "2026-06-14",
+  "_required_before_registration": [
+    "Re-hash signals.py, engine.py, governance.py at registration time",
+    "Set pre_registration_date to the actual UTC timestamp of registration"
+  ],
+
+  "schema_version": 1,
+  "version": "1.0.0",
+  "signal_id": "g3_momentum_tsmom",
+  "pre_registration_date": "REQUIRED",
+
+  "hypothesis": {
+    "statement": "BTC prices that have risen over a 30-day look-back period tend to continue rising; prices that have fallen tend to continue falling. The sign of the k-day return provides a statistically robust directional signal with positive risk-adjusted returns after transaction costs.",
+    "direction": "long_short",
+    "expected_sign": "positive mean return in the direction of the k-day momentum signal; negative correlation between signal sign and forward 1-day return should be absent",
+    "mechanism": "time-series momentum / trend persistence",
+    "mechanism_detail": "Time-series momentum (TSMOM) exploits the tendency for trends to persist over medium horizons (days to months). In BTC, the mechanism operates through: (1) structured capital inflows during bull markets (institutional buying programs that execute over weeks to months), (2) under-reaction to macro information as new participants enter the market, and (3) feedback between sentiment, leverage, and price. The 30-day horizon balances noise (too short) against mean-reversion (too long). This is one of the most broadly replicated effects in empirical finance (Jegadeesh & Titman 1993; Moskowitz et al. 2012) and has documented presence in crypto (Liu et al. 2022).",
+    "null_hypothesis": "The sign of the 30-day BTC return has no predictive power for the next day's return; E[r_{t+1} | sign(r_{t,t-30})] is identically zero.",
+    "known_caveats_at_registration": "The 2026 IS walk-forward fold produced a Sharpe of -1.330, and 2025 was near-zero (+0.006). The signal has not generated positive returns in approximately 2 years prior to this registration. The working hypothesis is that 2025-2026 represents a low-momentum / sideways regime for BTC (consistent with regime_sharpe sideways = -0.948 in IS data), not a structural failure of the momentum effect. Forward evidence from registration date tests this hypothesis directly. If the forward collection period is also predominantly sideways and the signal still fails, that is evidence for mechanism decay rather than regime artifact.",
+    "role": "edge",
+    "role_note": "Edge role: Sharpe 0.349 >= 0.30, WF 50%, Sensitivity 100%, LOO 83%, break-even 30bps, structural sign preserved. Primary forward validation as a standalone directional signal. Also a candidate ML feature for momentum-state conditioning."
+  },
+
+  "function_spec": {
+    "name": "Momentum (TSMOM)",
+    "version": "1.0.0",
+    "signal_class": "time-series momentum long/short",
+    "data_source": "Binance BTCUSDT spot close (1m OHLCV resampled to daily close)",
+    "decision_function_file": "forward_evidence/decision_function_g3_tsmom.py",
+    "decision_function_hash": "90865666cf83c6a1972ba5d0ce7fb8d4694cd2281c9f5654cd99042940a5b7c4",
+    "entry_condition_long": "close_t / close_{t-K} > 1.0 (positive K-day return)",
+    "entry_condition_short": "close_t / close_{t-K} < 1.0 (negative K-day return)",
+    "flat_condition": "zero K-day return (rare) OR insufficient history (< MIN_HISTORY days)",
+    "direction": "long_short",
+    "hold_days": 7,
+    "hold_days_note": "IS battery used hold_days=1 (continuous daily re-evaluation; 178 direction-change periods). Forward collection uses hold_days=7 to reduce turnover and transaction costs (~52 trades/year). IS and forward Sharpe distributions are not directly comparable due to different hold conventions; the Validated gate evaluates forward returns only.",
+    "exit_rule": "scheduled exit at entry + 7 calendar days; signal re-evaluated at exit for re-entry decision; no intra-hold exits",
+    "trade_counting_definition": "each 7-day evaluation window is one trade; trades are sequential and non-overlapping; re-entry occurs at the same time as exit (daily close of exit day)",
+    "parameters": {
+      "K": 30,
+      "ANN": 365.0,
+      "HOLD_DAYS": 7,
+      "MIN_HISTORY": 31
+    },
+    "sensitivity_variants": [
+      {"K": 20, "label": "v1_k20"},
+      {"K": 60, "label": "v2_k60"},
+      {"K": 90, "label": "v3_k90"},
+      {"K": 120, "label": "v4_k120"}
+    ],
+    "sensitivity_note": "All 4 variants positive in IS battery. k=20 is marginal (Sharpe 0.051); k=60 is strongest (0.459). The canonical k=30 sits in the middle of the sensitivity range. The 2026 degradation affects shorter lookbacks more severely.",
+    "cost_assumption_bps": 15,
+    "governance_phase": "Phase F forward evidence collection",
+    "lockbox_status": "none — no lockbox was held for this signal"
+  },
+
+  "evidence_basis": {
+    "corpus": "Binance BTCUSDT 2021-01-01 to 2026-05-31 (Phase B battery)",
+    "n_trades_IS": 178,
+    "n_trades_IS_note": "178 directional periods over ~5.4 years at IS hold_days=1 (continuous daily re-evaluation; each direction-change period = 1 IS trade). Forward collection uses hold_days=7 (fixed 7-day evaluation windows, ~52 trades/year). Forward n_trades will differ significantly from IS n_trades.",
+    "IS_sharpe": 0.4411,
+    "full_sample_sharpe_15bps": 0.3492,
+    "OOS_sharpe": 0.0709,
+    "OOS_IS_agree": true,
+    "WF_pass": "3/6",
+    "wf_pass_frac": 0.5,
+    "wf_folds": {
+      "2021": 0.732,
+      "2022": -0.138,
+      "2023": 2.422,
+      "2024": -0.369,
+      "2025": 0.006,
+      "2026": -1.330
+    },
+    "sens_pass_frac": 1.0,
+    "sens_results": [
+      {"params": {"K": 20}, "sharpe": 0.051},
+      {"params": {"K": 60}, "sharpe": 0.459},
+      {"params": {"K": 90}, "sharpe": 0.200},
+      {"params": {"K": 120}, "sharpe": 0.258}
+    ],
+    "loo_sign_consistency": 0.833,
+    "loo_sharpe_cv": 0.520,
+    "loo_sharpe": {
+      "2021": 0.228,
+      "2022": 0.478,
+      "2023": -0.002,
+      "2024": 0.500,
+      "2025": 0.408,
+      "2026": 0.471
+    },
+    "breakeven_cost_bps": 30,
+    "max_dd_pct": 61.1,
+    "struct_sign_ok": true,
+    "struct_clean_sharpe": 0.045,
+    "struct_ratio": 0.128,
+    "stability_score": 0.833,
+    "regime_sharpe": {
+      "bull": 1.062,
+      "sideways": -0.948,
+      "bear": -0.240
+    },
+    "dsr_prob": 0.2216,
+    "dsr_prob_note": "IS only, n_trials=34 (frozen), cost_bps=15, hold_days=1. Fails Validated gate — expected; gate evaluated on forward returns. Note: forward collection uses hold_days=7; IS and forward DSR are not directly comparable.",
+    "bh_p": 0.1747,
+    "bh_p_note": "IS only. 1 - PSR(forward=0). BH rank 5/34; reject=False at q=0.10.",
+    "candidate_gate_result": "PASS Edge gate — Sharpe 0.349 >= 0.30, WF 50% >= 50%, Sensitivity 100%, LOO 83% >= 67%, break-even 30bps >= 15bps, structural sign preserved.",
+    "notable_flags": [
+      "RECENT DEGRADATION: 2026 WF fold Sharpe = -1.330 (worst fold in battery). 2025 barely positive at 0.006. Two consecutive years of near-zero or negative performance is the single most important risk factor for this signal.",
+      "OOS SHARPE MARGINAL: OOS Sharpe = +0.071 (barely positive). The IS/OOS signal is consistent in sign but OOS is 84% lower than IS. Effect may be weakening or period-specific in IS.",
+      "STRUCTURAL CONCERN: clean_sharpe=0.045 vs full_sharpe=0.349 (struct_ratio=0.128). 87% of IS edge comes from periods around structural BTC events. The base momentum effect outside these events is near-zero.",
+      "REGIME SENSITIVITY: bull_sharpe=1.062 vs sideways_sharpe=-0.948. Momentum works strongly in trending markets and actively loses in choppy/sideways conditions.",
+      "PAIRWISE CONCERN: correlated with g5_trend_4h at r >= 0.70 per FINAL_AUDIT. If both are registered, the independence check will fire at Validated gate — only one can be promoted unless r < 0.70 in forward data."
+    ]
+  },
+
+  "observation_floors": {
+    "minimum_trades": 30,
+    "minimum_calendar_months_before_assessment": 12,
+    "minimum_bull_regime_periods": 2,
+    "minimum_sideways_regime_periods": 2,
+    "minimum_both_long_and_short_trades": true,
+    "rationale": "n_trades_IS=178 over 5.4 years → ~33 direction changes per year. 30 forward direction changes ≈ 11 months. However, the 2026 degradation flag means 12 months is the minimum before assessment — at least one full year of forward data is needed to contextualize the degradation. Both long (bullish momentum) and short (bearish momentum) trades must be observed. Sideways regime periods (regime_sharpe=-0.948) should be identified separately to assess whether choppy-market performance is consistent with IS."
+  },
+
+  "promotion_criteria": {
+    "description": "Criteria to advance g3_momentum_tsmom from Candidate to Validated. Edge role: validated as a standalone directional signal with positive risk-adjusted forward returns.",
+    "minimum_trades": 30,
+    "gates": {
+      "G1_direction": {
+        "description": "Mean forward return in signal direction > 0 net of 15bps across all trades",
+        "threshold": "mean_net_return > 0"
+      },
+      "G2_power": {
+        "description": "One-sided t-test on trade returns: p < 0.10 (n=30 gives ~40% power at true Sharpe=0.35/trade; failure does NOT disprove — record as insufficient evidence)",
+        "threshold": "t_test_p < 0.10"
+      },
+      "G3_degradation_assessment": {
+        "description": "2026 YTD degradation pre-registration flag: assess whether forward evidence since registration recovers to positive territory. If first 12 months forward Sharpe < -0.5, treat as regime-dependent degradation and escalate to governance review.",
+        "threshold": "rolling_12m_forward_sharpe > -0.50 (informational gate — negative finding warrants review, not automatic disqualification)"
+      },
+      "G4_drawdown": {
+        "description": "Max drawdown across all forward trades < 35%",
+        "threshold": "max_drawdown < 0.35"
+      },
+      "G5_sideways_assessment": {
+        "description": "Identify and report sideways-regime performance separately (IS sideways_sharpe=-0.948 is a known failure mode)",
+        "threshold": "sideways_sharpe is documented (informational — negative sideways performance is expected and does not block promotion if overall G1+G2 pass)"
+      }
+    },
+    "dsr_bh_requirement": "dsr_prob >= 0.50 AND bh_p <= 0.10 on forward trade returns at Validated gate (thresholds.yaml validated.edge)",
+    "provenance_requirement": "pinned_run provenance must be live-forward or mainnet",
+    "failure_analysis_required": true,
+    "notes": [
+      "The 2026 degradation (-1.33 Sharpe) is the most pressing open question. Registration commits to testing whether this is a temporary regime artifact (choppy/sideways market) or structural decay. The hypothesis is: the effect is regime-conditional (bull market required) and the 2025-2026 period is a low-momentum regime.",
+      "OOS Sharpe=0.071 means forward evidence must be interpreted carefully — even a positive forward Sharpe confirms the pre-registered direction, but the MAGNITUDE of the forward Sharpe relative to IS will be the key research finding.",
+      "PAIRWISE DEPENDENCY: if g5_trend_4h is also pre-registered, forward pairwise r must be assessed at 12 months. If r >= 0.70, g3_momentum_tsmom has priority as cluster head (higher IS Sharpe, edge role vs feature role for 4H Trend).",
+      "Sensitivity variant k=20 barely passes (IS Sharpe 0.051). Forward sensitivity check should re-evaluate whether k=20 remains positive. If it turns negative, sensitivity_pass_frac drops to 3/4 (75%) — still above the 60% gate threshold.",
+      "PAIRWISE INDEPENDENCE: max_pairwise_r < 0.70 with all concurrently-Validated families is required at the Validated gate per thresholds.yaml validated.edge. Enforcement is deferred to the Proposal 1 implementation (see CLAUDE.md §16), but the requirement is binding. g3 and g5_trend_4h are correlated at r=0.712 in IS data (FINAL_AUDIT correlation_matrix.csv). Compute and record pairwise r at the 12-month forward mark before any Validated promotion attempt. g3 holds cluster priority over g5_trend_4h (higher IS Sharpe, edge vs feature role)."
+    ]
+  },
+
+  "collection_spec": {
+    "daily_job": {
+      "trigger": "once per day after daily close available (00:05 UTC)",
+      "data_inputs": [
+        "Binance BTCUSDT spot close (last bar of day from 1m OHLCV)"
+      ],
+      "steps": [
+        "1. Load last MIN_HISTORY (31) rows of spot close from corpus",
+        "2. Call compute_signal(close) → position in {-1, 0, +1}",
+        "3. Log signal state and K-day return value to signal_log with fn_hash",
+        "4. If no open trade: open trade_entries row (direction=signal, planned_exit_date=today+7)",
+        "5. If open trade AND today == planned_exit_date: close trade_exits row (record 7d net return); immediately open new trade_entries row (direction=compute_signal(), planned_exit_date=today+7)",
+        "6. Update mae_mfe_path for open trade",
+        "7. Fill forward return labels (1d, 7d) on completed trades",
+        "8. Write run_log row with fn_hash + day_features_hash"
+      ]
+    },
+    "evidence_snapshots": {
+      "trigger": "monthly",
+      "content": [
+        "Running Sharpe on all completed directional periods",
+        "Separate Sharpe for long periods vs short periods",
+        "Regime overlay: tag each completed period with bull/bear/sideways regime at entry",
+        "DSR on completed-period returns (when n >= 15)",
+        "Rolling 12-month Sharpe for degradation monitoring (key metric for G3 gate)",
+        "Sensitivity check: re-evaluate k=20 forward Sharpe",
+        "Power analysis: current n vs 30-trade floor"
+      ]
+    },
+    "determinism_check": {
+      "mechanism": "fn_hash in run_log must match decision_function_hash every run",
+      "alert": "fn_hash mismatch: abort run, alert operator, do NOT write to signal_log"
+    }
+  },
+
+  "source_divergence_assessment": {
+    "date": "2026-06-14",
+    "data_source": "Binance BTCUSDT spot close (single source)",
+    "conclusion": "Single-source signal using only price close. 30-day momentum is insensitive to cross-exchange differences at <0.1% spread. No divergence risk.",
+    "cross_exchange_agreement": ">99.9% (K-day return sign is stable across any exchange with <0.5% spread)"
+  },
+
+  "known_risks": [
+    {
+      "id": "R1",
+      "risk": "2026 DEGRADATION: WF fold 2026 Sharpe = -1.330. Combined with 2025 at +0.006, the signal has effectively not worked for ~2 years. This may indicate: (a) regime-conditional decay in a choppy/low-momentum market, or (b) structural weakening of the momentum effect as BTC matures and institutions arb it.",
+      "severity": "CRITICAL",
+      "monitoring": "Rolling 12-month forward Sharpe is the primary monitoring metric. If negative after 6 months and 12 months of forward collection, escalate to governance review. The hypothesis is (a) not (b) — forward evidence will test this."
+    },
+    {
+      "id": "R2",
+      "risk": "STRUCTURAL EVENT CONCENTRATION: struct_ratio=0.128. 87% of IS edge concentrated in structural event windows. Momentum may only work reliably around BTC halvings, exchange collapses, and major macro events — not in ordinary trending conditions.",
+      "severity": "HIGH",
+      "monitoring": "Tag all forward trades with whether a structural event occurred during the period. Compare Sharpe in event vs non-event periods."
+    },
+    {
+      "id": "R3",
+      "risk": "SIDEWAYS REGIME FAILURE: regime_sharpe sideways = -0.948. If forward collection window is predominantly sideways/choppy (as 2025-2026 appears to be), systematic losses are expected. This is a regime-conditional failure, not a signal failure.",
+      "severity": "HIGH",
+      "monitoring": "Measure fraction of forward collection time in sideways regime (SMA200-based classification). If > 40% sideways, contextualize forward Sharpe accordingly."
+    },
+    {
+      "id": "R4",
+      "risk": "OOS SHARPE MARGINAL: OOS Sharpe=0.071. The forward effect, if real, may produce a Sharpe that is statistically indistinguishable from zero. With n=30 trades and low per-trade expected Sharpe, power is limited (~40% power at true Sharpe=0.35). A failure to reject H0 is not evidence of no effect — it is underpowered.",
+      "severity": "MEDIUM",
+      "monitoring": "Report confidence interval on forward Sharpe in every quarterly snapshot. Do not interpret non-significant results as disconfirmation."
+    },
+    {
+      "id": "R5",
+      "risk": "PAIRWISE CORRELATION WITH 4H TREND: g3 and g5_trend_4h are correlated at r >= 0.70 per FINAL_AUDIT. Both are momentum-adjacent signals. The independence check at Validated gate will likely block one of them.",
+      "severity": "MEDIUM",
+      "monitoring": "If g5_trend_4h is pre-registered, compute forward pairwise r at 12-month mark. g3 has priority as cluster head (higher IS Sharpe, edge vs feature role)."
+    },
+    {
+      "id": "R6",
+      "risk": "k=20 FRAGILITY: sensitivity variant k=20 has IS Sharpe 0.051 (marginally positive). If k=20 turns negative in forward data, the sensitivity case weakens. All 5 variants must remain sign-positive for 100% sensitivity at the Validated gate.",
+      "severity": "LOW",
+      "monitoring": "Track k=20 forward returns in parallel with canonical k=30. Shadow logging only — k=20 does not drive decisions."
+    }
+  ],
+
+  "lockbox_status": {
+    "window": null,
+    "spent": false,
+    "notes": "No lockbox was held for g3_momentum_tsmom. This signal was evaluated in-sample over the full 2021-2026 corpus. Forward evidence begins from registration date."
+  },
+
+  "notes": [
+    "Do not modify sig_momentum or the K=30 construction after registration. Changes require VERSION bump and new registration.",
+    "The 2026 YTD degradation (-1.33 Sharpe) is the defining open question for this signal. The pre-registration commits to testing the hypothesis that the degradation is regime-conditional (choppy market) rather than structural decay. Forward evidence resolves this.",
+    "STRUCTURAL NOTE: clean_sharpe=0.045. Unlike h5 (where structural events hurt the signal), for TSMOM they help it. The non-event base effect is near zero. This limits confidence in the signal's general applicability but does not disqualify it — structural events are part of the forward data environment.",
+    "If the first 12 months of forward data show negative Sharpe, the governance review should assess: (1) what regime was BTC in, (2) was the degradation consistent with the sideways-regime failure mode, and (3) whether extending collection is warranted or the signal should be demoted to discovery."
+  ]
+}

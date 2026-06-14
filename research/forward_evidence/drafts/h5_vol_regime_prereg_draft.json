@@ -1,0 +1,251 @@
+{
+  "_draft": true,
+  "_draft_note": "DRAFT — do not register until all REQUIRED fields are resolved and operator approves.",
+  "_draft_date": "2026-06-14",
+  "_required_before_registration": [
+    "Re-hash signals.py, engine.py, governance.py at registration time",
+    "Set pre_registration_date to the actual UTC timestamp of registration"
+  ],
+
+  "schema_version": 1,
+  "version": "1.0.0",
+  "signal_id": "h5_vol_regime",
+  "pre_registration_date": "REQUIRED",
+
+  "hypothesis": {
+    "statement": "Periods of high realized volatility carry poor risk-adjusted forward returns for BTC. Staying long only when RV21 is NOT in the top tercile of its trailing 252-day distribution earns a structurally positive, parameter-robust risk-adjusted premium over buy-and-hold.",
+    "direction": "long_only",
+    "expected_sign": "positive forward return during active (non-high-vol) regime vs. flat during high-vol regime",
+    "mechanism": "vol-managed risk premium",
+    "mechanism_detail": "High realized volatility marks stressed regimes: forced deleveraging, adverse selection, and uncertainty premiums suppress forward risk-adjusted returns. Avoiding these periods by going to flat harvests the asymmetry between normal and stressed return distributions. This is the BTC analogue of the equity volatility-managed portfolio premium (Moreira & Muir 2017). The effect operates through risk capacity, not alpha: BTC expected returns are not necessarily lower in high-vol, but the Sharpe is reliably worse due to non-linear drawdown dynamics.",
+    "null_hypothesis": "7-day forward BTC returns are identically distributed in high-vol and non-high-vol regimes; vol-managed exposure adds no risk-adjusted edge over buy-and-hold.",
+    "role": "feature",
+    "role_note": "Primary value as a conditioning variable and ML feature. Standalone Sharpe at 15bps is 0.130 (weak), but IS/OOS structure and sensitivity robustness make it a high-confidence conditioning input."
+  },
+
+  "function_spec": {
+    "name": "H5 Volatility Regimes",
+    "version": "1.0.0",
+    "signal_class": "vol-regime long-only",
+    "data_source": "Binance BTCUSDT spot close (1m OHLCV resampled to daily close)",
+    "decision_function_file": "forward_evidence/decision_function_h5.py",
+    "decision_function_hash": "fc1720ccb3d9adf99ddcee2e7d9d4d8d655e3ce7ffff4e28b7fd432d0f18a2be",
+    "decision_function_note": "The decision function is decision_function_h5.py::compute_signal(). It embeds the full RV21 computation inline. Do NOT use sig_h5_vol_regimes from signals.py — that function reads a pre-computed m['vol_regime'] column and hashing it would not cover the RV algorithm.",
+    "entry_condition": "vol_regime in {low, medium} — i.e., RV21 NOT in top tercile of trailing 252d distribution",
+    "exit_condition": "vol_regime transitions to 'high' OR hold_days elapsed (7 calendar days); evaluated daily",
+    "direction": "long_only",
+    "hold_days": 7,
+    "exit_rule": "scheduled exit at entry + 7 calendar days; if vol_regime enters 'high' mid-hold, close at next daily evaluation (end-of-day close)",
+    "parameters": {
+      "RV_WINDOW": 21,
+      "REGIME_WINDOW": 252,
+      "HIGH_PCTILE": 67,
+      "ANN": 365.0,
+      "HOLD_DAYS": 7,
+      "MIN_HISTORY": 273
+    },
+    "regime_definitions": {
+      "vol_regime_high": "RV21 annualized > trailing-252d 67th percentile",
+      "vol_regime_medium": "33rd pctile < RV21 annualized <= 67th pctile",
+      "vol_regime_low": "RV21 annualized <= trailing-252d 33rd pctile",
+      "signal_active": "vol_regime in {low, medium} — the bottom two terciles"
+    },
+    "sensitivity_variants": [
+      {"RV_WINDOW": 14, "HIGH_PCTILE": 67, "label": "v1_rv14"},
+      {"RV_WINDOW": 30, "HIGH_PCTILE": 67, "label": "v2_rv30"},
+      {"RV_WINDOW": 21, "HIGH_PCTILE": 75, "label": "v3_pctile75"},
+      {"RV_WINDOW": 21, "HIGH_PCTILE": 60, "label": "v4_pctile60"}
+    ],
+    "sensitivity_attribution_note": "The IS battery evaluated the equivalent signal under the name 'Volatility Regime' (GROUP1, signals.py::sig_volatility_regime) with parameterized variants. That function is mathematically identical to decision_function_h5.py::compute_signal(): same RV21 formula, same rolling-tercile logic, same position rule. Battery parameter convention uses pctile=33 (lower bound); this file uses HIGH_PCTILE=67 (upper bound) — these are the same threshold (33rd and 67th percentile of the same distribution). The h5 SEED entry in the battery had sens_results=[] because the seed calls sig_h5_vol_regimes (column reader, no parameters); all sensitivity results come from the Volatility Regime G1 entry. Sensitivity variants v3 and v4 here differ from G1 variants: G1 tested {pctile:25} and {pctile:40}; in HIGH_PCTILE convention these are HIGH_PCTILE=75 and HIGH_PCTILE=60 respectively.",
+    "cost_assumption_bps": 15,
+    "governance_phase": "Phase F forward evidence collection",
+    "lockbox_status": "none — no lockbox was held for this signal"
+  },
+
+  "evidence_basis": {
+    "corpus": "Binance BTCUSDT 2021-01-01 to 2026-05-31 (Phase B battery)",
+    "battery_entry": "Volatility Regime (GROUP1) — parameterized variant of the same computation",
+    "n_trades_IS": 30,
+    "IS_sharpe": -0.0612,
+    "full_sample_sharpe_15bps": 0.1302,
+    "OOS_sharpe": 0.6782,
+    "OOS_IS_agree": false,
+    "WF_pass": "3/4",
+    "wf_pass_frac": 0.75,
+    "wf_folds": {
+      "2022": -2.057,
+      "2023": 1.223,
+      "2024": 1.705,
+      "2025": 0.274
+    },
+    "sens_pass_frac": 1.0,
+    "sens_results": [
+      {"params": {"RV_WINDOW": 14, "HIGH_PCTILE": 67}, "sharpe": 0.431, "cagr_pct": 9.6},
+      {"params": {"RV_WINDOW": 30, "HIGH_PCTILE": 67}, "sharpe": 0.338, "cagr_pct": 5.7},
+      {"params": {"RV_WINDOW": 21, "HIGH_PCTILE": 75}, "sharpe": 0.328, "cagr_pct": 5.2},
+      {"params": {"RV_WINDOW": 21, "HIGH_PCTILE": 60}, "sharpe": 0.245, "cagr_pct": 2.1}
+    ],
+    "loo_sign_consistency": 0.667,
+    "loo_sharpe_cv": 2.454,
+    "breakeven_cost_bps": 50,
+    "max_dd_pct": 79.6,
+    "struct_sign_ok": true,
+    "struct_clean_sharpe": 0.527,
+    "struct_ratio": 4.046,
+    "stability_score": 0.604,
+    "regime_sharpe": {
+      "bull": 0.274,
+      "sideways": 1.559,
+      "bear": -1.044
+    },
+    "dsr_prob": 0.0567,
+    "dsr_prob_note": "IS only, n_trials=34 (frozen), cost_bps=15, hold_days=1. Fails Validated gate — expected; gate evaluated on forward returns.",
+    "bh_p": 0.4523,
+    "bh_p_note": "IS only. 1 - PSR(forward=0). BH rank 15/34; reject=False at q=0.10.",
+    "candidate_gate_result": "PASS Feature gate — OOS Sharpe +0.678 > 0, Sensitivity 100%",
+    "notable_flags": [
+      "IS/OOS sign disagreement: IS=-0.061 (negative), OOS=+0.678 (positive). Effect visible only in OOS window.",
+      "LOO consistency 67% exactly at threshold — structurally fragile to sub-period exclusion.",
+      "Sharpe CV=2.454 across LOO folds (high instability); 2 of 6 LOO folds negative.",
+      "STRUCTURAL POSITIVE: clean_sharpe (0.527) >> full_sharpe (0.130). Effect is STRONGER excluding event windows, confirming the signal is not driven by opportunistic structural-event capture.",
+      "Bear regime Sharpe -1.044: signal correctly avoids bear markets (long-flat), but when market is in bear and vol is low/medium, performance is poor."
+    ]
+  },
+
+  "observation_floors": {
+    "minimum_trades": 30,
+    "minimum_active_days": 180,
+    "minimum_calendar_months_before_assessment": 60,
+    "minimum_high_vol_periods_observed": 5,
+    "minimum_regimes_observed": 2,
+    "rationale": "n_trades_IS=30 over 5 IS years implies ~6 trade entries (7-day long-hold starts) per year. At 6/year, the 30-trade floor requires approximately 5 years (60 months) of forward collection. This is the single most important operational constraint for this signal — do not attempt promotion before 60 months unless n=30 is reached earlier. High-vol periods floor (5) required to confirm the exclusion decision has discriminating power. Both bull and bear market regimes must be observed for a balanced feature assessment. The 60-month floor supersedes the 18-month figure in any prior draft — that figure incorrectly estimated 15-25 regime entries per year, confusing regime transitions with the engine's 7-day-hold entry counting."
+  },
+
+  "promotion_criteria": {
+    "description": "Criteria to advance h5_vol_regime from Candidate to Validated (Feature role). All gates must pass simultaneously. Evaluated only after observation_floors are met.",
+    "minimum_trades": 30,
+    "gates": {
+      "G1_direction": {
+        "description": "Mean 7-day forward return during active regime (vol not high) > 0 net of 15bps",
+        "threshold": "mean_net_return_active > 0"
+      },
+      "G2_regime_differential": {
+        "description": "Sharpe during active-regime periods exceeds buy-and-hold Sharpe over the same calendar window",
+        "threshold": "sharpe_active > sharpe_buyhold_same_period"
+      },
+      "G3_high_vol_exclusion_value": {
+        "description": "Sharpe with high-vol periods excluded > Sharpe with no filtering (validates that the filter adds value)",
+        "threshold": "sharpe_excluding_high_vol > sharpe_unconditional"
+      },
+      "G4_drawdown": {
+        "description": "Max drawdown during active-regime holds < 30%",
+        "threshold": "max_drawdown_active < 0.30"
+      },
+      "G5_regime_coverage": {
+        "description": "At least 5 distinct transitions to high-vol state observed (confirms discriminating power of the regime)",
+        "threshold": "high_vol_entries >= 5"
+      }
+    },
+    "dsr_bh_requirement": "dsr_prob >= 0.50 AND bh_p <= 0.10 on forward trade returns at Validated gate (thresholds.yaml validated.feature)",
+    "provenance_requirement": "pinned_run provenance must be live-forward or mainnet",
+    "failure_analysis_required": true,
+    "notes": [
+      "Feature role: G2 (regime differential) is the primary validation gate. G1 failing while G2 passes is 'signal is weak standalone but adds conditioning value'.",
+      "Failure at G1 AND G2 is 'effect absent in live data' — record as negative finding, do not promote.",
+      "Do not conclude negative before 60 months. IS/OOS disagreement warns that the effect is regime-sensitive and the IS period may not be representative.",
+      "LOO fragility: if forward evidence from a specific regime (e.g., sustained bear) causes the signal to fail, document the conditioning regime, do not disqualify globally.",
+      "PAIRWISE INDEPENDENCE: max_pairwise_r < 0.70 with all concurrently-Validated families is required at the Validated gate per thresholds.yaml validated.feature. Enforcement is deferred to the Proposal 1 implementation (see CLAUDE.md §16), but the requirement is binding. h5 is expected to be correlated with h6 at r >= 0.70 in similar vol environments — compute and record pairwise r before any Validated promotion attempt."
+    ]
+  },
+
+  "collection_spec": {
+    "daily_job": {
+      "trigger": "once per day after daily close available (00:05 UTC)",
+      "data_inputs": [
+        "Binance BTCUSDT spot close (last bar of day from 1m OHLCV)"
+      ],
+      "steps": [
+        "1. Load last MIN_HISTORY (273) rows of spot close from corpus",
+        "2. Compute log returns: log(close_t / close_{t-1})",
+        "3. Compute RV21 = annualized std of log-returns over last 21d: rolling(21).std() * sqrt(365)",
+        "4. Compute trailing-252d 67th percentile threshold: rolling(252).quantile(0.67)",
+        "5. Determine vol_regime: 'high' if RV21 > threshold, else 'active'",
+        "6. Log vol_regime and RV21 to regime_states with fn_hash (fn_hash = SHA-256 of decision_function_h5.py)",
+        "7. If vol_regime=='active' AND not in_hold: open trade_entries row (hold=7d)",
+        "8. If open trade and today == planned_exit OR vol_regime=='high': close trade_exits",
+        "9. Fill forward labels for 1d, 3d, 7d horizons on elapsed trades",
+        "10. Update mae_mfe_path for open trades",
+        "11. Write run_log row with fn_hash + day_features_hash"
+      ]
+    },
+    "evidence_snapshots": {
+      "trigger": "monthly (first calendar day of each month)",
+      "content": [
+        "Running Sharpe on all completed 7-day holds",
+        "Vol regime distribution (fraction of days in high/medium/low)",
+        "Regime entry count (high-to-active transitions) vs minimum floor",
+        "DSR on non-overlapping 7-day return blocks (compute when n >= 15)",
+        "Power analysis: current n vs 30-trade floor; estimated months to floor at current entry rate",
+        "Regime differential check: Sharpe active vs buy-hold"
+      ]
+    },
+    "determinism_check": {
+      "mechanism": "fn_hash in run_log must match decision_function_hash every run",
+      "alert": "fn_hash mismatch: abort run, alert operator, do NOT write to signal_log"
+    }
+  },
+
+  "source_divergence_assessment": {
+    "date": "2026-06-14",
+    "data_source": "Binance BTCUSDT spot close (single source)",
+    "conclusion": "Single-source signal — no divergence risk. RV21 from spot close is exchange-agnostic at <0.1% cross-exchange price spread.",
+    "cross_exchange_agreement": ">99% (spot close insensitive to cross-exchange spread for 21-day RV)"
+  },
+
+  "known_risks": [
+    {
+      "id": "R1",
+      "risk": "IS/OOS sign reversal: IS Sharpe is negative (-0.061) while OOS is positive (+0.678). Forward data may confirm the IS period is the anomaly, OR reveal the OOS window was the lucky one.",
+      "severity": "HIGH",
+      "monitoring": "Track forward Sharpe quarterly. If negative at 12 months, escalate to governance review before the 60-month assessment gate."
+    },
+    {
+      "id": "R2",
+      "risk": "LOO instability: Sharpe CV=2.454 across LOO folds. Two LOO folds negative. Forward performance in a bear or sideways year may turn negative.",
+      "severity": "HIGH",
+      "monitoring": "Stratify forward Sharpe by BTC market regime in monthly snapshots. Separate bull/bear/sideways performance."
+    },
+    {
+      "id": "R3",
+      "risk": "Pairwise independence: h5 is a direct component of h6 (h6 requires vol_regime==medium). Forward pairwise r with h6 is likely >= 0.70 for similar vol environments. Independence check will block simultaneous Validated promotion of both.",
+      "severity": "MEDIUM",
+      "monitoring": "Compute pairwise r with h6 at 12-month forward collection mark. Document if r >= 0.70 — this is expected and not a defect, but blocks simultaneous promotion of both. See also promotion_criteria.notes on Proposal 1 binding requirement."
+    },
+    {
+      "id": "R4",
+      "risk": "Regime permanently active: if BTC enters sustained low-vol, vol_regime stays in {low, medium} for months, generating positions but limiting the signal's discriminating power.",
+      "severity": "MEDIUM",
+      "monitoring": "Flag in monthly snapshot if high_vol_entries == 0 for any 90-day window."
+    },
+    {
+      "id": "R5",
+      "risk": "Bear-regime performance: regime_sharpe bear = -1.044. If BTC enters a sustained bear market while vol_regime is spuriously in 'active' (low vol bear), the signal will generate losses.",
+      "severity": "MEDIUM",
+      "monitoring": "Track SMA200-based market regime alongside vol_regime. A low-vol bear market is a failure mode for this signal and should be flagged in context of any negative period."
+    }
+  ],
+
+  "lockbox_status": {
+    "window": null,
+    "spent": false,
+    "notes": "No lockbox was held for h5_vol_regime. This signal was evaluated in-sample over the full 2021-2026 corpus; the IS window is the training set. Forward evidence begins from the registration date with no held-out window."
+  },
+
+  "notes": [
+    "Do not modify decision_function_h5.py or the RV21/252d construction after registration. Parameter changes require VERSION bump and new registration.",
+    "The IS/OOS disagreement is the most important structural flag. Registration does not override this risk; it locks in the testable hypothesis that the OOS direction is the true signal.",
+    "LOO consistency 67% is exactly at the Candidate gate threshold — a one-fold failure would have failed candidacy. Forward evidence should be monitored especially closely against this fragility.",
+    "STRUCTURAL NOTE: clean_sharpe (0.527) > full_sharpe (0.130). The effect is STRONGER excluding structural event windows. This is a positive research integrity signal: the effect is not event-driven.",
+    "SENSITIVITY ATTRIBUTION: sensitivity results cited above come from the Phase B battery evaluation of sig_volatility_regime (GROUP1) — the parameterized version of the same algorithm. The h5 SEED battery entry (which calls sig_h5_vol_regimes, a column reader) has sens_results=[]. The canonical forward decision function is decision_function_h5.py, not sig_h5_vol_regimes. The sensitivity Sharpe values are valid because both implementations compute the same RV21/tercile logic."
+  ]
+}
