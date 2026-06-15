@@ -1,0 +1,15 @@
+[Unit]
+Description=BTC Forward Evidence — H5/G1/G3 daily collection timer (01:00 UTC)
+Documentation=file:/opt/btcbot/deploy/install.md
+
+[Timer]
+# 01:00 UTC — 55-minute margin after btcbot-evidence.service (00:05 UTC) refreshes
+# the spot Parquet partition. run_daily.py reads from that same Parquet store.
+# PRE-CONDITION: btcbot-evidence.timer must be enabled and healthy before this fires.
+OnCalendar=*-*-* 01:00:00 UTC
+Persistent=true
+RandomizedDelaySec=30
+Unit=btcbot-fwd-hg.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=BTC Forward Evidence — H5, G1, G3 daily collection (one-shot)
+Documentation=file:/opt/btcbot/deploy/install.md
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot/research
+ExecStart=/opt/miniconda3/envs/btc_bot/bin/python -m forward_evidence.run_daily
+Environment=PYTHONDONTWRITEBYTECODE=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-fwd-hg
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/btcbot/data /opt/btcbot/research/data
+
+[Install]
+WantedBy=multi-user.target
