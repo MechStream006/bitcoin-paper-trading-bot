@@ -4,8 +4,9 @@ runner_base.py
 Shared daily forward-evidence collection logic for H5, G1, G3 runners.
 
 Public interface:
-    run_signal(...) -> Literal['ok', 'skipped']
+    run_signal(...) -> Literal['ok', 'skipped']   (optional aux_series for multi-input signals)
     load_daily_closes(...) -> pd.Series
+    load_daily_dvol(...) -> pd.Series
     DataUnavailableError
 
 Design decisions (approved 2026-06-15):
@@ -133,6 +134,82 @@ def _select_partitions(
     return result
 
 
+def load_daily_dvol(
+    parquet_dir: pathlib.Path,
+    through_date: str,
+    min_rows: int,
+) -> pd.Series:
+    """
+    Load daily Deribit DVOL close prices from the Parquet partition store.
+
+    DVOL is already a daily (1D) series — one row per UTC day at the 00:00
+    boundary. The resample('D').last() is a safe no-op that also collapses any
+    accidental duplicate. Mirrors load_daily_closes (same partition selection,
+    timestamp-normalisation, and DataUnavailableError semantics) so the forward
+    DVOL path behaves identically to the spot path.
+
+    Parameters
+    ----------
+    parquet_dir : e.g. research/data/raw/dvol/BTC
+    through_date : 'YYYY-MM-DD' inclusive upper bound
+    min_rows : minimum daily rows required (= signal MIN_HISTORY)
+
+    Returns
+    -------
+    pd.Series indexed by 'YYYY-MM-DD' strings, chronological, ending at through_date.
+    Values are DVOL in annualised vol points (e.g. 48.1 = 48.1%).
+
+    Raises
+    ------
+    DataUnavailableError if through_date absent or len < min_rows. This is the
+    fail-safe that converts silent DVOL staleness (DVOL ingest is non-critical in
+    daily_ingest.py) into a transient skip rather than a corrupt signal.
+    """
+    through_dt = date.fromisoformat(through_date)
+    # Load min_rows + 32 calendar days of partitions (buffer for month boundaries)
+    start_dt   = through_dt - timedelta(days=min_rows + 32)
+
+    partitions = _select_partitions(parquet_dir, start_dt, through_dt)
+    if not partitions:
+        raise DataUnavailableError(
+            f"No DVOL partitions found in {parquet_dir} for "
+            f"{start_dt}..{through_dt}. Run ingest/dvol.py to populate."
+        )
+
+    frames = [pd.read_parquet(p, columns=['open_time', 'close']) for p in partitions]
+    raw = pd.concat(frames, ignore_index=True)
+
+    # Normalise timestamps: DVOL stores 13-digit ms; guard for µs by the same
+    # threshold used in load_daily_closes (defensive — DVOL has been ms to date).
+    ts = raw['open_time'].astype('int64')
+    if ts.max() > 1_500_000_000_000_000:
+        ts = ts // 1000
+    raw['dt'] = pd.to_datetime(ts, unit='ms', utc=True)
+
+    daily = (
+        raw.set_index('dt')
+           .sort_index()['close']
+           .resample('D')
+           .last()
+           .dropna()
+    )
+    daily.index = daily.index.strftime('%Y-%m-%d')
+    daily = daily[daily.index <= through_date]
+
+    if through_date not in daily.index:
+        latest = daily.index[-1] if len(daily) > 0 else 'none'
+        raise DataUnavailableError(
+            f"DVOL close for {through_date} not in store. "
+            f"Latest available: {latest}. Run ingest/dvol.py to update."
+        )
+    if len(daily) < min_rows:
+        raise DataUnavailableError(
+            f"Insufficient DVOL history: need {min_rows} rows, have {len(daily)}. "
+            "Run ingest/dvol.py to extend the Parquet store."
+        )
+    return daily
+
+
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
@@ -201,14 +278,15 @@ def run_signal(
     signal_id:    str,
     run_date:     str,
     closes:       pd.Series,
-    compute_fn:   Callable[[pd.Series], pd.Series],
-    raw_value_fn: Callable[[pd.Series], float | None],
+    compute_fn:   Callable[..., pd.Series],
+    raw_value_fn: Callable[..., float | None],
     pre_reg_path: pathlib.Path,
     fn_file_path: pathlib.Path,
     db_path:      pathlib.Path,
     hold_days:    int,
     min_history:  int,
     cost_bps:     float,
+    aux_series:   pd.Series | None = None,
 ) -> Literal['ok', 'skipped']:
     """
     Execute one day's forward evidence collection for a registered signal.
@@ -228,6 +306,13 @@ def run_signal(
     hold_days     : Calendar days per hold period.
     min_history   : Minimum rows for compute_fn (signal MIN_HISTORY constant).
     cost_bps      : Transaction cost in bps (from collection_config.yaml).
+    aux_series    : Optional second daily input for multi-input signals (e.g.
+                    DVOL for H-IVRV). Defaults None — single-input signals (H5,
+                    G1, G3) leave it unset and the code path is unchanged. When
+                    provided, it is filtered to run_date (same look-ahead guard as
+                    closes), validated for presence+non-NaN at run_date, and
+                    passed as the 2nd positional arg to compute_fn/raw_value_fn.
+                    Never used for trade pricing — entries/exits price on closes.
 
     Returns
     -------
@@ -289,11 +374,31 @@ def run_signal(
             f"have {len(closes_to_date)}"
         )
 
+    # ── Step 3b: Auxiliary-series validation (only when aux_series is used) ────
+    # Backward-compatible: aux_series defaults None, so single-input signals
+    # (H5, G1, G3) skip this block and aux_to_date stays None. A missing or NaN
+    # aux value at run_date is a transient DataUnavailableError (auto-retry),
+    # never a silent flat — absence of data must not be recorded as a decision.
+    aux_to_date: pd.Series | None = None
+    if aux_series is not None:
+        aux_to_date = aux_series[aux_series.index <= run_date]
+        if run_date not in aux_to_date.index or pd.isna(aux_to_date.loc[run_date]):
+            latest = aux_to_date.index[-1] if len(aux_to_date) > 0 else 'none'
+            raise DataUnavailableError(
+                f"[{signal_id}] Auxiliary series unavailable for {run_date}. "
+                f"Latest: {latest}"
+            )
+
     # ── Step 4: Compute signal ───────────────────────────────────────────────
     try:
-        pos_series = compute_fn(closes_to_date)
-        position   = float(pos_series.iloc[-1])
-        raw_value  = raw_value_fn(closes_to_date)
+        if aux_to_date is None:
+            pos_series = compute_fn(closes_to_date)
+            position   = float(pos_series.iloc[-1])
+            raw_value  = raw_value_fn(closes_to_date)
+        else:
+            pos_series = compute_fn(closes_to_date, aux_to_date)
+            position   = float(pos_series.iloc[-1])
+            raw_value  = raw_value_fn(closes_to_date, aux_to_date)
     except Exception as exc:
         _record_mini(
             db_path, signal_id, run_date, actual_hash, 'error',

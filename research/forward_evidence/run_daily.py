@@ -1,7 +1,10 @@
 """
 run_daily.py
 ============
-Daily forward evidence collection — runs H5, G1, G3 in sequence.
+Daily forward evidence collection — runs H5, G1, G3, then H-IVRV.
+
+H5/G1/G3 are single-input (spot closes). H-IVRV is two-input (spot closes +
+DVOL) and runs on its own isolated branch after the others have committed.
 
 Usage:
     conda run -n btc_bot python forward_evidence/run_daily.py
@@ -23,15 +26,18 @@ from datetime import datetime, timedelta, timezone
 
 import yaml
 
-from forward_evidence import runner_h5, runner_g1, runner_g3
+from forward_evidence import runner_h5, runner_g1, runner_g3, runner_ivrv
 from forward_evidence.init_forward_db import init_forward_db
 from forward_evidence.pre_reg_guard import FnHashViolation
-from forward_evidence.runner_base import DataUnavailableError, load_daily_closes
+from forward_evidence.runner_base import (
+    DataUnavailableError, load_daily_closes, load_daily_dvol,
+)
 
 from forward_evidence import (
     decision_function_h5         as _h5,
     decision_function_g1_market_regime as _g1,
     decision_function_g3_tsmom   as _g3,
+    decision_function_ivrv       as _ivrv,
 )
 
 logging.basicConfig(
@@ -76,7 +82,7 @@ def run_all(
     init_forward_db(db_path)
 
     # Load closes once; use max MIN_HISTORY across all signals
-    max_history = max(_h5.MIN_HISTORY, _g1.MIN_HISTORY, _g3.MIN_HISTORY)
+    max_history = max(_h5.MIN_HISTORY, _g1.MIN_HISTORY, _g3.MIN_HISTORY, _ivrv.MIN_HISTORY)
     try:
         closes = load_daily_closes(ohlcv_dir, run_date, min_rows=max_history)
     except DataUnavailableError as exc:
@@ -106,6 +112,38 @@ def run_all(
         except Exception as exc:
             results[sig_id] = 'error'
             log.error("[%s] unexpected error: %s", sig_id, exc, exc_info=True)
+
+    # ── H-IVRV (two-input: spot closes + DVOL). Isolated branch — runs AFTER the
+    #    single-input loop above (which has already committed), and loads DVOL in
+    #    its own try/except, so a DVOL outage degrades ONLY ivrv coverage and can
+    #    never block or alter H5/G1/G3. Skipped entirely if not in config. ──────
+    ivrv_id  = 'ivrv_vrp_spread'
+    ivrv_cfg = sigs.get(ivrv_id)
+    if ivrv_cfg is not None:
+        dvol = None
+        try:
+            dvol_dir = _RESEARCH_ROOT / cfg['dvol']['parquet_dir']
+            dvol = load_daily_dvol(dvol_dir, run_date, min_rows=_ivrv.MIN_HISTORY)
+        except DataUnavailableError as exc:
+            results[ivrv_id] = 'unavailable'
+            log.error("[%s] DVOL unavailable: %s", ivrv_id, exc)
+        if dvol is not None:
+            try:
+                results[ivrv_id] = runner_ivrv.collect(
+                    run_date, closes, dvol, db_path, float(ivrv_cfg['cost_bps'])
+                )
+            except FnHashViolation:
+                results[ivrv_id] = 'fn_hash_violation'
+                log.error("[%s] fn_hash_violation on %s", ivrv_id, run_date)
+            except DataUnavailableError as exc:
+                results[ivrv_id] = 'unavailable'
+                log.error("[%s] data unavailable: %s", ivrv_id, exc)
+            except RuntimeError as exc:
+                results[ivrv_id] = 'blocked'
+                log.error("[%s] blocked: %s", ivrv_id, exc)
+            except Exception as exc:
+                results[ivrv_id] = 'error'
+                log.error("[%s] unexpected error: %s", ivrv_id, exc, exc_info=True)
 
     return results
 

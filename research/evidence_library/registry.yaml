@@ -243,6 +243,49 @@ g1_trend_regime_ma_cross:
   supersedes: null
   superseded_by: null
 
+# -----------------------------------------------------------------------------
+# Added 2026-06-19 — first registry entry OUTSIDE the original Phase B seeding.
+# H-IVRV (HV-2 VRP Spread), Feature candidate. Admission requires the ledger
+# transition in migrate_ivrv_admission.py to be run, which produces the
+# pinned_run UUID below. Until then, pinned_run is null and `report.py --check`
+# will report exactly one expected error for this family.
+# -----------------------------------------------------------------------------
+ivrv_vrp_spread:
+  display_name: "VRP Spread (HV-2, IV-RV)"
+  hypothesis: "A rich variance risk premium (DVOL/100 - RV30 in its top trailing tercile) precedes positive forward BTC spot returns; a cheap premium precedes negative."
+  direction: long/short
+  rationale: >
+    Variance risk premium = implied (Deribit DVOL, 30d) minus trailing realized
+    vol (RV30). Rich premium prices fear/insurance demand (contrarian long spot);
+    cheap premium reflects complacency (short). Orthogonal to the spot-price
+    cluster (options vol-surface axis; max corr 0.37 vs vol/funding features).
+  mechanism: variance risk premium (implied-vs-realized vol)
+  data_source: "Deribit DVOL + Binance BTCUSDT spot RV30"
+  feature_def: "long if VRP spread in top trailing tercile (RW=252), short if bottom; 7-day hold"
+  group: "DVOL Options-Vol"
+  state: candidate
+  state_since: "2026-06-19"
+  state_reason: >
+    Passes Feature-Candidate gate on the lockbox-train slice (2021-01..2025-05):
+    sensitivity 100% ≥ 60%, OOS Sharpe +0.50 > 0, WF 60%, clone_r 0.37 < 0.90.
+    Edge-ineligible: train Sharpe 0.265 < 0.30 (full-sample 0.329 would pass but
+    spends the sealed lockbox, so not used). Governance classification 2026-06-19.
+  role:
+    - feature
+  provenance: offline-corpus
+  pinned_run: null    # set by migrate_ivrv_admission.py (discovery → candidate)
+  preregistration:
+    path: "research/forward_evidence/pre_registration_ivrv.json"
+    hash: "7d1e897efb47522455bc1c3c4c25e781424fe6c779c2818594eaae29168a43c8"
+  weaknesses:
+    - "IS DSR 0.165 / BH-p 0.289 fail the Validated gate in-sample (expected); validation is a multi-year forward proposition"
+    - "P&L is spot-directional VRP timing, NOT literal short-vol P&L"
+    - "Edge-ineligible on the disciplined basis (train Sharpe 0.265 < 0.30); registered as feature"
+    - "DVOL ingest is non-critical — ivrv coverage gaps on stale/missing DVOL days (fail-safe skip)"
+  dq_reasons: []
+  supersedes: null
+  superseded_by: null
+
 # =============================================================================
 # DISQUALIFIED (4 signals — hard DQ conditions triggered)
 # =============================================================================

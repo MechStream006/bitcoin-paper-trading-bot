@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "version": "1.0.0",
+  "signal_id": "ivrv_vrp_spread",
+  "pre_registration_date": "2026-06-19T00:00:00+00:00",
+  "artifact_hashes": {
+    "signals.py": "d2f1c9deccf2b4260a7c28ab62e7fa64408df68301d3ea5ebf14a3d49ab8c090",
+    "engine.py": "aa2cb34fc9793b81466f253065b5a0f7791cd096b58d95e9dd991fdb1ce4ffdb",
+    "governance.py": "a3759079fc909f88657b1138004704947befec775dc10090bb09d7a16af15c21",
+    "hash_note": "SHA-256 of LF-normalised bytes (CRLF->LF). signals/engine/governance unchanged since the 2026-06-14 g3 registration (identical hashes)."
+  },
+  "hypothesis": {
+    "statement": "The variance risk premium (VRP = implied minus trailing realized volatility) is the canonical options edge. A rich premium (top trailing tercile of DVOL/100 - RV30) prices fear/insurance demand and tends to precede positive forward BTC spot returns; a cheap premium (bottom tercile) reflects complacency. The signal is contrarian on the premium: long spot when VRP is rich, short when cheap, flat in the middle tercile.",
+    "direction": "long_short",
+    "expected_sign": "positive mean spot return in the signal direction net of 15bps",
+    "mechanism": "variance risk premium (implied-vs-realized vol)",
+    "mechanism_detail": "DVOL is Deribit's 30-day forward implied-vol index; RV30 is trailing 30-day realized vol (annualised). Their spread is the variance risk premium. Sellers of options demand a premium for bearing variance risk; the premium widens with fear and compresses with complacency. Empirically the premium is a contrarian forward-return signal in equity and crypto vol markets. Here it is harvested as a DIRECTIONAL SPOT-timing signal conditioned on the premium tercile.",
+    "null_hypothesis": "The trailing tercile rank of (DVOL/100 - RV30) has no predictive power for forward BTC spot returns.",
+    "known_caveats_at_registration": "P&L SEMANTICS: this is a directional spot-timing signal conditioned on VRP, NOT a short-straddle/short-vol position; forward return is measured on spot (consistent with the in-sample HV-2 battery). EDGE INELIGIBLE on the disciplined basis: the lockbox-train-slice canonical Sharpe is 0.265 < 0.30 (candidate.edge floor). It would pass the full Edge gate on the full sample (Sharpe 0.329), but that computation spends the sealed lockbox, so it is NOT used. Registered as a FEATURE candidate. IS DSR (0.165) and BH-p (0.289) fail the Validated gate in-sample — expected; the Validated gate is evaluated on forward returns.",
+    "role": "feature",
+    "role_note": "Feature role: passes candidate.feature gate on the lockbox-train slice (sensitivity 100%, OOS Sharpe +0.50 > 0, WF 60%, clone_r 0.37 < 0.90). Independent of the existing spot cluster (max corr 0.37 vs vol/funding features) and orthogonal to spot (options vol-surface axis). Primary value: ML-conditioning feature on the variance-risk-premium axis."
+  },
+  "function_spec": {
+    "name": "VRP Spread (HV-2)",
+    "version": "1.0.0",
+    "signal_class": "variance risk premium, contrarian long/short",
+    "data_source": "Deribit DVOL daily index + Binance BTCUSDT spot RV30 (1m OHLCV resampled to daily close)",
+    "decision_function_file": "forward_evidence/decision_function_ivrv.py",
+    "decision_function_hash": "4e57efbfa3114b08dd94e6fa9c7a1b778544e68f2b6a16cb334035a4b52daae1",
+    "entry_condition_long": "VRP spread in top trailing tercile (rolling RW=252, min_periods=126): vrp > q(1 - pctile/100)",
+    "entry_condition_short": "VRP spread in bottom trailing tercile: vrp < q(pctile/100)",
+    "flat_condition": "middle tercile, OR NaN inputs (rv30/dvol/quantile warmup), OR insufficient history (< MIN_HISTORY)",
+    "direction": "long_short",
+    "hold_days": 7,
+    "hold_days_note": "IS / DVOL-family battery used hold_days=1 (continuous daily re-evaluation). Forward collection uses hold_days=7 to reduce turnover. IS and forward Sharpe/DSR are NOT directly comparable; the Validated gate evaluates forward returns only.",
+    "exit_rule": "scheduled exit at entry + 7 calendar days; signal re-evaluated at exit for re-entry; no intra-hold exits",
+    "trade_counting_definition": "each 7-day evaluation window is one trade; sequential and non-overlapping",
+    "parameters": {
+      "PCTILE": 33,
+      "RW": 252,
+      "RV_WIN": 30,
+      "ANN": 365.0,
+      "MINP": 126,
+      "HOLD_DAYS": 7,
+      "MIN_HISTORY": 253
+    },
+    "sensitivity_variants": [
+      {"label": "v1_pctile25", "PCTILE": 25, "RW": 252},
+      {"label": "v2_pctile40", "PCTILE": 40, "RW": 252},
+      {"label": "v3_rw365",    "PCTILE": 33, "RW": 365}
+    ],
+    "sensitivity_note": "All 3 variants positive (sign-stable) on BOTH the full sample and the lockbox-train slice -> sens_pass_frac = 1.000 (>= 0.60 gate).",
+    "cost_assumption_bps": 15,
+    "governance_phase": "Phase F forward evidence collection (feature candidate)",
+    "lockbox_status": "SEALED — 2025-06-01..2026-05-31 held out; not spent for gating"
+  },
+  "evidence_basis": {
+    "corpus": "Binance BTCUSDT spot + Deribit DVOL",
+    "gating_basis": "lockbox-train slice 2021-01-01..2025-05-31 (lockbox 2025-06-01..2026-05-31 SEALED)",
+    "train_slice_sharpe": 0.2649,
+    "full_sample_sharpe_note": "Full-sample (incl. lockbox) Sharpe is 0.3294 and would pass the full Edge gate; NOT used because it spends the sealed lockbox. Recorded for transparency only.",
+    "oos_sharpe": 0.4998,
+    "wf_pass": "3/5",
+    "wf_pass_frac": 0.60,
+    "sens_pass_frac": 1.0,
+    "loo_sign_consistency": 1.0,
+    "breakeven_cost_bps": 30,
+    "struct_sign_ok": true,
+    "n_trades_IS": 109,
+    "evidence_score": 60.9,
+    "verdict": "Moderate",
+    "n_trials": 34,
+    "dsr_prob": 0.1646,
+    "dsr_prob_note": "IS only, n_trials=34 (FROZEN), cost_bps=15, hold_days=1, lockbox-train slice. Fails Validated gate (>=0.50) — expected; gate evaluated on forward returns. NOT comparable to dvol_family_report.json's 0.161 (n_trials=38, DSR_CONF=0.95 discovery screen). 34-vs-38 multiple-testing question flagged for next governance session.",
+    "bh_p": 0.2893,
+    "bh_p_note": "IS only, 1 - PSR(0) on lockbox-train net returns. Fails Validated gate (<=0.10) — expected; evaluated on forward returns at promotion.",
+    "independence_maxcorr_existing": 0.37,
+    "candidate_gate_result": "PASS Feature gate (lockbox-train): sensitivity 100% >= 60%, OOS +0.50 > 0, clone_r 0.37 < 0.90. FAIL Edge gate (train Sharpe 0.265 < 0.30).",
+    "notable_flags": [
+      "P&L is spot-directional VRP timing, NOT literal short-vol P&L.",
+      "DSR 0.165 / BH-p 0.289 in-sample: validation is a multi-year forward proposition, not a near-term pass.",
+      "DVOL ingest is non-critical (daily_ingest.py): a stale/missing DVOL day makes ivrv 'unavailable' (transient skip), never a silent flat.",
+      "Independent (0.37) -> natural first test case for the deferred pairwise-independence enforcement (CLAUDE.md §16 Proposal 1) at any future promotion."
+    ]
+  },
+  "observation_floors": {
+    "minimum_trades": 30,
+    "minimum_calendar_months_before_assessment": 12,
+    "minimum_both_long_and_short_trades": true,
+    "rationale": "Feature-role, low per-trade Sharpe; n=30 forward trades at hold_days=7 (~52/yr max) is ~7-12 months. 12 months minimum before assessment to span vol regimes. Both rich-premium (long) and cheap-premium (short) trades must be observed."
+  },
+  "promotion_criteria": {
+    "description": "Criteria to advance ivrv_vrp_spread from Candidate to Validated (feature role).",
+    "minimum_trades": 30,
+    "dsr_bh_requirement": "dsr_prob >= 0.50 AND bh_p <= 0.10 on forward trade returns (thresholds.yaml validated.feature)",
+    "provenance_requirement": "pinned_run provenance must be live-forward or mainnet",
+    "pairwise_requirement": "max_pairwise_r < 0.70 vs all concurrently-Validated families (deferred Proposal 1 enforcement; binding at promotion). IS max corr is 0.37 -> expected to pass.",
+    "lockbox_note": "The sealed lockbox (2025-06..2026-05) is the final held-out OOS check before any promotion; do not spend it for interim gating.",
+    "failure_analysis_required": true
+  },
+  "collection_spec": {
+    "daily_job": {
+      "trigger": "01:00 UTC via btcbot-fwd-hg.timer (run_daily.py), after DVOL refresh at 00:05 UTC (btcbot-evidence.service / daily_ingest.py)",
+      "data_inputs": [
+        "Binance BTCUSDT spot close (last 1m bar of day)",
+        "Deribit DVOL daily close (vol points)"
+      ],
+      "steps": [
+        "1. Load >= MIN_HISTORY (253) rows of spot close + DVOL (own DataUnavailable guard).",
+        "2. compute_signal(closes, dvol) -> position in {-1,0,+1} (aux_series=dvol).",
+        "3. Log position + raw VRP to signal_log with fn_hash.",
+        "4. Open/close 7-day non-overlapping trades priced on spot close.",
+        "5. fn_hash in run_log must match decision_function_hash every run."
+      ]
+    },
+    "determinism_check": {
+      "mechanism": "fn_hash in run_log must match decision_function_hash every run",
+      "alert": "fn_hash mismatch: abort run, do NOT write to signal_log"
+    }
+  },
+  "source_divergence_assessment": {
+    "date": "2026-06-19",
+    "data_source": "Deribit DVOL (single implied-vol source) + Binance spot",
+    "conclusion": "DVOL is a single-source index; RV30 is from Binance spot. The tercile-rank construction is robust to small cross-source level differences. Spot close is stable across exchanges (<0.1% spread)."
+  },
+  "lockbox_status": {
+    "window": ["2025-06-01", "2026-05-31"],
+    "spent": false,
+    "notes": "DVOL-family selection ran on 2021-03..2025-05 with this window SEALED. The lockbox is the final pre-promotion OOS test and must remain unspent for interim gating."
+  },
+  "notes": [
+    "Do not modify decision_function_ivrv.py after registration. Changes require a VERSION bump and a new pre-registration (the fn_hash guard will fire otherwise).",
+    "Registered as FEATURE candidate per the 2026-06-19 governance classification. Edge ineligible on the disciplined (lockbox-train) basis.",
+    "Forward evidence begins from the registration/deploy date; no historical forward backfill."
+  ]
+}

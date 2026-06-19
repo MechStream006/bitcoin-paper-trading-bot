@@ -33,9 +33,26 @@ signals:
     decision_function_file: forward_evidence/decision_function_g3_tsmom.py
     decision_function_module: forward_evidence.decision_function_g3_tsmom
 
+  # H-IVRV (HV-2 VRP Spread) — two-input signal (spot closes + DVOL).
+  # Feature-role candidate (governance classification 2026-06-19). Run on an
+  # isolated branch in run_daily.py; DVOL is loaded from the dvol: section below.
+  ivrv_vrp_spread:
+    cost_bps: 15.0
+    pre_reg_file: forward_evidence/pre_registration_ivrv.json
+    decision_function_file: forward_evidence/decision_function_ivrv.py
+    decision_function_module: forward_evidence.decision_function_ivrv
+
 ohlcv:
   # Relative to the research/ root directory.
   # Parquet layout: {parquet_dir}/year=YYYY/month=MM/data.parquet
   # Columns: open_time (int64 ms UTC), open, high, low, close, volume (all float64 except open_time)
   parquet_dir: data/raw/spot/BTCUSDT
   symbol: BTCUSDT
+
+dvol:
+  # Deribit DVOL daily implied-vol index (vol points). Used only by H-IVRV.
+  # Relative to research/ root. Layout: {parquet_dir}/year=YYYY/month=MM/data.parquet
+  # Columns: open_time (int64 ms UTC), open, high, low, close (all float64 except open_time)
+  # Refreshed daily at 00:05 UTC by forward_evidence/daily_ingest.py (non-critical).
+  parquet_dir: data/raw/dvol/BTC
+  symbol: BTC
