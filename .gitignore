@@ -50,10 +50,5 @@ h6_build*.err*
 h6_validation*.log
 h6_validation*.err*
 
-# Hypothesis reports (charts + JSON) are regenerable
-research/reports/h4_basis_regimes/
-research/reports/h5_vol_regimes/
-research/reports/h1_funding_regimes/
-research/reports/h6_funding_vol_interaction/
-research/reports/s1_strategy_validation/
-research/reports/evidence_library/
+# Corpus summaries, hypothesis reports, smoke-test artifacts — all regenerable
+research/reports/
