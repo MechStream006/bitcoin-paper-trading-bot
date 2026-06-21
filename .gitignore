@@ -19,6 +19,20 @@ research/data/forward_evidence.db
 research/data/forward_evidence.db-wal
 research/data/forward_evidence.db-shm
 
+# ivrv/H5/G1/G3 forward evidence collector DB — live runtime data, backed up separately
+research/data/evidence_forward.db
+research/data/evidence_forward.db-wal
+research/data/evidence_forward.db-shm
+
+# Empty placeholder committed at wrong path in 1639dfb — not a live file
+research/data/ledger.db
+
+# Governance ledger — append-only runtime data, backed up separately
+# registry.yaml in the same directory IS tracked (it is code, not data)
+research/evidence_library/ledger.db
+research/evidence_library/ledger.db-wal
+research/evidence_library/ledger.db-shm
+
 # Build/run launchers and logs at repo root
 run_*.bat
 corpus_build*.log
