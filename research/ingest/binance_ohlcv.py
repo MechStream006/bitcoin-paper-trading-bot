@@ -14,6 +14,18 @@ CLI:
 """
 from __future__ import annotations
 
+import pathlib as _pathlib
+import sys as _sys
+
+# When invoked as a script (`python ingest/binance_ohlcv.py`), Python inserts
+# the script directory (research/ingest/) at sys.path[0] before any code runs.
+# This causes `import calendar` below to find research/ingest/calendar.py instead
+# of the stdlib calendar module. Pop the script dir first to restore correct lookup.
+_this = str(_pathlib.Path(__file__).resolve().parent)
+if _sys.path and _sys.path[0] == _this:
+    _sys.path.pop(0)
+del _this, _pathlib, _sys
+
 import argparse
 import calendar
 import io
