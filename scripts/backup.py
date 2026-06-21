@@ -4,14 +4,18 @@ Creates a consistent hot backup using VACUUM INTO (SQLite 3.27+), writes a
 SHA-256 manifest, applies 7-daily/4-weekly/12-monthly rotation, then
 optionally runs a configurable off-host transfer command.
 
-Backs up two databases:
-  1. data/btc_trading.db         (Layer 2 live trading runtime)
-  2. research/data/forward_evidence.db  (Phase E forward evidence; --evidence)
+Backs up four databases:
+  1. data/btc_trading.db                    (Layer 2 live trading runtime)
+  2. research/data/forward_evidence.db       (H6 forward evidence; --evidence)
+  3. research/data/evidence_forward.db       (H5/G1/G3/ivrv collector; --fwd-hg)
+  4. research/evidence_library/ledger.db     (governance ledger; --ledger)
 
 Usage:
     python scripts/backup.py [--db-path PATH] [--backup-dir PATH] [--dry-run]
     python scripts/backup.py --evidence [--dry-run]
-    python scripts/backup.py --all [--dry-run]   # backs up both databases
+    python scripts/backup.py --fwd-hg [--dry-run]
+    python scripts/backup.py --ledger [--dry-run]
+    python scripts/backup.py --all [--dry-run]   # backs up all four databases
 
 Environment variable:
     BACKUP_OFFHOST_CMD  Optional shell template with {file} and {manifest}
@@ -224,11 +228,20 @@ def main() -> int:
     )
     parser.add_argument(
         "--evidence", action="store_true",
-        help="Back up research/data/forward_evidence.db (instead of btc_trading.db)",
+        help="Back up research/data/forward_evidence.db (H6 forward evidence)",
+    )
+    parser.add_argument(
+        "--fwd-hg", dest="fwd_hg", action="store_true",
+        help="Back up research/data/evidence_forward.db (H5/G1/G3/ivrv collector)",
+    )
+    parser.add_argument(
+        "--ledger", action="store_true",
+        help="Back up research/evidence_library/ledger.db (governance ledger)",
     )
     parser.add_argument(
         "--all", dest="backup_all", action="store_true",
-        help="Back up both btc_trading.db and forward_evidence.db",
+        help="Back up all four databases (btc_trading, forward_evidence, "
+             "evidence_forward, ledger)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -236,22 +249,46 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    rc_evidence = 0
+    rc_fwd_hg   = 0
+    rc_ledger   = 0
+    rc_trading  = 0
+
     if args.evidence or args.backup_all:
         evidence_db  = ROOT / "research" / "data" / "forward_evidence.db"
         evidence_dir = ROOT / "data" / "evidence-backups"
         rc_evidence  = run_backup(evidence_db, evidence_dir, args.dry_run,
                                   db_label="evidence")
-        if args.evidence:
+        if args.evidence and not args.backup_all:
             return rc_evidence
 
-    if not args.evidence:
+    if args.fwd_hg or args.backup_all:
+        rc_fwd_hg = run_backup(
+            ROOT / "research" / "data" / "evidence_forward.db",
+            ROOT / "data" / "evidence-fwd-backups",
+            args.dry_run,
+            db_label="fwd_hg",
+        )
+        if args.fwd_hg and not args.backup_all:
+            return rc_fwd_hg
+
+    if args.ledger or args.backup_all:
+        rc_ledger = run_backup(
+            ROOT / "research" / "evidence_library" / "ledger.db",
+            ROOT / "data" / "ledger-backups",
+            args.dry_run,
+            db_label="ledger",
+        )
+        if args.ledger and not args.backup_all:
+            return rc_ledger
+
+    if args.backup_all or not (args.evidence or args.fwd_hg or args.ledger):
         rc_trading = run_backup(args.db_path, args.backup_dir, args.dry_run,
                                 db_label="btc_trading")
-        if args.backup_all:
-            return max(rc_trading, rc_evidence)     # type: ignore[possibly-undefined]
-        return rc_trading
 
-    return 0
+    if args.backup_all:
+        return max(rc_trading, rc_evidence, rc_fwd_hg, rc_ledger)
+    return rc_trading
 
 
 if __name__ == "__main__":
