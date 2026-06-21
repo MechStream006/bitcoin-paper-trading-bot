@@ -273,7 +273,7 @@ ivrv_vrp_spread:
   role:
     - feature
   provenance: offline-corpus
-  pinned_run: null    # set by migrate_ivrv_admission.py (discovery → candidate)
+  pinned_run: b98c9685-134b-410f-ac98-684b0ee01da6    # set by migrate_ivrv_admission.py (discovery → candidate)
   preregistration:
     path: "research/forward_evidence/pre_registration_ivrv.json"
     hash: "7d1e897efb47522455bc1c3c4c25e781424fe6c779c2818594eaae29168a43c8"
