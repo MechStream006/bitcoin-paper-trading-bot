@@ -6,7 +6,8 @@ Target: Ubuntu 22.04 LTS, single VPS, non-root service account.
 
 ## Prerequisites
 
-- Python 3.11+ (`python3 --version`)
+- Python 3.11+ for the live bot venv (`python3 --version`)
+- Python 3.10.x for the `btc_bot` research conda env — installed by §6; do NOT use 3.11 here
 - git (`git --version`)
 - systemd (standard on Ubuntu)
 - 25–80 GB disk, 1–2 GB RAM minimum
@@ -91,15 +92,25 @@ wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /t
 sudo bash /tmp/mc.sh -b -p /opt/miniconda3
 sudo chown -R btcbot:btcbot /opt/miniconda3
 
-# Create the btc_bot environment and install research dependencies
-sudo -u btcbot /opt/miniconda3/bin/conda create -n btc_bot python=3.11 -y
-sudo -u btcbot /opt/miniconda3/bin/conda run -n btc_bot pip install \
+# Accept Conda ToS as the btcbot user before creating environments.
+# The -b flag on the Miniconda installer skips the installer ToS only; conda create
+# requires separate ToS acceptance. The btcbot nologin user cannot do it interactively.
+sudo -u btcbot /opt/miniconda3/bin/conda tos accept --override-channels --channel defaults
+# If the above command is not available on your Conda version, run instead:
+#   sudo su -s /bin/bash btcbot -c "/opt/miniconda3/bin/conda init bash && conda tos accept"
+
+# Create the btc_bot environment.
+# IMPORTANT: use python=3.10 — the research pinset is validated on Python 3.10.20.
+# python=3.11 is for the live bot venv (§3) only.
+sudo -u btcbot /opt/miniconda3/bin/conda create -n btc_bot python=3.10 -y
+sudo -u btcbot /opt/miniconda3/envs/btc_bot/bin/pip install \
     -r /opt/btcbot/research/requirements-research.txt
 
-# Verify the Python path used by the evidence service unit
-sudo -u btcbot /opt/miniconda3/bin/conda run -n btc_bot which python
-# Expected: /opt/miniconda3/envs/btc_bot/bin/python
-# If your path differs, update ExecStart lines in deploy/btcbot-evidence.service.
+# Verify the Python path used by the evidence service units
+/opt/miniconda3/envs/btc_bot/bin/python --version
+# Expected: Python 3.10.x
+# If your path differs, update ExecStart lines in deploy/btcbot-evidence.service
+# and deploy/btcbot-fwd-hg.service.
 ```
 
 Create the evidence data directory:
@@ -122,6 +133,8 @@ sudo cp /opt/btcbot/deploy/btcbot-evidence.service     /etc/systemd/system/
 sudo cp /opt/btcbot/deploy/btcbot-evidence.timer       /etc/systemd/system/
 sudo cp /opt/btcbot/deploy/btcbot-mapsnap.service      /etc/systemd/system/
 sudo cp /opt/btcbot/deploy/btcbot-mapsnap.timer        /etc/systemd/system/
+sudo cp /opt/btcbot/deploy/btcbot-fwd-hg.service       /etc/systemd/system/
+sudo cp /opt/btcbot/deploy/btcbot-fwd-hg.timer         /etc/systemd/system/
 
 sudo systemctl daemon-reload
 ```
@@ -151,31 +164,83 @@ sudo systemctl start  btcbot-evidence.timer
 # Instrument id->symbol map snapshot timer (runs daily at 12:30 UTC)
 sudo systemctl enable btcbot-mapsnap.timer
 sudo systemctl start  btcbot-mapsnap.timer
+
+# H5/G1/G3 forward evidence timer (runs daily at 01:00 UTC)
+# PRE-CONDITION: btcbot-evidence.timer must be running AND the Parquet corpus
+# must be bootstrapped (§9 below) before this timer will succeed.
+sudo systemctl enable btcbot-fwd-hg.timer
+sudo systemctl start  btcbot-fwd-hg.timer
 ```
 
 ---
 
-## 9. Initialise and backfill the forward evidence database
+## 9. Bootstrap the Parquet research corpus
+
+The H5/G1/G3 forward evidence pipeline (`btcbot-fwd-hg.timer`) reads BTC spot,
+perp, and DVOL data from a local Parquet lake at `research/data/raw/`. This step
+must complete before the timer can succeed.
+
+Estimated storage: ~200 MB for 2025-01 → current month.
+Estimated runtime: 15–45 minutes depending on network speed.
+
+```bash
+PY=/opt/miniconda3/envs/btc_bot/bin/python
+
+# Run each script from the research/ directory.
+# Scripts skip months that are already ingested (safe to re-run).
+cd /opt/btcbot/research
+
+# 1. Spot OHLCV (BTC/USDT 1-minute candles from Binance Vision)
+sudo -u btcbot sh -c "cd /opt/btcbot/research && $PY build_corpus.py"
+
+# 2. Perp OHLCV (BTC perpetual 1-minute candles)
+sudo -u btcbot sh -c "cd /opt/btcbot/research && $PY build_perp_corpus.py"
+
+# 3. DVOL (Deribit BTC implied volatility index — public API, no auth needed)
+sudo -u btcbot sh -c "cd /opt/btcbot/research && $PY build_dvol_corpus.py"
+```
+
+Default start dates: spot/perp from 2021-01, DVOL from 2021-03. For a shorter
+corpus (e.g. 2025-01 → present), edit `SPOT_START` / `FUND_START` in `build_corpus.py`
+and `build_perp_corpus.py`, or run `ingest/binance_ohlcv.py` CLI directly
+(`python -m ingest.binance_ohlcv --dataset spot --start 2025-01 --end YYYY-MM`).
+
+Fix corpus file ownership if any file was created as root:
+
+```bash
+sudo chown -R btcbot:btcbot /opt/btcbot/research/data/
+```
+
+Verify corpus structure:
+
+```bash
+ls /opt/btcbot/research/data/raw/spot/BTCUSDT/
+ls /opt/btcbot/research/data/raw/perp/BTCUSDT/
+ls /opt/btcbot/research/data/raw/dvol/BTC/
+```
+
+---
+
+## 10. Initialise and backfill the forward evidence database
 
 Run once before the first timer fires:
 
 ```bash
+PY=/opt/miniconda3/envs/btc_bot/bin/python
+
 # Init DB schema
-sudo -u btcbot /opt/miniconda3/bin/conda run -n btc_bot \
-    bash -c "cd /opt/btcbot/research && python forward_evidence/init_db.py"
+sudo -u btcbot sh -c "cd /opt/btcbot/research && $PY forward_evidence/init_db.py"
 
 # Backfill all historical corpus days into evidence DB
-sudo -u btcbot /opt/miniconda3/bin/conda run -n btc_bot \
-    bash -c "cd /opt/btcbot/research && python forward_evidence/daily_job.py --backfill"
+sudo -u btcbot sh -c "cd /opt/btcbot/research && $PY forward_evidence/daily_job.py --backfill"
 
 # Verify backfill
-sudo -u btcbot /opt/miniconda3/bin/conda run -n btc_bot \
-    bash -c "cd /opt/btcbot/research && python forward_evidence/report.py --summary"
+sudo -u btcbot sh -c "cd /opt/btcbot/research && $PY forward_evidence/report.py --summary"
 ```
 
 ---
 
-## 10. Smoke-test the new deployment
+## 11. Smoke-test the new deployment
 
 ```bash
 # Bot is running and logging?
@@ -196,9 +261,13 @@ ls -lh /opt/btcbot/data/backups/
 sudo -u btcbot /opt/btcbot/venv/bin/python scripts/backup.py --evidence
 ls -lh /opt/btcbot/data/evidence-backups/
 
-# Force a manual evidence run (don't wait for 00:05 timer)
+# Force a manual evidence run (H6, don't wait for 00:05 timer)
 sudo systemctl start btcbot-evidence.service
 sudo journalctl -u btcbot-evidence -n 50 --no-pager
+
+# Force a manual H5/G1/G3 run (don't wait for 01:00 timer)
+sudo systemctl start btcbot-fwd-hg.service
+sudo journalctl -u btcbot-fwd-hg -n 50 --no-pager
 
 # All timers scheduled?
 systemctl list-timers | grep btcbot
@@ -206,7 +275,7 @@ systemctl list-timers | grep btcbot
 
 ---
 
-## 11. Optional: configure off-host backup
+## 12. Optional: configure off-host backup
 
 Add to `/opt/btcbot/.env`:
 
@@ -225,7 +294,7 @@ Off-host failure is non-fatal — the local backup is always written first.
 
 ---
 
-## 12. Update procedure
+## 13. Update procedure
 
 ```bash
 cd /opt/btcbot

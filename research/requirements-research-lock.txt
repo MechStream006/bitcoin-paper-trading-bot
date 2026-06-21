@@ -1,0 +1,65 @@
+# Full reproducible lockfile for the btc_bot conda environment.
+# Python 3.10.20 — captured 2026-06-10 via: conda run -n btc_bot pip freeze
+#
+# Source of truth: this file pins every transitive dependency.
+# requirements-research.txt lists only direct dependencies for human readability.
+#
+# To reproduce exactly:
+#   conda create -n btc_bot python=3.10 -y
+#   pip install -r research/requirements-research-lock.txt
+#
+# To update the lockfile after changing direct dependencies:
+#   pip freeze > research/requirements-research-lock.txt
+aiodns==4.0.4
+aiohappyeyeballs==2.6.2
+aiohttp==3.14.1
+aiosignal==1.4.0
+APScheduler==3.11.2
+async-timeout==5.0.1
+attrs==26.1.0
+ccxt==4.5.56
+certifi==2026.4.22
+cffi==2.0.0
+charset-normalizer==3.4.7
+coincurve==21.0.0
+colorama==0.4.6
+contourpy==1.3.2
+cryptography==48.0.0
+cycler==0.12.1
+duckdb==1.5.3
+exceptiongroup==1.3.1
+fonttools==4.63.0
+frozenlist==1.8.0
+idna==3.13
+iniconfig==2.3.0
+kiwisolver==1.5.0
+matplotlib==3.10.9
+multidict==6.7.1
+numpy==2.2.6
+packaging==26.0
+pandas==2.3.3
+patsy==1.0.2
+pillow==12.2.0
+pluggy==1.6.0
+propcache==0.5.2
+pyarrow==24.0.0
+pycares==5.0.1
+pycparser==3.0
+Pygments==2.20.0
+pyparsing==3.3.2
+pytest==9.0.3
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+pytz==2026.2
+PyYAML==6.0.3
+requests==2.33.1
+scipy==1.15.3
+six==1.17.0
+statsmodels==0.14.6
+tomli==2.4.1
+typing_extensions==4.15.0
+tzdata==2026.2
+tzlocal==5.3.1
+urllib3==2.6.3
+websocket-client==1.9.0
+yarl==1.24.2

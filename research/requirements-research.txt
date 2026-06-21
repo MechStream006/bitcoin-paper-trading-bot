@@ -1,5 +1,7 @@
 # Research dependencies — SEPARATE from the runtime requirements.txt.
-# Install into the existing `btc_bot` conda env. Nothing here touches the live bot.
+# Install into the btc_bot conda env (Python 3.10.x — NOT the live bot venv).
+# Requires Python 3.10.x; do NOT install into a 3.11 environment.
+# Full reproducible lockfile: requirements-research-lock.txt
 # Pinned 2026-06-10 via: conda run -n btc_bot pip freeze
 ccxt==4.5.56
 duckdb==1.5.3

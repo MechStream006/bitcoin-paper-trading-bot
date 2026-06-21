@@ -1,0 +1,30 @@
+# Conda environment specification for the btc_bot research environment.
+# Python 3.10.x — validated on 3.10.20 (2026-06-10).
+#
+# This environment is SEPARATE from the live bot venv (/opt/btcbot/venv, Python 3.11+).
+# Do NOT mix them. See deploy/install.md §6 for installation instructions.
+#
+# To create from this file:
+#   conda env create -f research/environment.yml
+#
+# To reproduce the exact transitive-dependency lockfile instead:
+#   conda create -n btc_bot python=3.10 -y
+#   pip install -r research/requirements-research-lock.txt
+name: btc_bot
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - ccxt==4.5.56
+    - duckdb==1.5.3
+    - pyarrow==24.0.0
+    - pandas==2.3.3
+    - requests==2.33.1
+    - PyYAML==6.0.3
+    - scipy==1.15.3
+    - statsmodels==0.14.6
+    - matplotlib==3.10.9
+    - numpy==2.2.6
