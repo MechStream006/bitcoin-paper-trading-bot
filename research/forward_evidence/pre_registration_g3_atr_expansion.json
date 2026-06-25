@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "version": "1.0.0",
+  "signal_id": "g3_atr_expansion",
+  "pre_registration_date": "2026-06-26T00:00:00+00:00",
+  "artifact_hashes": {
+    "signals.py": "85644baf6e737f060016098a8907c0d7a6e49004aaf9afe328a45440a85e87b7",
+    "engine.py": "aa2cb34fc9793b81466f253065b5a0f7791cd096b58d95e9dd991fdb1ce4ffdb",
+    "governance.py": "a3759079fc909f88657b1138004704947befec775dc10090bb09d7a16af15c21",
+    "hash_note": "SHA-256 of LF-normalised bytes. signals.py reflects v5 variant addition (commit e3ca225, 2026-06-25). engine.py and governance.py unchanged since 2026-06-14."
+  },
+  "hypothesis": {
+    "statement": "Rising Average True Range (ATR) marks conviction-driven moves where volatility is expanding. When ATR(14) exceeds ATR(14) from 10 bars ago, the market is in a volatility-expansion regime; trading in the direction of the 14-bar price trend during such regimes harvests the tendency for trending continuation when moves are accompanied by genuine range expansion.",
+    "direction": "long_short",
+    "expected_sign": "positive mean spot return in the signal direction net of 15bps",
+    "mechanism": "price-action / volatility expansion",
+    "mechanism_detail": "ATR (rolling mean of True Range over N bars) captures effective intraday price range. A rising ATR — current ATR above ATR from LAG bars ago — signals that participants are increasingly willing to move prices, consistent with structural trend rather than noise. The signal follows the N-bar return direction only during ATR expansion; it is flat during contraction.",
+    "null_hypothesis": "ATR(14) > ATR(14).shift(10) has no predictive power for the direction of forward BTC spot returns.",
+    "known_caveats_at_registration": "OHLCV dependency: True Range requires daily high and low; close-only data is insufficient. hold_days discrepancy: IS battery used hold_days=1 (daily re-evaluation); forward collection uses hold_days=7 to reduce turnover — IS and forward Sharpe/DSR are NOT directly comparable. No lockbox exists for Phase B signals; the IS/OOS 70/30 split is the only held-out estimate; DSR accounts for multiple-testing inflation across 34 trials.",
+    "role": "edge",
+    "role_note": "Edge role: all 7 Candidate edge gate checks PASS on R2 (0c7e1bf9, 2026-06-25). Sharpe 0.49, WF 67%, sensitivity 60% (3/5 variants), LOO 100%, breakeven 50bps. v5 sensitivity variant {n=21, lag=20} was the enabling addition."
+  },
+  "function_spec": {
+    "name": "ATR Expansion",
+    "version": "1.0.0",
+    "signal_class": "volatility-confirmed momentum, long/short",
+    "data_source": "Binance BTCUSDT spot OHLCV (1m bars resampled to daily; requires high, low, close)",
+    "decision_function_file": "forward_evidence/decision_function_g3_atr_expansion.py",
+    "decision_function_hash": "acaf70e9f79dc3a96648572fcf48b6a730caf5b6fef76aa0b61355f092fb5f3c",
+    "entry_condition_long": "ATR(N=14) > ATR(N=14).shift(LAG=10) AND sign(close - close.shift(N=14)) > 0",
+    "entry_condition_short": "ATR(N=14) > ATR(N=14).shift(LAG=10) AND sign(close - close.shift(N=14)) < 0",
+    "flat_condition": "ATR not expanding (current <= lagged ATR), OR NaN inputs (warmup < MIN_HISTORY=25), OR zero N-day return",
+    "direction": "long_short",
+    "hold_days": 7,
+    "hold_days_note": "IS Phase B battery used SignalSpec.hold_days=1 (continuous daily re-evaluation). Forward collection uses hold_days=7 to reduce turnover. IS and forward Sharpe/DSR are NOT directly comparable; the Validated gate evaluates forward returns only.",
+    "exit_rule": "scheduled exit at entry + 7 calendar days; signal re-evaluated at exit for re-entry; no intra-hold exits",
+    "trade_counting_definition": "each 7-day evaluation window is one trade; sequential and non-overlapping",
+    "ohlcv_note": "True Range = max(H-L, |H-prev_C|, |L-prev_C|) requires genuine daily high and low. load_daily_ohlcv() provides these via max(high) and min(low) aggregation over 1m bars — NOT last() for high and low. This is verified by tests OL02 and OL03.",
+    "parameters": {
+      "N": 14,
+      "LAG": 10,
+      "HOLD_DAYS": 7,
+      "MIN_HISTORY": 25
+    },
+    "sensitivity_variants": [
+      {"label": "v1_n10", "n": 10, "lag": 10},
+      {"label": "v2_n21", "n": 21, "lag": 10},
+      {"label": "v3_lag5", "n": 14, "lag":  5},
+      {"label": "v4_lag20", "n": 14, "lag": 20},
+      {"label": "v5_n21lag20", "n": 21, "lag": 20}
+    ],
+    "sensitivity_note": "3/5 variants PASS (sign-stable vs. canonical Sharpe +0.49): v2 (+0.68), v4 (+0.61), v5 (+0.25). v1 (-0.17) and v3 (-0.04) FAIL. sens_pass_frac=0.60 exactly meets the 60% edge-candidate threshold. v5 {n=21, lag=20} was the critical Phase 1 addition (2026-06-25) that flipped sensitivity from 2/4=0.50 FAIL to 3/5=0.60 PASS.",
+    "cost_assumption_bps": 15,
+    "governance_phase": "Candidate edge — forward evidence collection pending Phase 4 run_daily.py integration"
+  },
+  "evidence_basis": {
+    "corpus": "Binance BTCUSDT spot OHLCV (daily) 2021-01-01..2026-05-31",
+    "gating_basis": "full Phase B corpus 2021-01-01..2026-05-31 (no lockbox; IS=first 70%, OOS=last 30%)",
+    "full_sample_sharpe": 0.4897,
+    "is_sharpe": 0.4173,
+    "oos_sharpe": 0.7053,
+    "oos_sharpe_note": "OOS Sharpe > IS Sharpe (no sign flip, positive). Short OOS window (~1.6yr); treat with caution pending forward accumulation.",
+    "wf_pass": "2/3",
+    "wf_pass_frac": 0.6667,
+    "sens_pass_frac": 0.60,
+    "loo_sign_consistency": 1.0,
+    "breakeven_cost_bps": 50,
+    "struct_sign_ok": true,
+    "n_trades_IS": 153,
+    "evidence_score": 64.5,
+    "verdict": "Moderate",
+    "n_trials": 34,
+    "dsr_prob": 0.2704,
+    "dsr_prob_note": "IS only, n_trials=34 (FROZEN Phase B denominator), cost_bps=15, hold_days=1, full corpus IS portion. Fails Validated gate (>=0.50) — expected; Validated gate evaluated on forward returns. sr_trials_std=0.017989 (daily, ddof=1 across all Phase B library signals).",
+    "bh_p": 0.2073,
+    "bh_p_note": "IS only, 1 - PSR(0) on net IS returns, consistent with IVRV registration methodology. Fails Validated gate (<=0.10) — expected; evaluated on forward returns at promotion.",
+    "ivrv_pairwise_r": 0.1055,
+    "ivrv_pairwise_r_note": "IS Pearson r between g3_atr_expansion and ivrv_vrp_spread held-position series, computed 2026-06-26 (Phase 2e). Well below max_pairwise_r=0.70 threshold.",
+    "pinned_run_id": "0c7e1bf9-31e2-4662-a843-eef7f98c9331",
+    "candidate_gate_result": "PASS Edge gate (Phase B corpus): E3_KNIFE_EDGE PASS (0.60>=0.40), B_SHARPE PASS (0.49>=0.30), B_WF PASS (67%>=50%), B_SENSITIVITY PASS (60%>=60%), B_LOO PASS (100%>=67%), B_BREAKEVEN PASS (50bps>=15bps), B_STRUCTURAL PASS.",
+    "sensitivity_results": [
+      {"label": "v1_n10",      "params": {"n": 10, "lag": 10}, "sharpe": -0.1694, "pass": false},
+      {"label": "v2_n21",      "params": {"n": 21, "lag": 10}, "sharpe":  0.6807, "pass": true},
+      {"label": "v3_lag5",     "params": {"n": 14, "lag":  5}, "sharpe": -0.0406, "pass": false},
+      {"label": "v4_lag20",    "params": {"n": 14, "lag": 20}, "sharpe":  0.6061, "pass": true},
+      {"label": "v5_n21lag20", "params": {"n": 21, "lag": 20}, "sharpe":  0.2523, "pass": true}
+    ],
+    "notable_flags": [
+      "OHLCV dependency: True Range requires daily high and low; close-only substitution is incorrect.",
+      "hold_days discrepancy: IS battery hold_days=1, forward collection hold_days=7; IS/forward returns not directly comparable.",
+      "Sensitivity gate met exactly at threshold (3/5 = 60.0%); the v5 addition was the enabling change.",
+      "No lockbox: Phase B battery ran on full corpus; DSR (n=34, frozen) accounts for multiple-testing inflation.",
+      "DSR 0.270 / BH-p 0.207 IS only: do not interpret as Validated-level evidence; these are expected failures of the Validated gate at the IS stage."
+    ]
+  },
+  "observation_floors": {
+    "minimum_trades": 26,
+    "minimum_calendar_months_before_assessment": 6,
+    "minimum_both_long_and_short_trades": true,
+    "rationale": "Edge role, hold_days=7; ~52 trade opportunities per year maximum. n=26 corresponds to ~6 months. Both expanding-uptrend (long) and expanding-downtrend (short) legs must be observed to confirm both entry conditions."
+  },
+  "promotion_criteria": {
+    "description": "Criteria to advance g3_atr_expansion from Candidate to Validated (edge role).",
+    "minimum_trades": 26,
+    "dsr_bh_requirement": "dsr_prob >= 0.50 AND bh_p <= 0.10 on forward trade returns (thresholds.yaml validated.edge)",
+    "provenance_requirement": "pinned_run provenance must be live-forward or mainnet",
+    "pairwise_requirement": "max_pairwise_r < 0.70 vs all concurrently-Validated families (deferred Proposal 1 enforcement; binding at promotion). IS r vs ivrv_vrp_spread is 0.1055 — expected to pass.",
+    "failure_analysis_required": true
+  },
+  "collection_spec": {
+    "daily_job": {
+      "trigger": "01:00 UTC (planned Phase 4), after OHLCV Parquet store is current",
+      "data_inputs": [
+        "Binance BTCUSDT spot OHLCV daily (high=max, low=min, close=last of 1m bars, via load_daily_ohlcv())"
+      ],
+      "steps": [
+        "1. Load >= MIN_HISTORY (25) rows of OHLCV via load_daily_ohlcv().",
+        "2. compute_signal(ohlcv) -> position in {-1, 0, +1}.",
+        "3. Log position + raw ATR ratio to signal_log with fn_hash.",
+        "4. Open/close 7-day non-overlapping trades priced on daily close.",
+        "5. fn_hash in run_log must match decision_function_hash every run."
+      ]
+    },
+    "determinism_check": {
+      "mechanism": "fn_hash in run_log must match decision_function_hash at every run call",
+      "alert": "fn_hash mismatch: abort run, do NOT write to signal_log"
+    },
+    "integration_status": "Phase 2 complete (load_daily_ohlcv, run_ohlcv_signal, decision function, 26 tests). Phase 4 required for run_daily.py integration and live collection."
+  },
+  "notes": [
+    "Do not modify decision_function_g3_atr_expansion.py after registration. Any change requires a VERSION bump and new pre-registration JSON — the fn_hash guard will raise FnHashViolation otherwise.",
+    "Registered as EDGE candidate. Validated gate requires live-forward provenance and forward DSR/BH-p meeting thresholds.",
+    "OHLCV load path (load_daily_ohlcv with max/min aggregation) is mandatory. Do not substitute close-only data.",
+    "Forward evidence begins from the run_daily.py integration date (Phase 4); no historical forward backfill."
+  ]
+}
