@@ -5,8 +5,10 @@ Shared daily forward-evidence collection logic for H5, G1, G3 runners.
 
 Public interface:
     run_signal(...) -> Literal['ok', 'skipped']   (optional aux_series for multi-input signals)
+    run_ohlcv_signal(...) -> Literal['ok', 'skipped']  (OHLCV-based signals, e.g. G3 ATR)
     load_daily_closes(...) -> pd.Series
     load_daily_dvol(...) -> pd.Series
+    load_daily_ohlcv(...) -> pd.DataFrame
     DataUnavailableError
 
 Design decisions (approved 2026-06-15):
@@ -206,6 +208,79 @@ def load_daily_dvol(
         raise DataUnavailableError(
             f"Insufficient DVOL history: need {min_rows} rows, have {len(daily)}. "
             "Run ingest/dvol.py to extend the Parquet store."
+        )
+    return daily
+
+
+def load_daily_ohlcv(
+    parquet_dir: pathlib.Path,
+    through_date: str,
+    min_rows: int,
+) -> pd.DataFrame:
+    """
+    Load daily BTC OHLCV data from the Parquet partition store.
+
+    Reads 1-minute candles (open_time int64 ms UTC, high/low/close float64),
+    resamples to UTC daily using max(high), min(low), last(close) — so each
+    daily row captures the true intraday range, not the last bar's H/L.
+
+    Parameters
+    ----------
+    parquet_dir : e.g. research/data/raw/spot/BTCUSDT
+    through_date : 'YYYY-MM-DD' inclusive upper bound
+    min_rows : minimum daily rows required (= signal MIN_HISTORY)
+
+    Returns
+    -------
+    pd.DataFrame with columns ['high', 'low', 'close'], indexed by 'YYYY-MM-DD'
+    strings, chronological, ending at through_date. Index is unique (one row/day).
+
+    Raises
+    ------
+    DataUnavailableError if through_date absent or len < min_rows.
+    """
+    through_dt = date.fromisoformat(through_date)
+    start_dt   = through_dt - timedelta(days=min_rows + 32)
+
+    partitions = _select_partitions(parquet_dir, start_dt, through_dt)
+    if not partitions:
+        raise DataUnavailableError(
+            f"No OHLCV partitions found in {parquet_dir} for "
+            f"{start_dt}..{through_dt}. Run ingest/binance_ohlcv.py to populate."
+        )
+
+    frames = [
+        pd.read_parquet(p, columns=['open_time', 'high', 'low', 'close'])
+        for p in partitions
+    ]
+    raw = pd.concat(frames, ignore_index=True)
+
+    # Normalise timestamps: 2024 and earlier = 13-digit ms; 2025+ could be 16-digit µs
+    ts = raw['open_time'].astype('int64')
+    if ts.max() > 1_500_000_000_000_000:
+        ts = ts // 1000
+    raw['dt'] = pd.to_datetime(ts, unit='ms', utc=True)
+
+    daily = (
+        raw.set_index('dt')
+           .sort_index()[['high', 'low', 'close']]
+           .resample('D')
+           .agg({'high': 'max', 'low': 'min', 'close': 'last'})
+           .dropna(subset=['close'])
+    )
+    daily.index = daily.index.strftime('%Y-%m-%d')
+    daily = daily[daily.index <= through_date]
+
+    if through_date not in daily.index:
+        latest = daily.index[-1] if len(daily) > 0 else 'none'
+        raise DataUnavailableError(
+            f"OHLCV for {through_date} not in store. "
+            f"Latest available: {latest}. Run ingest/binance_ohlcv.py to update."
+        )
+    if len(daily) < min_rows:
+        raise DataUnavailableError(
+            f"Insufficient OHLCV history: need {min_rows} rows, have {len(daily)}. "
+            "Run ingest/binance_ohlcv.py to extend the Parquet store."
         )
     return daily
 
@@ -443,6 +518,198 @@ def run_signal(
             )
 
         # 5c — run_log (must be last in logical order; lastrowid gives run_id for FK)
+        conn.execute(
+            "INSERT INTO run_log (signal_id, run_date, fn_hash, status) "
+            "VALUES (?,?,?,'ok')",
+            (signal_id, run_date, actual_hash),
+        )
+        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # 5d — signal_log
+        conn.execute(
+            "INSERT INTO signal_log (signal_id, day, position, raw_value, run_id) "
+            "VALUES (?,?,?,?,?)",
+            (signal_id, run_date, position, raw_value, run_id),
+        )
+
+        conn.execute("COMMIT")
+        log.info("[%s] ok  run_date=%s  position=%.1f", signal_id, run_date, position)
+        return 'ok'
+
+    except DataUnavailableError:
+        conn.execute("ROLLBACK")
+        raise
+
+    except Exception as exc:
+        conn.execute("ROLLBACK")
+        _record_mini(
+            db_path, signal_id, run_date, actual_hash, 'error',
+            f"Transaction failed: {type(exc).__name__}: {exc}",
+        )
+        raise
+
+    finally:
+        conn.close()
+
+
+def run_ohlcv_signal(
+    *,
+    signal_id:    str,
+    run_date:     str,
+    ohlcv:        pd.DataFrame,
+    compute_fn:   Callable[..., pd.Series],
+    raw_value_fn: Callable[..., float | None],
+    pre_reg_path: pathlib.Path,
+    fn_file_path: pathlib.Path,
+    db_path:      pathlib.Path,
+    hold_days:    int,
+    min_history:  int,
+    cost_bps:     float,
+) -> Literal['ok', 'skipped']:
+    """
+    Execute one day's forward evidence collection for an OHLCV-based signal.
+
+    Parallel to run_signal() but accepts ohlcv (DataFrame columns: high, low,
+    close) instead of a closes Series. Trade pricing always uses close prices:
+    entry at ohlcv['close'].loc[run_date], exit at ohlcv['close'].loc[exit_date].
+    No aux_series: OHLCV signals receive their full context via the ohlcv frame.
+
+    Parameters
+    ----------
+    signal_id     : Registry key, e.g. 'g3_atr_expansion'.
+    run_date      : 'YYYY-MM-DD' UTC — the date whose close price drives logic.
+    ohlcv         : Daily OHLCV DataFrame indexed by 'YYYY-MM-DD' strings,
+                    columns ['high', 'low', 'close'], chronological, unique index.
+                    Caller may pass a longer frame; filtered to run_date here.
+    compute_fn    : Locked decision function: ohlcv_df -> position Series {-1, 0, +1}.
+    raw_value_fn  : Auxiliary intermediate value (not covered by fn_hash).
+    pre_reg_path  : Path to the final pre-registration JSON.
+    fn_file_path  : Path to the locked decision function file to hash-verify.
+    db_path       : Path to evidence_forward.db.
+    hold_days     : Calendar days per hold period.
+    min_history   : Minimum rows for compute_fn (= signal MIN_HISTORY constant).
+    cost_bps      : Transaction cost in bps (from collection_config.yaml).
+
+    Returns
+    -------
+    'ok'      — new run_log, signal_log, and trade rows written.
+    'skipped' — prior ok/skipped row found; this call was a no-op.
+
+    Raises
+    ------
+    FnHashViolation      — decision function tampered; run_log row written.
+    DataUnavailableError — ohlcv missing run_date, invalid high/low, or insufficient
+                           history. NOT written to run_log (transient; auto-retry).
+    RuntimeError         — idempotency block (prior error/violation on record).
+    Exception            — unexpected; run_log row written as 'error'.
+    """
+    actual_hash: str | None = None
+
+    # ── Step 1: Idempotency pre-check ────────────────────────────────────────
+    conn = _open_conn(db_path)
+    try:
+        prior = _get_run_log_status(conn, signal_id, run_date)
+    finally:
+        conn.close()
+
+    if prior in ('ok', 'skipped'):
+        log.info("[%s] already ran on %s (status=%s)", signal_id, run_date, prior)
+        return 'skipped'
+    if prior == 'fn_hash_violation':
+        raise RuntimeError(
+            f"[{signal_id}] fn_hash_violation on record for {run_date}. "
+            "Fix the decision function (new pre-registration required if intentional), "
+            "then delete the run_log row to retry."
+        )
+    if prior == 'error':
+        raise RuntimeError(
+            f"[{signal_id}] prior run errored on {run_date}. "
+            "Investigate, then delete the run_log row to retry."
+        )
+    # prior is None — proceed
+
+    # ── Step 2: fn_hash guard ────────────────────────────────────────────────
+    try:
+        actual_hash = verify_fn_hash(pre_reg_path, fn_file_path, signal_id)
+    except FnHashViolation as exc:
+        actual_hash = _sha256_lf(fn_file_path)
+        _record_mini(db_path, signal_id, run_date, actual_hash, 'fn_hash_violation', str(exc))
+        log.error("[%s] fn_hash_violation on %s", signal_id, run_date)
+        raise
+
+    # ── Step 3: OHLCV validation ─────────────────────────────────────────────
+    ohlcv_to_date = ohlcv[ohlcv.index <= run_date]
+    if run_date not in ohlcv_to_date.index:
+        latest = ohlcv_to_date.index[-1] if len(ohlcv_to_date) > 0 else 'none'
+        raise DataUnavailableError(
+            f"[{signal_id}] OHLCV for {run_date} not in frame. Latest: {latest}"
+        )
+    if len(ohlcv_to_date) < min_history:
+        raise DataUnavailableError(
+            f"[{signal_id}] Insufficient history: need {min_history} rows, "
+            f"have {len(ohlcv_to_date)}"
+        )
+    row_hlc = ohlcv_to_date.loc[run_date]
+    if (
+        pd.isna(row_hlc['close'])
+        or pd.isna(row_hlc['high'])
+        or pd.isna(row_hlc['low'])
+        or float(row_hlc['high']) < float(row_hlc['low'])
+    ):
+        raise DataUnavailableError(
+            f"[{signal_id}] Invalid OHLCV row at {run_date}: "
+            f"high={row_hlc['high']} low={row_hlc['low']} close={row_hlc['close']}"
+        )
+
+    # ── Step 4: Compute signal ───────────────────────────────────────────────
+    try:
+        pos_series = compute_fn(ohlcv_to_date)
+        position   = float(pos_series.iloc[-1])
+        raw_value  = raw_value_fn(ohlcv_to_date)
+    except Exception as exc:
+        _record_mini(
+            db_path, signal_id, run_date, actual_hash, 'error',
+            f"Signal computation failed: {type(exc).__name__}: {exc}",
+        )
+        raise
+
+    # ── Step 5: Single atomic transaction ────────────────────────────────────
+    conn = _open_conn(db_path)
+    try:
+        conn.execute("BEGIN")
+
+        # 5a — Close overdue trades (planned_exit_date <= run_date)
+        overdue = _get_overdue_open_trades(conn, signal_id, run_date)
+        for trade in overdue:
+            exit_date = trade['planned_exit_date']
+            if exit_date not in ohlcv_to_date.index:
+                raise DataUnavailableError(
+                    f"[{signal_id}] Close for planned_exit_date {exit_date} not in frame. "
+                    "Cannot close overdue trade."
+                )
+            exit_price = float(ohlcv_to_date['close'].loc[exit_date])
+            conn.execute(
+                "INSERT INTO trade_exits "
+                "(entry_id, exit_date, exit_close_price, cost_bps) VALUES (?,?,?,?)",
+                (trade['id'], exit_date, exit_price, cost_bps),
+            )
+            conn.execute("UPDATE trade_entries SET open=0 WHERE id=?", (trade['id'],))
+
+        # 5b — Open new trade if warranted
+        if not _has_open_trade(conn, signal_id) and position != 0.0:
+            direction    = int(position)
+            entry_price  = float(ohlcv_to_date['close'].loc[run_date])
+            planned_exit = (
+                date.fromisoformat(run_date) + timedelta(days=hold_days)
+            ).isoformat()
+            conn.execute(
+                "INSERT INTO trade_entries "
+                "(signal_id, entry_date, direction, entry_close_price, planned_exit_date, open) "
+                "VALUES (?,?,?,?,?,1)",
+                (signal_id, run_date, direction, entry_price, planned_exit),
+            )
+
+        # 5c — run_log
         conn.execute(
             "INSERT INTO run_log (signal_id, run_date, fn_hash, status) "
             "VALUES (?,?,?,'ok')",
