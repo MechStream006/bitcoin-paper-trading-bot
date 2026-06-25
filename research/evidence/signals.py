@@ -504,7 +504,8 @@ GROUP3 = [
                     "else flat.",
         fn=sig_atr_expansion, params={"n": 14, "lag": 10},
         variants=[{"n": 10, "lag": 10}, {"n": 21, "lag": 10},
-                  {"n": 14, "lag": 5}, {"n": 14, "lag": 20}],
+                  {"n": 14, "lag": 5}, {"n": 14, "lag": 20},
+                  {"n": 21, "lag": 20}],
         hold_days=1,
     ),
     SignalSpec(
