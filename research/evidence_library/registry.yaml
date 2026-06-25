@@ -400,22 +400,28 @@ g3_atr_expansion:
   data_source: "spot 1m -> daily OHLC"
   feature_def: "ATR(n) > ATR(n) lag bars ago -> follow sign(n-day return); else flat"
   group: G3 Price Action
-  state: discovery
-  state_since: "2026-06-13"
+  state: candidate
+  state_since: "2026-06-26"
   state_reason: >
-    Sensitivity 50% — gray zone (above 40% auto-DQ, below 60% Candidate gate threshold).
-    Battery profile otherwise strong: Sharpe 0.48, OOS 0.67, LOO 100%, WF 67%.
-    Requires 3+ sensitivity variants all sign-stable to reach 60% threshold or
-    re-parameterization study. Note: FINAL_AUDIT included this editorially before
-    the Candidate gate was frozen.
+    Candidate edge gate PASS on R2 (0c7e1bf9, 2026-06-25). Fifth sensitivity variant
+    {n=21, lag=20} added in Phase 1 (2026-06-25, commit e3ca225) raised sens_pass_frac
+    from 2/4=0.50 FAIL to 3/5=0.60 PASS, meeting the 60% edge threshold exactly.
+    All 7 gate checks PASS: E3_KNIFE_EDGE (0.60>=0.40), B_SHARPE (0.49>=0.30),
+    B_WF (67%>=50%), B_SENSITIVITY (60%>=60%), B_LOO (100%>=67%),
+    B_BREAKEVEN (50bps>=15bps), B_STRUCTURAL. IS DSR=0.270, BH-p=0.207 (IS only;
+    Validated gate evaluated on live-forward returns). Pre-registration locked.
   role:
     - edge
   provenance: offline-corpus
-  pinned_run: be1849d4-ada6-434d-8732-e1e836dae5f6
-  preregistration: null
+  pinned_run: 0c7e1bf9-31e2-4662-a843-eef7f98c9331
+  preregistration:
+    path: "research/forward_evidence/pre_registration_g3_atr_expansion.json"
+    hash: "b76c5af9455be3cf91d42697106560887716e2ee1d8e0b8faa146c5a3f1d6ebd"
   weaknesses:
-    - "Sensitivity 50% fails Candidate gate (gray zone 40-60%)"
-    - "FINAL_AUDIT included editorially; formal gate not met"
+    - "IS DSR 0.270 < 0.50 Validated threshold — expected; Validated gate requires live-forward evidence"
+    - "IS BH-p 0.207 > 0.10 Validated threshold — expected; evaluated on forward returns at promotion"
+    - "OOS window ~1.6yr only; OOS Sharpe 0.71 > IS 0.42 is promising but short"
+    - "Sensitivity gate met exactly at 60% (3/5); v5 {n=21,lag=20} is the enabling variant"
   dq_reasons: []
   supersedes: null
   superseded_by: null
