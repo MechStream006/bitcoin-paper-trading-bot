@@ -99,19 +99,34 @@ def stub_fn_file(tmp_path: pathlib.Path) -> pathlib.Path:
 
 class _SubprocessResult:
     """Minimal stand-in for subprocess.CompletedProcess."""
-    def __init__(self, returncode: int, stdout: str) -> None:
+    def __init__(self, returncode: int, stdout: str = '', stderr: str = '') -> None:
         self.returncode = returncode
         self.stdout     = stdout
+        self.stderr     = stderr
 
 
-def _sp_mock(returncode: int, stdout: str = '') -> object:
+def _sp_mock(returncode: int, stdout: str = '', stderr: str = '') -> object:
     """Return a fake subprocess module whose .run() always yields a fixed result."""
-    result = _SubprocessResult(returncode, stdout)
+    result = _SubprocessResult(returncode, stdout, stderr)
 
     class _FakeSP:
         @staticmethod
         def run(*args, **kwargs) -> _SubprocessResult:
             return result
+
+    return _FakeSP()
+
+
+def _sp_timeout_mock() -> object:
+    """Return a fake subprocess module whose .run() always raises TimeoutExpired."""
+    import subprocess as _subprocess_real
+
+    class _FakeSP:
+        TimeoutExpired = _subprocess_real.TimeoutExpired
+
+        @staticmethod
+        def run(*args, **kwargs) -> None:
+            raise _subprocess_real.TimeoutExpired(cmd=['report.py'], timeout=30)
 
     return _FakeSP()
 
@@ -216,6 +231,11 @@ class TestGovernanceCheck:
         assert rc == 1
         assert run_all_calls == [], "run_all must not be called after governance failure"
 
+    def test_GC04_returns_false_on_subprocess_timeout(self, monkeypatch) -> None:
+        """subprocess.TimeoutExpired during --check → _check_governance returns False without raising."""
+        monkeypatch.setattr(_run_daily, 'subprocess', _sp_timeout_mock())
+        assert _run_daily._check_governance(_run_daily._RESEARCH_ROOT) is False
+
 
 # ===========================================================================
 # Group DR — dry-run (no DB writes)
@@ -298,6 +318,68 @@ class TestDryRun:
 
         assert results.get('g3_atr_expansion') == 'dry-run'
         assert results.get('h5_vol_regime')    == 'dry-run'
+
+    def test_DR04_ivrv_compute_exception_returns_error_not_propagated(
+        self, monkeypatch, tmp_path: pathlib.Path,
+    ) -> None:
+        """An unexpected exception from _ivrv.compute_signal in dry-run yields 'error', not a crash."""
+        fake_closes = _make_closes(300)
+        fake_dvol   = _make_closes(300, seed=7)
+        run_date    = fake_closes.index[-1]
+
+        monkeypatch.setattr(_run_daily, 'load_daily_closes', lambda *a, **kw: fake_closes)
+        monkeypatch.setattr(_run_daily, 'load_daily_dvol',   lambda *a, **kw: fake_dvol)
+
+        def _ivrv_raise(*a, **kw):
+            raise ValueError("alignment error from test")
+        monkeypatch.setattr(_run_daily._ivrv, 'compute_signal', _ivrv_raise)
+
+        tmp_db  = tmp_path / 'ev.db'
+        results = _run_daily.run_all(run_date, db_path=tmp_db, dry_run=True)
+
+        assert results.get('ivrv_vrp_spread')         == 'error'
+        assert results.get('h5_vol_regime')           == 'dry-run'
+        assert results.get('g1_market_regime_sma200') == 'dry-run'
+        assert results.get('g3_momentum_tsmom')       == 'dry-run'
+
+    def test_DR05_atr_compute_exception_returns_error_not_propagated(
+        self, monkeypatch, tmp_path: pathlib.Path,
+    ) -> None:
+        """An unexpected exception from _atr.compute_signal in dry-run yields 'error', not a crash."""
+        test_cfg = {
+            'signals': {
+                'h5_vol_regime':           {'cost_bps': 15.0},
+                'g1_market_regime_sma200': {'cost_bps': 15.0},
+                'g3_momentum_tsmom':       {'cost_bps': 15.0},
+                'g3_atr_expansion':        {'enabled': True, 'cost_bps': 15.0},
+            },
+            'ohlcv': {'parquet_dir': 'data/raw/spot/BTCUSDT', 'symbol': 'BTCUSDT'},
+            'dvol':  {'parquet_dir': 'data/raw/dvol/BTC',     'symbol': 'BTC'},
+        }
+        cfg_path = tmp_path / 'test_config.yaml'
+        cfg_path.write_text(yaml.dump(test_cfg), encoding='utf-8')
+        monkeypatch.setattr(_run_daily, '_CONFIG_PATH', cfg_path)
+
+        ohlcv       = _make_ohlcv(300)
+        fake_closes = pd.Series(ohlcv['close'].values, index=ohlcv.index)
+        run_date    = ohlcv.index[-1]
+
+        monkeypatch.setattr(_run_daily, 'load_daily_closes', lambda *a, **kw: fake_closes)
+        monkeypatch.setattr(_run_daily, 'load_daily_ohlcv',  lambda *a, **kw: ohlcv)
+        def _dvol_miss(*a, **kw): raise DataUnavailableError("no dvol in test")
+        monkeypatch.setattr(_run_daily, 'load_daily_dvol', _dvol_miss)
+
+        def _atr_raise(*a, **kw):
+            raise ValueError("shape mismatch from test")
+        monkeypatch.setattr(_run_daily._atr, 'compute_signal', _atr_raise)
+
+        tmp_db  = tmp_path / 'ev.db'
+        results = _run_daily.run_all(run_date, db_path=tmp_db, dry_run=True)
+
+        assert results.get('g3_atr_expansion')        == 'error'
+        assert results.get('h5_vol_regime')           == 'dry-run'
+        assert results.get('g1_market_regime_sma200') == 'dry-run'
+        assert results.get('g3_momentum_tsmom')       == 'dry-run'
 
 
 # ===========================================================================

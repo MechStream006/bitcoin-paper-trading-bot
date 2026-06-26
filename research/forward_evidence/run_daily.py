@@ -80,16 +80,24 @@ def _check_governance(research_root: pathlib.Path) -> bool:
     caller — no env activation required.
     """
     ev_lib = research_root / "evidence_library"
-    result = subprocess.run(
-        [sys.executable, str(ev_lib / "report.py"), "--check"],
-        capture_output=True,
-        text=True,
-    )
-    output = result.stdout.strip()
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ev_lib / "report.py"), "--check"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        log.error("GOVERNANCE CHECK TIMED OUT after 30s — aborting collection.")
+        return False
     if result.returncode == 0:
-        log.info("GOVERNANCE: %s", output)
+        log.info("GOVERNANCE: %s", result.stdout.strip())
         return True
-    log.error("GOVERNANCE CHECK FAILED:\n%s", output)
+    log.error(
+        "GOVERNANCE CHECK FAILED:\nstdout: %s\nstderr: %s",
+        result.stdout.strip(),
+        result.stderr.strip(),
+    )
     return False
 
 
@@ -107,8 +115,6 @@ def _run_dry(
     exercised. Log lines show what *would* be written. Returns 'dry-run' for each
     signal that computed successfully, 'unavailable' if data was missing.
     """
-    import pandas as pd  # local import — only needed in dry-run path
-
     results: dict[str, str] = {}
     closes_to = closes[closes.index <= run_date]
 
@@ -141,6 +147,9 @@ def _run_dry(
         except DataUnavailableError as exc:
             results[ivrv_id] = 'unavailable'
             log.warning("[dry-run] %s DVOL unavailable: %s", ivrv_id, exc)
+        except Exception as exc:
+            log.error("[dry-run] %s compute failed: %s", ivrv_id, exc)
+            results[ivrv_id] = 'error'
 
     # ── G3 ATR Expansion (OHLCV — H/L/C required) ────────────────────────────
     atr_id  = 'g3_atr_expansion'
@@ -155,6 +164,9 @@ def _run_dry(
         except DataUnavailableError as exc:
             results[atr_id] = 'unavailable'
             log.warning("[dry-run] %s OHLCV unavailable: %s", atr_id, exc)
+        except Exception as exc:
+            log.error("[dry-run] %s compute failed: %s", atr_id, exc)
+            results[atr_id] = 'error'
 
     return results
 
