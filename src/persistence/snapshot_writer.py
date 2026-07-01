@@ -127,6 +127,11 @@ class SnapshotWriter:
         self._last_snapshot_at: Optional[float] = None
         self._last_snapshot_rows: int = 0
         self._started: bool = False
+        # Observability only: last write-failure reason (type@context: message),
+        # set in _record_failure and cleared on the next successful snapshot.
+        # Read-only consumers (heartbeat) surface it; the write path never reads
+        # or depends on it.
+        self._last_failure_reason: Optional[str] = None
 
     # -----------------------------------------------------------------------
     # Lifecycle (Component contract — lightweight, no background thread)
@@ -150,6 +155,15 @@ class SnapshotWriter:
     # -----------------------------------------------------------------------
     # Health reporting (safe to call from any thread)
     # -----------------------------------------------------------------------
+
+    def last_failure_reason(self) -> Optional[str]:
+        """Most recent write-failure reason, or None if the last snapshot was ok.
+
+        Observability accessor only — safe to call from any thread.  Returns a
+        single-line, length-bounded string (type@context: message).
+        """
+        with self._lock:
+            return self._last_failure_reason
 
     def health(self) -> HealthStatus:
         """Return a point-in-time HealthStatus.
@@ -335,6 +349,7 @@ class SnapshotWriter:
             self._total_rows_written += total_wrote
             self._last_snapshot_at = time.time()
             self._last_snapshot_rows = total_wrote
+            self._last_failure_reason = None   # cleared on success
 
         # Aggregated exch_ts guard warning (one line per cycle, never per-row).
         if exch_ts_bad:
@@ -378,9 +393,14 @@ class SnapshotWriter:
         (at/above threshold).  The caller should re-raise the original exception
         when this method returns normally.
         """
+        # Sanitize for single-line display: no newlines, bounded length.
+        reason = f"{type(exc).__name__}@{context}: {exc}".replace("\n", " ")
+        if len(reason) > 120:
+            reason = reason[:117] + "..."
         with self._lock:
             self._consecutive_failures += 1
             cf = self._consecutive_failures
+            self._last_failure_reason = reason
 
         logger.error(
             "[snapshot_writer] full-cycle failure during %s "

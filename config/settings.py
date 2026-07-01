@@ -19,6 +19,26 @@ ENV = os.getenv("ENV", "dev")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DB_PATH = ROOT / os.getenv("DB_PATH", "data/btc_trading.db")
 
+# Path to the daily forward-evidence DB (written by btcbot-fwd-hg.service /
+# run_daily.py).  The heartbeat reads this READ-ONLY to surface the daily
+# signal-collection cycle (latest run_date, per-signal status, fn_hash). Empty
+# string disables the forward section of the heartbeat. Default points at the
+# conventional research path so production picks it up automatically; if the
+# file is absent the heartbeat shows a neutral "n/a" note.
+FORWARD_DB_PATH = os.getenv("FORWARD_DB_PATH", str(ROOT / "research" / "data" / "evidence_forward.db"))
+
+# Heartbeat storage monitoring (Phase B): free-disk %, db/wal sizes, and
+# free-disk escalation of the heartbeat status.  Set HEARTBEAT_DISK_MONITORING=0
+# to disable the storage line and disk-based escalation at runtime (kill-switch,
+# no redeploy) without affecting the rest of the heartbeat.
+HEARTBEAT_DISK_MONITORING = os.getenv("HEARTBEAT_DISK_MONITORING", "1") not in ("0", "false", "False", "")
+
+# Heartbeat per-interval deltas (Phase C): msgs/reconnects/rows since the last
+# heartbeat + worst staleness age.  Display-only (never escalates status).  Set
+# HEARTBEAT_DELTAS=0 to revert the coverage and deltas lines to their prior
+# format at runtime (kill-switch, no redeploy).
+HEARTBEAT_DELTAS = os.getenv("HEARTBEAT_DELTAS", "1") not in ("0", "false", "False", "")
+
 # Platform discriminator — "testnet" or "mainnet".
 # Default is "testnet" (safe-fail: evidence never silently promoted to mainnet
 # status by misconfiguration). Set PLATFORM=mainnet in .env only after the

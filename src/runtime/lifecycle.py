@@ -147,6 +147,9 @@ class Runtime:
         delta_ws_url: str,
         telegram_bot_token: str = "",
         telegram_channel_id: str = "",
+        forward_status_path: str = "",
+        heartbeat_disk_monitoring: bool = True,
+        heartbeat_deltas: bool = True,
         n_strikes: int = 5,
         n_expiries: int = 3,
         snapshot_interval_sec: int = 60,
@@ -167,6 +170,9 @@ class Runtime:
         self._delta_ws_url          = delta_ws_url
         self._telegram_token        = telegram_bot_token
         self._telegram_channel_id   = telegram_channel_id
+        self._forward_status_path   = forward_status_path
+        self._hb_disk_monitoring    = heartbeat_disk_monitoring
+        self._hb_deltas             = heartbeat_deltas
         self._n_strikes             = n_strikes
         self._n_expiries            = n_expiries
         self._snapshot_interval      = snapshot_interval_sec
@@ -341,6 +347,9 @@ class Runtime:
             rate_limiter=rate_limiter,
             started_at=self._started_at,
             expiry_context=expiry_context,
+            forward_status_path=(self._forward_status_path or None),
+            data_db_path=(str(self._db_path) if self._hb_disk_monitoring else None),
+            emit_deltas=self._hb_deltas,
         )
         self._rate_limiter = rate_limiter
         self._heartbeat = heartbeat

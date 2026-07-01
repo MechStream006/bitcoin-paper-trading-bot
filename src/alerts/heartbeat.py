@@ -46,8 +46,11 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
+from src.alerts import forward_status as _forward_status
+from src.alerts import storage_status as _storage_status
+from src.alerts.delta_tracker import DeltaTracker
 from src.alerts.rate_limiter import RateLimiter
 from src.runtime.health import HealthStatus
 from src.state.market_state import MarketState
@@ -86,6 +89,19 @@ class HeartbeatService:
         rate_limiter:       RateLimiter — heartbeat suppression.
         started_at:         time.monotonic() captured at bot boot; used for uptime.
         heartbeat_category: Rate-limiter category for heartbeat sends.
+        forward_status_path: Optional path to evidence_forward.db.  When set, the
+                            heartbeat appends a read-only forward-evidence summary
+                            line and folds it into the overall status.  When None
+                            (default), the forward section is omitted entirely.
+        data_db_path:       Optional path to the live collector DB (btc_trading.db).
+                            When set, the heartbeat renders a storage line (free
+                            disk + db/wal sizes) and folds free-disk into status.
+                            When None (default), no storage line is emitted.
+        emit_deltas:        When True (default), render per-interval deltas
+                            (msgs/reconnects/rows since the last successful
+                            heartbeat) and worst staleness age.  Display-only —
+                            never escalates status.  False reverts the coverage
+                            and deltas lines to their prior format.
     """
 
     COMPONENT_NAME = "heartbeat"
@@ -101,6 +117,9 @@ class HeartbeatService:
         started_at: float,
         heartbeat_category: str = "heartbeat",
         expiry_context: Optional["ExpiryContext"] = None,
+        forward_status_path: Optional[str] = None,
+        data_db_path: Optional[str] = None,
+        emit_deltas: bool = True,
     ) -> None:
         self._sender = sender
         self._ws_manager = ws_manager
@@ -111,6 +130,22 @@ class HeartbeatService:
         self._started_at = started_at
         self._heartbeat_category = heartbeat_category
         self._expiry_context = expiry_context
+        # Optional: path to evidence_forward.db.  When set, the heartbeat reads
+        # the daily forward-evidence cycle READ-ONLY (see alerts.forward_status).
+        # When None, the forward section is omitted entirely (backward compatible).
+        self._forward_status_path = forward_status_path
+        # Optional: path to the live collector DB (btc_trading.db).  When set, the
+        # heartbeat renders a storage line (free disk + db/wal sizes) and folds
+        # free-disk into the overall status.  When None, no storage line.
+        self._data_db_path = data_db_path
+        # Per-interval deltas (msgs/reconnects/rows) + worst staleness age.
+        # Display-only — never escalates status.  emit_deltas=False reverts the
+        # coverage and deltas lines to their prior format (kill-switch).
+        self._emit_deltas = emit_deltas
+        self._delta_tracker = DeltaTracker()
+        # Samples read during the most recent _compose_heartbeat(), committed to
+        # the tracker baseline only after a SUCCESSFUL send (see send_heartbeat).
+        self._pending_delta: Optional[Tuple[dict, float]] = None
 
         self._lock = threading.Lock()
         self._total_sent: int = 0
@@ -199,6 +234,13 @@ class HeartbeatService:
         # --- record success ---
         self._rate_limiter.record(category)
         now = time.monotonic()
+        # Advance the delta baseline ONLY on a successful send, using exactly the
+        # samples read during the composition above.  A failed send leaves the
+        # baseline untouched so the next successful delta spans the true gap.
+        if self._pending_delta is not None:
+            samples, sampled_at = self._pending_delta
+            self._delta_tracker.commit(samples, sampled_at)
+            self._pending_delta = None
         with self._lock:
             self._total_sent += 1
             self._last_send_at = now
@@ -223,14 +265,33 @@ class HeartbeatService:
         Reads each section independently; a failure in one section falls back
         to a safe error string so the rest of the message is still emitted.
         """
+        # Forward summary and disk info are each read once and reused for both
+        # their line and the overall-status roll-up (single read per heartbeat).
+        fwd = self._forward_summary()
+        disk = self._disk_info()
+        level = self._overall_level(fwd, disk)
+        as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         lines: List[str] = [
-            "--- BTC Bot Heartbeat ---",
+            f"--- BTC Bot Heartbeat [{level}] ---",
+            f"as_of        : {as_of}",
             f"uptime       : {self._format_uptime()}",
             self._format_ws_line(),
             self._format_market_line(),
             self._format_snapshot_line(),
             self._format_universe_line(),
         ]
+
+        storage_line = self._format_storage_line(disk)
+        if storage_line is not None:
+            lines.append(storage_line)
+
+        deltas_line = self._format_deltas_line()
+        if deltas_line is not None:
+            lines.append(deltas_line)
+
+        if fwd is not None:
+            lines.append(_forward_status.render_line(fwd))
 
         for line in self._format_expiry_block():
             lines.append(line)
@@ -271,10 +332,79 @@ class HeartbeatService:
             total = len(self._market_state.universe_symbols())
             covered = int(round(cov * total))
             stale = self._market_state.stale_symbols(threshold_sec=30.0)
-            stale_str = f"{len(stale)} stale" if stale else "all fresh"
+            if stale:
+                stale_str = f"{len(stale)} stale"
+                if self._emit_deltas:
+                    worst = self._worst_staleness()
+                    if worst is not None:
+                        stale_str += f" (worst {_format_age(worst)})"
+            else:
+                stale_str = "all fresh"
             return f"coverage     : {covered}/{total} ({cov:.0%}), {stale_str}"
         except Exception:
             return "coverage     : [error reading market state]"
+
+    def _worst_staleness(self) -> Optional[float]:
+        """Max age (seconds) among universe symbols that have ticked at least once.
+
+        Uses freshness_sec, which returns None for never-ticked symbols (those are
+        coverage gaps, not staleness — see CLAUDE.md sec.11).  Returns None if no
+        symbol has ticked yet.  Never raises.
+        """
+        try:
+            ages = [
+                self._market_state.freshness_sec(s)
+                for s in self._market_state.universe_symbols()
+            ]
+            seen = [a for a in ages if a is not None]
+            return max(seen) if seen else None
+        except Exception:
+            return None
+
+    def _read_delta_counters(self) -> dict:
+        """Snapshot the cumulative counters used for deltas (None where unread)."""
+        counters: dict = {"msgs": None, "reconnects": None, "rows": None}
+        try:
+            d = self._ws_manager.health().details
+            counters["msgs"] = _safe_int(_extract_kv(d, "msgs"))
+            counters["reconnects"] = _safe_int(_extract_kv(d, "reconnects"))
+        except Exception:
+            pass
+        try:
+            d = self._snapshot_writer.health().details
+            counters["rows"] = _safe_int(_extract_kv(d, "total_rows"))
+        except Exception:
+            pass
+        return counters
+
+    def _format_deltas_line(self) -> Optional[str]:
+        """Render per-interval deltas, or None when disabled.  Never raises.
+
+        Computes deltas against the committed baseline and stashes the freshly
+        read samples in ``_pending_delta``; the baseline is advanced only after a
+        successful send (see send_heartbeat).  A metric that cannot be computed
+        confidently renders 'n/a' rather than a misleading number.
+        """
+        if not self._emit_deltas:
+            return None
+        try:
+            now = time.monotonic()
+            current = self._read_delta_counters()
+            deltas, elapsed = self._delta_tracker.compute(current, now)
+            self._pending_delta = (current, now)
+
+            def fmt(v: Optional[int]) -> str:
+                return f"+{v}" if v is not None else "n/a"
+
+            window = f"(in {_format_age(elapsed)})" if elapsed is not None else "(first sample)"
+            return (
+                f"deltas       : msgs {fmt(deltas.get('msgs'))}  "
+                f"reconn {fmt(deltas.get('reconnects'))}  "
+                f"rows {fmt(deltas.get('rows'))}  {window}"
+            )
+        except Exception:
+            self._pending_delta = None
+            return "deltas       : [error computing deltas]"
 
     def _format_snapshot_line(self) -> str:
         try:
@@ -283,10 +413,30 @@ class HeartbeatService:
             last_snap = _extract_kv(h.details, "last_snap") or "unknown"
             last_rows = _extract_kv(h.details, "last_rows") or "?"
             cf = _extract_kv(h.details, "consec_failures") or "0"
-            status = "ok" if h.healthy else f"DEGRADED (cf={cf})"
+            if h.healthy:
+                status = "ok"
+            else:
+                status = f"DEGRADED (cf={cf})"
+                reason = self._snapshot_failure_reason()
+                if reason:
+                    status += f" reason={reason}"
             return f"snapshot     : last={last_snap}, {last_rows} rows, {status}"
         except Exception:
             return "snapshot     : [error reading health]"
+
+    def _snapshot_failure_reason(self) -> str:
+        """Read the SnapshotWriter's last write-failure reason, read-only.
+
+        Returns '' if the writer does not expose a reason or the call fails — the
+        reason is decorative; it must never break the snapshot line.
+        """
+        try:
+            getter = getattr(self._snapshot_writer, "last_failure_reason", None)
+            if getter is None:
+                return ""
+            return getter() or ""
+        except Exception:
+            return ""
 
     def _format_universe_line(self) -> str:
         try:
@@ -358,10 +508,122 @@ class HeartbeatService:
                 pass
         return result
 
+    def _forward_summary(self) -> Optional["_forward_status.ForwardStatus"]:
+        """Read the forward-evidence cycle READ-ONLY, or None if not configured.
+
+        Never raises: forward_status.summarize() is total, and any unexpected
+        error is folded into an 'error' ForwardStatus so the heartbeat still
+        renders.
+        """
+        if not self._forward_status_path:
+            return None
+        try:
+            return _forward_status.summarize(self._forward_status_path)
+        except Exception as exc:  # defensive; summarize is designed not to raise
+            return _forward_status.ForwardStatus.read_error(
+                _forward_status.expected_run_date(),
+                f"{type(exc).__name__}: {exc}",
+            )
+
+    def _disk_info(self) -> Optional["_storage_status.DiskInfo"]:
+        """Free-disk info for the collector data volume, or None if not configured."""
+        if not self._data_db_path:
+            return None
+        try:
+            return _storage_status.disk_free(self._data_db_path)
+        except Exception as exc:  # defensive; disk_free is designed not to raise
+            return _storage_status.DiskInfo(
+                False, None, None, None, f"{type(exc).__name__}: {exc}")
+
+    def _format_storage_line(
+        self, disk: Optional["_storage_status.DiskInfo"]
+    ) -> Optional[str]:
+        """Render the storage line (disk free + db/wal sizes), or None if off.
+
+        Uses the pre-computed ``disk`` (so disk is read once per heartbeat) and
+        adds db/wal sizes for the collector DB and, when configured, the forward
+        DB.  Never raises.
+        """
+        if not self._data_db_path:
+            return None
+        try:
+            if disk is not None and disk.ok and disk.free_pct is not None:
+                hb = _storage_status.human_bytes
+                disk_str = (
+                    f"disk {disk.free_pct:.0f}% free "
+                    f"({hb(disk.free_bytes)}/{hb(disk.total_bytes)})"
+                )
+            else:
+                disk_str = "disk n/a"
+
+            parts = [disk_str]
+            live = _storage_status.db_sizes(self._data_db_path)
+            if live.ok:
+                parts.append(f"db {_storage_status.human_bytes(live.db_bytes)}")
+                parts.append(f"wal {_storage_status.human_bytes(live.wal_bytes)}")
+            if self._forward_status_path:
+                fwd_sz = _storage_status.db_sizes(self._forward_status_path)
+                if fwd_sz.ok:
+                    total = fwd_sz.db_bytes + fwd_sz.wal_bytes
+                    parts.append(f"fwd {_storage_status.human_bytes(total)}")
+            return "storage      : " + "  ".join(parts)
+        except Exception:
+            return "storage      : [error reading storage]"
+
+    def _overall_level(
+        self,
+        fwd: Optional["_forward_status.ForwardStatus"],
+        disk: Optional["_storage_status.DiskInfo"] = None,
+    ) -> str:
+        """Roll component health + forward + disk into OK / DEGRADED / CRITICAL.
+
+        CRITICAL: any component fatal, forward fn_hash_violation, or disk
+                  below DISK_CRITICAL_PCT.
+        DEGRADED: any component unhealthy (non-fatal), forward
+                  stale / signal error / DB unreadable, or disk below
+                  DISK_DEGRADED_PCT.
+        OK:       everything healthy (or not configured).
+        A 'missing' forward DB and an unknown disk are status-neutral.
+        """
+        any_fatal = False
+        any_unhealthy = False
+        components: list = [
+            self._ws_manager, self._snapshot_writer, self._chain_refresher,
+        ]
+        if self._expiry_context is not None:
+            components.append(self._expiry_context)
+        for comp in components:
+            try:
+                h = comp.health()
+                if not h.healthy:
+                    any_unhealthy = True
+                    if h.fatal:
+                        any_fatal = True
+            except Exception:
+                any_unhealthy = True
+
+        fwd_sev = fwd.severity() if fwd is not None else "ok"
+        disk_sev = disk.severity() if disk is not None else "ok"
+        if any_fatal or fwd_sev == "critical" or disk_sev == "critical":
+            return "CRITICAL"
+        if any_unhealthy or fwd_sev == "degraded" or disk_sev == "degraded":
+            return "DEGRADED"
+        return "OK"
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _safe_int(s: Optional[str]) -> Optional[int]:
+    """Parse an int, or None on any failure (used for delta counters)."""
+    if s is None:
+        return None
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+
 
 def _extract_kv(text: str, key: str) -> Optional[str]:
     """Extract the value from the first 'key=value' token in a space-separated string.

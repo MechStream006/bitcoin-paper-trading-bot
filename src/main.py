@@ -116,6 +116,9 @@ def main() -> int:
         delta_ws_url=cfg.DELTA_WS_URL,
         telegram_bot_token=cfg.TELEGRAM_BOT_TOKEN,
         telegram_channel_id=cfg.TELEGRAM_CHANNEL_ID,
+        forward_status_path=cfg.FORWARD_DB_PATH,
+        heartbeat_disk_monitoring=cfg.HEARTBEAT_DISK_MONITORING,
+        heartbeat_deltas=cfg.HEARTBEAT_DELTAS,
     )
 
     # Bootstrap: fatal on error, non-zero exit
