@@ -24,9 +24,9 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -61,6 +61,19 @@ WAL_WARN_BYTES        = 200 * 1024 ** 2   # 200 MB
 MEM_WARN_BYTES        = 512 * 1024 ** 2   # 512 MB
 MEM_CRIT_BYTES        = 1024 * 1024 ** 2  # 1 GB
 BACKUP_WARN_HOURS     = 48
+
+# Forward-cycle dead-man (D3a): days behind expected run_date -> severity.
+FORWARD_WARN_DAYS     = 1   # 1 day stale  -> WARNING
+FORWARD_CRIT_DAYS     = 2   # 2 days stale -> CRITICAL
+
+# Short display labels for forward signal ids (Telegram alert readability).
+_FWD_SIG_ALIASES = {
+    "h5_vol_regime":            "h5",
+    "g1_market_regime_sma200":  "g1",
+    "g3_momentum_tsmom":        "g3",
+    "ivrv_vrp_spread":          "ivrv",
+    "g3_atr_expansion":         "atr",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +291,108 @@ def check_integrity(db_path: Path) -> CheckResult:
 
 
 # ---------------------------------------------------------------------------
+# Forward-cycle dead-man (D3a)
+# ---------------------------------------------------------------------------
+
+def _days_behind(latest: Optional[str], expected: str) -> Optional[int]:
+    """Whole days between latest run_date and expected (>=0), or None if unknown."""
+    if not latest:
+        return None
+    try:
+        delta = (date.fromisoformat(expected) - date.fromisoformat(latest)).days
+        return max(0, delta)
+    except Exception:
+        return None
+
+
+def _fwd_signals_str(signals: dict) -> str:
+    """Compact 'h5=ok g1=ok ...' rendering of the latest per-signal statuses."""
+    if not signals:
+        return "no signals"
+    return " ".join(
+        f"{_FWD_SIG_ALIASES.get(sid, sid)}={st}"
+        for sid, st in sorted(signals.items())
+    )
+
+
+def check_forward_cycle(forward_db_path: Path) -> CheckResult:
+    """D3a dead-man for the daily forward-evidence cycle.
+
+    Independent of the bot process (this runs on the healthcheck timer), so it
+    catches a missed 01:00 cycle or a governance failure even when the collector
+    is down.  Reuses src.alerts.forward_status as the single source of truth so
+    the external check and the in-process heartbeat never diverge.
+
+    Severity (per approved design):
+      fn_hash_violation / unreadable run_log / never-ran -> CRITICAL
+      >= 2 days behind                                    -> CRITICAL
+      1 day behind / a signal errored                     -> WARNING
+      missing DB                                          -> INFO (skip)
+      fresh + clean                                       -> OK
+    """
+    try:
+        from src.alerts import forward_status as fs
+    except Exception as exc:
+        return CheckResult(
+            "forward_cycle", WARNING, f"forward_status import failed: {exc}", {}
+        )
+
+    try:
+        fsum = fs.summarize(str(forward_db_path))
+    except Exception as exc:  # summarize is total, but guard anyway
+        return CheckResult(
+            "forward_cycle", CRITICAL, f"forward summarize error: {exc}", {}
+        )
+
+    expected = fsum.expected_run_date
+    latest   = fsum.latest_run_date
+    days     = _days_behind(latest, expected)
+    sig_str  = _fwd_signals_str(fsum.signals)
+    base     = f"expected {expected}, latest {latest or 'none'}, {('%d' % days) if days is not None else '?'} days behind | {sig_str}"
+    detail   = {
+        "state":             fsum.state,
+        "expected_run_date": expected,
+        "latest_run_date":   latest,
+        "days_behind":       days,
+        "signals":           fsum.signals,
+    }
+
+    state = fsum.state
+    if state == "missing":
+        return CheckResult(
+            "forward_cycle", INFO,
+            f"forward DB not present ({forward_db_path.name}) — skipping", detail,
+        )
+    if state == "error":
+        return CheckResult(
+            "forward_cycle", CRITICAL,
+            f"forward run_log unreadable: {fsum.detail} | {base}", detail,
+        )
+    if state == "critical":   # fn_hash_violation
+        return CheckResult(
+            "forward_cycle", CRITICAL,
+            f"forward fn_hash_violation ({fsum.detail}) | {base}", detail,
+        )
+    if state == "degraded":   # a signal errored, but the cycle ran
+        return CheckResult(
+            "forward_cycle", WARNING, f"forward signal error ({fsum.detail}) | {base}", detail,
+        )
+    if state == "stale":
+        if latest is None:    # empty run_log — the cycle has never run
+            return CheckResult(
+                "forward_cycle", CRITICAL, f"forward cycle has never run | {base}", detail,
+            )
+        if days is not None and days >= FORWARD_CRIT_DAYS:
+            return CheckResult(
+                "forward_cycle", CRITICAL, f"forward cycle stale | {base}", detail,
+            )
+        return CheckResult(
+            "forward_cycle", WARNING, f"forward cycle stale | {base}", detail,
+        )
+    return CheckResult("forward_cycle", OK, f"forward cycle fresh | {base}", detail)
+
+
+# ---------------------------------------------------------------------------
 # Alert formatting
 # ---------------------------------------------------------------------------
 
@@ -327,6 +442,15 @@ def main() -> int:
     parser.add_argument(
         "--db-path", type=Path, default=ROOT / "data" / "btc_trading.db",
     )
+    parser.add_argument(
+        "--forward-db-path", type=Path,
+        default=ROOT / "research" / "data" / "evidence_forward.db",
+        help="Path to evidence_forward.db for the D3a forward-cycle dead-man",
+    )
+    parser.add_argument(
+        "--no-forward-check", action="store_true",
+        help="Skip the forward-cycle dead-man check",
+    )
     parser.add_argument("--service-name", default="btcbot")
     args = parser.parse_args()
 
@@ -340,6 +464,8 @@ def main() -> int:
         check_wal(db_path),
         check_backup_freshness(backup_dir),
     ]
+    if not args.no_forward_check:
+        results.append(check_forward_cycle(args.forward_db_path))
     if args.full_integrity:
         results.append(check_integrity(db_path))
 
