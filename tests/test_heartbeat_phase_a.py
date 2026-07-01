@@ -249,7 +249,10 @@ class TestHeartbeatStatusHeader:
 
     def test_fresh_forward_keeps_ok(self, tmp_path):
         p = tmp_path / "ev.db"
-        _make_run_log(p, _fresh_rows())
+        # _compose_heartbeat() summarizes with the REAL clock, so the fixture
+        # must be dated at the real expected run_date (not the fixed test NOW)
+        # or it reads as stale once the wall-clock date rolls over.
+        _make_run_log(p, _fresh_rows(date=fs.expected_run_date()))
         hb = _make_hb(forward_path=str(p))
         text = hb._compose_heartbeat()
         assert "[OK]" in text
