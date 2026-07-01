@@ -119,6 +119,8 @@ def main() -> int:
         forward_status_path=cfg.FORWARD_DB_PATH,
         heartbeat_disk_monitoring=cfg.HEARTBEAT_DISK_MONITORING,
         heartbeat_deltas=cfg.HEARTBEAT_DELTAS,
+        heartbeat_universe_warn=cfg.HEARTBEAT_UNIVERSE_WARN,
+        heartbeat_job_ages=cfg.HEARTBEAT_JOB_AGES,
     )
 
     # Bootstrap: fatal on error, non-zero exit

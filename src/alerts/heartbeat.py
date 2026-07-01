@@ -63,6 +63,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# D1: universe snapshot older than this multiple of the chain-refresh interval
+# is flagged STALE (DEGRADED).  2x tolerates jitter + one missed refresh.
+_UNIVERSE_STALE_FACTOR = 2.0
+# D2: an interval job whose last success is older than this multiple of its
+# interval is flagged stalled (DEGRADED).  3x absorbs jitter / coalesced misfires.
+_JOB_STALL_FACTOR = 3.0
+# D2: short display labels for the jobs line (falls back to the raw job name).
+_JOB_ALIASES = {
+    "snapshot_quotes": "snap",
+    "chain_refresh":   "chain",
+    "expiry_observe":  "expiry",
+    "heartbeat":       "hb",
+    "daily_summary":   "daily",
+    "expiry_cycle_eod": "eod",
+}
+
 
 class HeartbeatService:
     """Compose and emit runtime heartbeats via a caller-provided sender.
@@ -102,6 +118,12 @@ class HeartbeatService:
                             heartbeat) and worst staleness age.  Display-only —
                             never escalates status.  False reverts the coverage
                             and deltas lines to their prior format.
+        chain_refresh_interval_sec: Chain-refresh cadence, used for the D1
+                            universe-age warning (age > 2x interval -> DEGRADED).
+                            None disables the warning (kill-switch).
+        emit_job_ages:      When True (default), render a D2 per-job last-run-age
+                            line and escalate a stalled interval job to DEGRADED.
+                            Requires set_scheduler(); None scheduler -> no line.
     """
 
     COMPONENT_NAME = "heartbeat"
@@ -120,6 +142,8 @@ class HeartbeatService:
         forward_status_path: Optional[str] = None,
         data_db_path: Optional[str] = None,
         emit_deltas: bool = True,
+        chain_refresh_interval_sec: Optional[int] = None,
+        emit_job_ages: bool = True,
     ) -> None:
         self._sender = sender
         self._ws_manager = ws_manager
@@ -146,6 +170,13 @@ class HeartbeatService:
         # Samples read during the most recent _compose_heartbeat(), committed to
         # the tracker baseline only after a SUCCESSFUL send (see send_heartbeat).
         self._pending_delta: Optional[Tuple[dict, float]] = None
+        # D1: chain-refresh interval used for the universe-age warning.  None
+        # disables the warning (kill-switch).  D2: per-job last-run ages read
+        # from a late-bound SchedulerService (set via set_scheduler()); None
+        # scheduler or emit_job_ages=False -> no jobs line.
+        self._chain_refresh_interval_sec = chain_refresh_interval_sec
+        self._emit_job_ages = emit_job_ages
+        self._scheduler: Optional[object] = None
 
         self._lock = threading.Lock()
         self._total_sent: int = 0
@@ -163,6 +194,15 @@ class HeartbeatService:
     def stop(self) -> None:
         """Mark the component as inactive."""
         logger.info("[heartbeat] stopped")
+
+    def set_scheduler(self, scheduler: object) -> None:
+        """Late-bind the SchedulerService for the D2 per-job-age line.
+
+        The scheduler is constructed after the heartbeat in the runtime
+        bootstrap, so it is injected here rather than via the constructor.  Only
+        ``job_ages()`` is called (read-only); the heartbeat never drives it.
+        """
+        self._scheduler = scheduler
 
     # -----------------------------------------------------------------------
     # Health reporting (safe to call from any thread)
@@ -265,11 +305,17 @@ class HeartbeatService:
         Reads each section independently; a failure in one section falls back
         to a safe error string so the rest of the message is still emitted.
         """
-        # Forward summary and disk info are each read once and reused for both
-        # their line and the overall-status roll-up (single read per heartbeat).
+        # Forward, disk, universe-age and job-age signals are each read once and
+        # reused for both their line and the overall-status roll-up (single read
+        # per heartbeat).
         fwd = self._forward_summary()
         disk = self._disk_info()
-        level = self._overall_level(fwd, disk)
+        universe_stale = self._universe_stale()
+        job_ages = self._get_job_ages()
+        jobs_stalled = self._jobs_stalled(job_ages)
+        level = self._overall_level(
+            fwd, disk, universe_stale=universe_stale, jobs_stalled=jobs_stalled,
+        )
         as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         lines: List[str] = [
@@ -279,7 +325,7 @@ class HeartbeatService:
             self._format_ws_line(),
             self._format_market_line(),
             self._format_snapshot_line(),
-            self._format_universe_line(),
+            self._format_universe_line(universe_stale),
         ]
 
         storage_line = self._format_storage_line(disk)
@@ -289,6 +335,10 @@ class HeartbeatService:
         deltas_line = self._format_deltas_line()
         if deltas_line is not None:
             lines.append(deltas_line)
+
+        jobs_line = self._format_jobs_line(job_ages)
+        if jobs_line is not None:
+            lines.append(jobs_line)
 
         if fwd is not None:
             lines.append(_forward_status.render_line(fwd))
@@ -438,16 +488,80 @@ class HeartbeatService:
         except Exception:
             return ""
 
-    def _format_universe_line(self) -> str:
+    def _format_universe_line(self, universe_stale: bool = False) -> str:
         try:
             snap = self._chain_refresher.current_snapshot()
             if snap is None:
                 return "universe     : not yet loaded"
             n = len(snap.symbols)
             age_str = _format_age(time.monotonic() - snap.refreshed_at)
-            return f"universe     : {n} options, refresh {age_str} ago"
+            suffix = "  (STALE)" if universe_stale else ""
+            return f"universe     : {n} options, refresh {age_str} ago{suffix}"
         except Exception:
             return "universe     : [error reading snapshot]"
+
+    def _universe_stale(self) -> bool:
+        """True if the universe snapshot is older than 2x the refresh interval.
+
+        Detects a frozen/failed chain-refresh that coverage masks (frozen symbols
+        keep ticking -> coverage stays 100%).  Returns False when the warning is
+        disabled (interval None), no snapshot exists yet, or on any error.
+        """
+        if self._chain_refresh_interval_sec is None:
+            return False
+        try:
+            snap = self._chain_refresher.current_snapshot()
+            if snap is None:
+                return False
+            age = time.monotonic() - snap.refreshed_at
+            return age > _UNIVERSE_STALE_FACTOR * self._chain_refresh_interval_sec
+        except Exception:
+            return False
+
+    def _get_job_ages(self):
+        """Read per-job liveness from the late-bound scheduler, or None if off."""
+        if not self._emit_job_ages or self._scheduler is None:
+            return None
+        try:
+            return self._scheduler.job_ages()
+        except Exception:
+            return None
+
+    def _format_jobs_line(self, job_ages) -> Optional[str]:
+        """Render the D2 per-job last-run-age line, or None when disabled."""
+        if not job_ages:
+            return None
+        try:
+            parts = []
+            for name, ja in job_ages.items():
+                label = _JOB_ALIASES.get(name, name)
+                age_str = (
+                    _format_age(ja.last_success_age)
+                    if ja.last_success_age is not None else "never"
+                )
+                parts.append(f"{label} {age_str}")
+            return "jobs         : " + "  ".join(parts)
+        except Exception:
+            return "jobs         : [error reading scheduler]"
+
+    def _jobs_stalled(self, job_ages) -> bool:
+        """True if any interval job ran once and is now past 3x its interval.
+
+        Cron jobs (interval_sec None) are excluded.  A never-succeeded job is not
+        escalated here (startup transient / covered by scheduler component
+        health) — only the ran-then-stalled case escalates.
+        """
+        if not job_ages:
+            return False
+        try:
+            for ja in job_ages.values():
+                if ja.interval_sec is None or ja.last_success_age is None:
+                    continue
+                if ja.last_success_age > _JOB_STALL_FACTOR * ja.interval_sec:
+                    return True
+            return False
+        except Exception:
+            return False
 
     def _format_expiry_block(self) -> List[str]:
         """Return 0, 1, or 2 lines for the expiry posture section."""
@@ -574,14 +688,17 @@ class HeartbeatService:
         self,
         fwd: Optional["_forward_status.ForwardStatus"],
         disk: Optional["_storage_status.DiskInfo"] = None,
+        universe_stale: bool = False,
+        jobs_stalled: bool = False,
     ) -> str:
-        """Roll component health + forward + disk into OK / DEGRADED / CRITICAL.
+        """Roll component health + forward + disk + D1/D2 into OK/DEGRADED/CRITICAL.
 
         CRITICAL: any component fatal, forward fn_hash_violation, or disk
                   below DISK_CRITICAL_PCT.
         DEGRADED: any component unhealthy (non-fatal), forward
-                  stale / signal error / DB unreadable, or disk below
-                  DISK_DEGRADED_PCT.
+                  stale / signal error / DB unreadable, disk below
+                  DISK_DEGRADED_PCT, a stale universe (D1), or a stalled
+                  scheduler job (D2).
         OK:       everything healthy (or not configured).
         A 'missing' forward DB and an unknown disk are status-neutral.
         """
@@ -606,7 +723,8 @@ class HeartbeatService:
         disk_sev = disk.severity() if disk is not None else "ok"
         if any_fatal or fwd_sev == "critical" or disk_sev == "critical":
             return "CRITICAL"
-        if any_unhealthy or fwd_sev == "degraded" or disk_sev == "degraded":
+        if (any_unhealthy or fwd_sev == "degraded" or disk_sev == "degraded"
+                or universe_stale or jobs_stalled):
             return "DEGRADED"
         return "OK"
 

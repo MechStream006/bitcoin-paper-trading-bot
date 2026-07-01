@@ -39,6 +39,16 @@ HEARTBEAT_DISK_MONITORING = os.getenv("HEARTBEAT_DISK_MONITORING", "1") not in (
 # format at runtime (kill-switch, no redeploy).
 HEARTBEAT_DELTAS = os.getenv("HEARTBEAT_DELTAS", "1") not in ("0", "false", "False", "")
 
+# Heartbeat universe-age warning (Phase D1): flag the universe DEGRADED when the
+# chain-refresh snapshot is older than 2x the refresh interval (a frozen refresh
+# that coverage masks).  Set HEARTBEAT_UNIVERSE_WARN=0 to disable at runtime.
+HEARTBEAT_UNIVERSE_WARN = os.getenv("HEARTBEAT_UNIVERSE_WARN", "1") not in ("0", "false", "False", "")
+
+# Heartbeat per-job last-run ages (Phase D2): render each scheduler job's
+# last-success age and flag a stalled interval job DEGRADED.  Set
+# HEARTBEAT_JOB_AGES=0 to disable the jobs line and job-stall escalation.
+HEARTBEAT_JOB_AGES = os.getenv("HEARTBEAT_JOB_AGES", "1") not in ("0", "false", "False", "")
+
 # Platform discriminator — "testnet" or "mainnet".
 # Default is "testnet" (safe-fail: evidence never silently promoted to mainnet
 # status by misconfiguration). Set PLATFORM=mainnet in .env only after the

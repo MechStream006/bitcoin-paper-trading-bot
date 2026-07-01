@@ -63,6 +63,21 @@ class JobStats:
     last_attempt: Optional[float] = None   # monotonic seconds
     last_success: Optional[float] = None   # monotonic seconds
     last_duration_sec: Optional[float] = None
+    interval_sec: Optional[float] = None   # interval-trigger period; None for cron
+
+
+@dataclasses.dataclass(frozen=True)
+class JobAge:
+    """Read-only per-job liveness snapshot returned by job_ages().
+
+    last_success_age: seconds since the job last succeeded, or None if it has
+                      never succeeded.
+    interval_sec:     the job's interval period, or None for cron jobs (which
+                      have no fixed cadence and are not stall-escalated).
+    """
+    name: str
+    last_success_age: Optional[float]
+    interval_sec: Optional[float]
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +179,17 @@ class SchedulerService:
         """
         jid = job_id or name
 
+        # Capture the interval period (observability only) so job_ages() can
+        # stall-escalate against each job's own cadence.  Cron jobs -> None.
+        interval_sec: Optional[float] = None
+        if trigger == "interval":
+            secs = (
+                float(trigger_kwargs.get("seconds", 0) or 0)
+                + float(trigger_kwargs.get("minutes", 0) or 0) * 60.0
+                + float(trigger_kwargs.get("hours", 0) or 0) * 3600.0
+            )
+            interval_sec = secs if secs > 0 else None
+
         # --- guard duplicate registration BEFORE touching APScheduler ---
         with self._lock:
             if jid in self._stats:
@@ -172,7 +198,8 @@ class SchedulerService:
                     f"pass a unique job_id= to register a second variant"
                 )
             stats = JobStats(
-                name=name, failure_threshold=self._failure_threshold
+                name=name, failure_threshold=self._failure_threshold,
+                interval_sec=interval_sec,
             )
             self._stats[jid] = stats
 
@@ -243,6 +270,24 @@ class SchedulerService:
             details=details,
             last_check_at=datetime.now(timezone.utc),
         )
+
+    def job_ages(self) -> "dict[str, JobAge]":
+        """Return per-job liveness: {job name -> JobAge}.  Read-only; any thread.
+
+        Observability accessor only — takes a shallow copy of stats under _lock
+        (never blocks job execution) and computes last-success ages against a
+        single ``now``.  Does not mutate scheduler state.
+        """
+        now = time.monotonic()
+        with self._lock:
+            stats_copy = {jid: copy.copy(s) for jid, s in self._stats.items()}
+        result: "dict[str, JobAge]" = {}
+        for s in stats_copy.values():
+            age = (now - s.last_success) if s.last_success is not None else None
+            result[s.name] = JobAge(
+                name=s.name, last_success_age=age, interval_sec=s.interval_sec
+            )
+        return result
 
     # -----------------------------------------------------------------------
     # Job wrapper

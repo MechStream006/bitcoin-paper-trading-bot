@@ -150,6 +150,8 @@ class Runtime:
         forward_status_path: str = "",
         heartbeat_disk_monitoring: bool = True,
         heartbeat_deltas: bool = True,
+        heartbeat_universe_warn: bool = True,
+        heartbeat_job_ages: bool = True,
         n_strikes: int = 5,
         n_expiries: int = 3,
         snapshot_interval_sec: int = 60,
@@ -173,6 +175,8 @@ class Runtime:
         self._forward_status_path   = forward_status_path
         self._hb_disk_monitoring    = heartbeat_disk_monitoring
         self._hb_deltas             = heartbeat_deltas
+        self._hb_universe_warn      = heartbeat_universe_warn
+        self._hb_job_ages           = heartbeat_job_ages
         self._n_strikes             = n_strikes
         self._n_expiries            = n_expiries
         self._snapshot_interval      = snapshot_interval_sec
@@ -350,6 +354,10 @@ class Runtime:
             forward_status_path=(self._forward_status_path or None),
             data_db_path=(str(self._db_path) if self._hb_disk_monitoring else None),
             emit_deltas=self._hb_deltas,
+            chain_refresh_interval_sec=(
+                self._chain_refresh_interval if self._hb_universe_warn else None
+            ),
+            emit_job_ages=self._hb_job_ages,
         )
         self._rate_limiter = rate_limiter
         self._heartbeat = heartbeat
@@ -395,6 +403,10 @@ class Runtime:
             minute=5,
         )
         self._scheduler = scheduler
+
+        # Late-bind the scheduler into the heartbeat for the D2 per-job-age line
+        # (scheduler is constructed after the heartbeat; read-only job_ages()).
+        heartbeat.set_scheduler(scheduler)
 
         # 10. Supervisor
         supervisor = Supervisor(
