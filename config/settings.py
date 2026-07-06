@@ -54,3 +54,12 @@ HEARTBEAT_JOB_AGES = os.getenv("HEARTBEAT_JOB_AGES", "1") not in ("0", "false", 
 # status by misconfiguration). Set PLATFORM=mainnet in .env only after the
 # mainnet collector is validated and the certifier thresholds are calibrated.
 PLATFORM = os.getenv("PLATFORM", "testnet")
+
+# --- M1.2 Archive Writer (Implementation Package I1, T0 skeleton) ----------
+# Placeholders only. Nothing in src/archive/ reads these yet (T0 is a
+# skeleton — no executable archive functionality). Do not wire these into
+# any running service before the Archive Writer implementation (T1-T9) is
+# complete and reviewed.
+COLD_ARCHIVE_ROOT = os.getenv("COLD_ARCHIVE_ROOT", str(ROOT / "data" / "cold_archive"))
+ARCHIVE_HASH_SPEC_VERSION = int(os.getenv("ARCHIVE_HASH_SPEC_VERSION", "1"))
+ARCHIVE_WRITER_ENABLED = os.getenv("ARCHIVE_WRITER_ENABLED", "0") not in ("0", "false", "False", "")
