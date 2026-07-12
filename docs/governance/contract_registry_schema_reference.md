@@ -150,3 +150,25 @@ scans the module's own source for exactly those calls.
 - No reprocessing policy (PR-D).
 - No Evidence Ledger / Feature Store / Dataset wiring (PR-E).
 - No CLI, no cron wiring.
+
+---
+
+## PR-2 review outcome (2026-07-13)
+
+**Merge approved and completed.** Full suite green post-merge, no
+regressions, no conflicts. One enhancement was explicitly carried forward
+into PR-3 rather than implemented here:
+
+> **PR-3 must add `activated_receipt_id` to every activated contract row** —
+> a permanent reference to the governance receipt (PR-1's
+> `governance_receipts`, `decision_type='contract.activate'`) that activated
+> it. This strengthens lineage (a contract row points to *the decision that
+> froze it*, not just to the fact that it is frozen) and gives `replay()` a
+> direct join from contract to receipt instead of requiring a
+> `subject_kind='contract', subject_id=contract_hash` scan.
+
+This is additive to the schema (`contract_registry.activated_receipt_id`,
+nullable, populated only by `activate()`) and requires no change to
+anything built in PR-2 — `append_contract()` already accepts arbitrary
+placeholder columns (`activated_at`, `retired_at`) that stay `NULL` until a
+later PR populates them; `activated_receipt_id` joins that pattern.
