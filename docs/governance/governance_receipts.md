@@ -1,6 +1,9 @@
 # Governance Receipt Architecture
 
-**Status:** Design. Not implemented.
+**Status:** Design. **PR-1 (Governance Receipt Foundation) implemented and merged
+2026-07-13** — see `receipt_schema_reference.md` for the implemented schema.
+PR-2+ (per-subsystem wiring: family transitions, contract activation, readiness
+verdicts, signing, anchoring) not yet implemented.
 **Author:** Principal Data Platform / Governance Architect
 **Date:** 2026-07-13
 **Depends on:** `evidence_reporting_architecture.md`, `data_completeness_gate.md`,
