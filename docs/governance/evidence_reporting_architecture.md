@@ -10,6 +10,13 @@ the documented known-correct L0/L1 split exactly, both verified by test.
 §10's PR-5 ("Operationalise": systemd timer, daily commit, heartbeat/alert
 wiring) is explicitly NOT part of this implementation — see the schema
 reference's "Remaining work" section.
+
+**Governance Architecture PR-6 (2026-07-13, merged)** layered
+`evidence.admit`/`.reject` governance receipts on top of this design's
+`record.py`/`lifecycle.py` — see
+`evidence_library_governance_schema_reference.md`. `report.py --check`
+gained an additive, "now"-only evidence-governance check (`EG1`/`EG2`),
+appended after this document's `C1`–`C9`, never modifying them.
 **Author:** Principal Research Architect / Governance Architect
 **Date:** 2026-07-13
 **Governance impact:** Introduces one new ledger column, one new ledger view, one

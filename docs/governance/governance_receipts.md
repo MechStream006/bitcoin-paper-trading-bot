@@ -5,10 +5,23 @@
 **PR-4 (2026-07-13, merged) wires the first two decision types into
 production**: `contract.activate` and `contract.retire`, emitted atomically
 alongside Contract Registry activation/retirement — see
-`contract_receipts_schema_reference.md`. Every other decision type in the
-taxonomy (`family.transition`, `family.promote`, `readiness.verdict`,
-`evidence.admit`/`.reject`, `feature.*`, `dataset.*`, `model.*`, `reversal`)
-remains unemitted. No signing, no anchoring, no `--verify-chain` CLI/cron.
+`contract_receipts_schema_reference.md`.
+
+**Governance Architecture PR-6 (2026-07-13, merged) wires two more**:
+`evidence.admit` and `evidence.reject`, emitted by the Evidence Library
+(`evidence_governance.py`) for a run's pass/fail against
+`lifecycle.check_candidate_gate()` — see
+`evidence_library_governance_schema_reference.md`, including the explicit
+scoping note on what these two receipt types do and do not attest (the
+Data Completeness Gate's readiness-based admissibility rule does not exist
+yet; these receipts attest gate-check outcome, not input-data
+completeness). This is also the first real exercise of the `derived`
+replay path (`rule_fn` injection) — PR-4's contract receipts are all
+`discretionary` and never exercised it.
+
+Still unemitted: `family.transition`, `family.promote`, `readiness.verdict`,
+`feature.*`, `dataset.*`, `model.*`, `reversal`. No signing, no anchoring,
+no `--verify-chain` CLI/cron.
 
 **PR-5 must confirm/extend chain verification for contract receipts and
 prepare for anchoring**: every `contract.activate`/`.retire` receipt PR-4

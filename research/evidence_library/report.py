@@ -715,11 +715,30 @@ def run_check(
     ledger_path: Path,
     thresholds_path: Path,
     as_of: str | None = None,
+    check_evidence_governance: bool = True,
 ) -> int:
     registry = _load_registry(registry_path)
     thresholds = _load_thresholds(thresholds_path)
     as_of_norm = normalize_as_of(as_of)
     errors = lifecycle.validate_registry(registry, ledger_path, thresholds, as_of=as_of_norm)
+
+    # PR-6 (evidence_governance.py): additive hook, appended after C1-C9 --
+    # never folded into or renumbering them. "EG"-prefixed errors are a
+    # SEPARATE subsystem (governance receipts for evidence admission/
+    # rejection), not a Core Evidence Library invariant. This check is
+    # inherently "now"-only (governance_receipts has no as_of derivation
+    # equivalent to state_transitions in this PR), so it is skipped for a
+    # historical --check --as-of run rather than silently misapplied.
+    if check_evidence_governance and as_of_norm is None:
+        import evidence_governance
+        # Idempotent schema-ensure (CREATE TABLE IF NOT EXISTS only, no ALTER)
+        # -- report.py has never called init_db() before (it is a read-only
+        # consumer of an already-seeded ledger.db); a ledger that predates
+        # this PR, or a fresh test fixture, must not crash --check with
+        # "no such table: governance_receipts" just because nothing has
+        # written a receipt into it yet.
+        evidence_governance.init_db(ledger_path)
+        errors = errors + evidence_governance.validate_evidence_governance(ledger_path, registry)
 
     if errors:
         print(f"REGISTRY CHECK FAILED — {len(errors)} error(s):")
