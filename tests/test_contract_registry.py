@@ -387,13 +387,20 @@ class TestAppendOnlyEnforcement:
 # ---------------------------------------------------------------------------
 
 class TestImmutabilityOfActivatedContracts:
-    def test_active_contract_cannot_be_updated(self, db_path):
+    def test_active_contract_content_cannot_be_updated(self, db_path):
+        # NOTE: as of PR-3 (contract_lifecycle.py), phase IS a legitimate
+        # mutable field along documented lifecycle arcs (e.g. active ->
+        # retired) -- see tests/test_contract_lifecycle.py for that coverage
+        # and for the CONTRACT_TAMPER guard on illegal arcs. What must
+        # remain permanently frozen, checked here, is the contract's
+        # CONTENT: body, contract_hash, contract_id, version, and the other
+        # write-once identity/audit fields.
         row = cr.append_contract(db_path, make_record(phase="active"))
         con = sqlite3.connect(db_path)
         try:
             with pytest.raises(sqlite3.IntegrityError):
                 con.execute(
-                    "UPDATE contract_registry SET phase = 'retired' WHERE contract_hash = ?",
+                    "UPDATE contract_registry SET body = 'tampered' WHERE contract_hash = ?",
                     (row["contract_hash"],),
                 )
         finally:

@@ -8,21 +8,31 @@ NOT read by this module at all -- there is no file-reading code path here,
 which is what makes "replay never reads the filesystem" trivially true
 rather than merely a convention.
 
-Explicitly NOT implemented in this PR (deferred to later PRs per
+PR-3 (contract_lifecycle.py) builds directly on this module: activation,
+retirement, monotonic version assignment, and tamper detection live there,
+not here. This file's schema changed for PR-3 in exactly the way its own
+PR-2 comments said it would have to: the blanket "no UPDATE at all" trigger
+is replaced with a guarded one that permits ONLY the documented lifecycle
+fields (phase, superseded_by, activated_at, retired_at,
+activated_receipt_id) to change, each write-once except phase (which may
+only advance along the allowed lifecycle arcs) -- see trg_contracts_guard_update
+below. Every other column remains fully frozen post-insert; an attempt to
+change one raises CONTRACT_TAMPER.
+
+Still explicitly NOT implemented (deferred to later PRs per
 contract_versioning.md §11):
-  - contract activation (hash computation from a draft file, monotonic
-    version stamping, atomic supersede-the-incumbent, tamper detection/HALT)
-  - contract retirement business rules (superseded_by requirements,
-    frozen-feature semantics, pinned_run retirement blocking)
-  - governance receipt emission (contract.activate / contract.retire)
+  - governance receipt emission (contract.activate / contract.retire) --
+    activated_receipt_id is a nullable placeholder, populated by PR-4
   - the impact report / change-class classifier (PR-C)
   - engine/check versioning (PR-B)
   - reprocessing policy (PR-D)
   - Evidence Ledger / Feature Store / Dataset wiring (PR-E)
 
-This module only makes it possible to durably, immutably store a contract's
-frozen bytes and query them back by hash, version, or contract_id. Nothing
-in the platform calls append_contract() yet.
+This module makes it possible to durably, immutably store a contract's
+frozen bytes, query them back by hash/version/contract_id, and (as of PR-3,
+via contract_lifecycle.py) legitimately advance a row's lifecycle metadata
+under the guarded trigger below. It still never reads a contract from the
+filesystem.
 
 Hashing: reuses receipts.sha256_lf / receipts.canonical_json verbatim (PR-1)
 -- itself byte-identical to forward_evidence/pre_reg_guard.py's
@@ -85,8 +95,9 @@ CREATE TABLE IF NOT EXISTS contract_registry (
     actor              TEXT NOT NULL,
     reason             TEXT NOT NULL,
     created_at         TEXT NOT NULL,      -- when this row was appended to the registry
-    activated_at       TEXT,               -- activation placeholder -- NULL until a later PR implements activate()
-    retired_at         TEXT,               -- retirement placeholder -- NULL until a later PR implements retire()
+    activated_at       TEXT,               -- set at INSERT time by contract_lifecycle.activate_contract()
+    retired_at         TEXT,               -- set by contract_lifecycle.retire_contract(); NULL until retired
+    activated_receipt_id TEXT,             -- placeholder (PR-3): permanently NULL until PR-4 wires receipt emission
     CHECK (phase IN ('draft','active','superseded','retired')),
     CHECK (change_class IS NULL OR change_class IN ('editorial','relaxing','tightening','corrective')),
     UNIQUE (contract_id, version)
@@ -100,23 +111,61 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_one_active_per_contract
 CREATE INDEX IF NOT EXISTS ix_contract_id ON contract_registry(contract_id, version);
 CREATE INDEX IF NOT EXISTS ix_contract_phase ON contract_registry(contract_id, phase);
 
--- Append-only. No exception is carved out yet for phase mutation (the one
--- exception contract_versioning.md §11 documents for the eventual
--- activate()/supersede()/retire() operations) because those operations do
--- not exist in this PR. A later PR that implements them must replace this
--- blanket block with the documented "phase only advances" CHECK-guarded
--- UPDATE path -- do not silently loosen this trigger without that change
--- landing alongside it.
-CREATE TRIGGER IF NOT EXISTS trg_contracts_no_update
-BEFORE UPDATE ON contract_registry
-BEGIN
-    SELECT RAISE(ABORT, 'contract_registry is append-only: UPDATE forbidden (no phase-mutation exception exists yet)');
-END;
-
 CREATE TRIGGER IF NOT EXISTS trg_contracts_no_delete
 BEFORE DELETE ON contract_registry
 BEGIN
     SELECT RAISE(ABORT, 'contract_registry is append-only: DELETE forbidden');
+END;
+"""
+
+# PR-3: the guarded UPDATE trigger. Introduced exactly as PR-2's own comments
+# said a later PR would have to: it replaces the blanket "no UPDATE at all"
+# trigger (trg_contracts_no_update, dropped by init_db() below for any
+# pre-existing database) with one that permits ONLY the documented lifecycle
+# metadata fields to change, and only along legal arcs. Any other column
+# changing, or an illegal phase transition, or a second write to a
+# write-once lineage field, raises CONTRACT_TAMPER.
+#
+# Created separately from _SCHEMA_SQL (rather than folded into it) so
+# init_db() can DROP the old trigger and CREATE this one in a well-defined
+# order for both fresh and pre-existing databases.
+_GUARD_TRIGGER_SQL = """
+CREATE TRIGGER IF NOT EXISTS trg_contracts_guard_update
+BEFORE UPDATE ON contract_registry
+BEGIN
+    SELECT CASE
+        WHEN NEW.contract_hash      != OLD.contract_hash
+          OR NEW.contract_id        != OLD.contract_id
+          OR NEW.version            != OLD.version
+          OR NEW.contract_schema_v  != OLD.contract_schema_v
+          OR NEW.body               != OLD.body
+          OR NEW.change_class       IS NOT OLD.change_class
+          OR NEW.impact_report_hash IS NOT OLD.impact_report_hash
+          OR NEW.actor              != OLD.actor
+          OR NEW.reason             != OLD.reason
+          OR NEW.created_at         != OLD.created_at
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: immutable field changed')
+    END;
+    SELECT CASE
+        WHEN OLD.superseded_by IS NOT NULL AND NEW.superseded_by IS NOT OLD.superseded_by
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: superseded_by is write-once')
+    END;
+    SELECT CASE
+        WHEN OLD.activated_receipt_id IS NOT NULL AND NEW.activated_receipt_id IS NOT OLD.activated_receipt_id
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: activated_receipt_id is write-once')
+    END;
+    SELECT CASE
+        WHEN OLD.retired_at IS NOT NULL AND NEW.retired_at IS NOT OLD.retired_at
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: retired_at is write-once')
+    END;
+    SELECT CASE
+        WHEN NEW.phase != OLD.phase AND NOT (
+             (OLD.phase = 'draft'      AND NEW.phase = 'active')
+          OR (OLD.phase = 'active'     AND NEW.phase IN ('superseded','retired'))
+          OR (OLD.phase = 'superseded' AND NEW.phase = 'retired')
+        )
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: illegal phase transition ' || OLD.phase || ' -> ' || NEW.phase)
+    END;
 END;
 """
 
@@ -137,6 +186,7 @@ class ContractRecord:
     created_at: str | None = None
     activated_at: str | None = None
     retired_at: str | None = None
+    activated_receipt_id: str | None = None
 
 
 def now_iso() -> str:
@@ -229,11 +279,25 @@ def validate_record_or_raise(record: ContractRecord) -> None:
 # ---------------------------------------------------------------------------
 
 def init_db(path: Path | str) -> None:
+    """
+    Idempotent. Safe to call against a fresh path or a pre-existing PR-2
+    database: migrates in the activated_receipt_id column if it is missing,
+    drops PR-2's blanket update-blocking trigger if present, and installs
+    the PR-3 guarded trigger.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
     try:
         con.executescript(_SCHEMA_SQL)
+
+        columns = {row[1] for row in con.execute("PRAGMA table_info(contract_registry)")}
+        if "activated_receipt_id" not in columns:
+            con.execute("ALTER TABLE contract_registry ADD COLUMN activated_receipt_id TEXT")
+
+        con.execute("DROP TRIGGER IF EXISTS trg_contracts_no_update")
+        con.executescript(_GUARD_TRIGGER_SQL)
+
         con.commit()
     finally:
         con.close()
@@ -285,8 +349,9 @@ def append_contract(db_path: Path | str, record: ContractRecord) -> dict:
                 INSERT INTO contract_registry (
                     contract_hash, contract_id, version, contract_schema_v,
                     body, phase, change_class, impact_report_hash,
-                    superseded_by, actor, reason, created_at, activated_at, retired_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    superseded_by, actor, reason, created_at, activated_at, retired_at,
+                    activated_receipt_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     contract_hash, record.contract_id, record.version,
@@ -294,6 +359,7 @@ def append_contract(db_path: Path | str, record: ContractRecord) -> dict:
                     record.change_class, record.impact_report_hash,
                     record.superseded_by, record.actor, record.reason,
                     created_at, record.activated_at, record.retired_at,
+                    record.activated_receipt_id,
                 ),
             )
         except sqlite3.IntegrityError as exc:
