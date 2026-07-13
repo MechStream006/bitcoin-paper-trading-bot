@@ -1,0 +1,79 @@
+migrate_run_kind.py audit note
+ts (UTC): 2026-07-13T03:59:24.158064+00:00
+git_sha: 8a8f66d7346eea37c3c7f79c1c8b593b4b891104
+backup: ledger.pre-run_kind-migration.20260713T035924Z.db
+rows classified: 70
+rows left unclassified (unrecognised provenance): 0
+rule: earliest offline-corpus run per family -> discovery; every later offline-corpus run -> confirmatory; live-forward -> forward; mainnet -> production (evidence_reporting_architecture.md §9)
+
+classification:
+  2026-06-13T00:00:55.919832+00:00  g1_breakout_donchian           offline-corpus 4e6cae28 -> discovery
+  2026-06-14T09:37:56.301044+00:00  g1_breakout_donchian           offline-corpus 9d868221 -> confirmatory
+  2026-06-13T00:00:55.883786+00:00  g1_market_regime_sma200        offline-corpus e4074104 -> discovery
+  2026-06-14T09:37:56.278773+00:00  g1_market_regime_sma200        offline-corpus f551e746 -> confirmatory
+  2026-06-13T00:00:55.921271+00:00  g1_range_regime_bb             offline-corpus 17f0536f -> discovery
+  2026-06-14T09:37:56.307900+00:00  g1_range_regime_bb             offline-corpus f1eecc8d -> confirmatory
+  2026-06-13T00:00:55.867306+00:00  g1_trend_regime_ma_cross       offline-corpus abc6078e -> discovery
+  2026-06-14T09:37:56.263973+00:00  g1_trend_regime_ma_cross       offline-corpus 6a2e7da2 -> confirmatory
+  2026-06-13T00:00:55.900048+00:00  g1_volatility_regime           offline-corpus 8261cea1 -> discovery
+  2026-06-14T09:37:56.292087+00:00  g1_volatility_regime           offline-corpus 673d7555 -> confirmatory
+  2026-06-13T00:00:55.980569+00:00  g2_basis_compression           offline-corpus 399908e9 -> discovery
+  2026-06-14T09:37:56.352846+00:00  g2_basis_compression           offline-corpus c588d90a -> confirmatory
+  2026-06-13T00:00:55.982599+00:00  g2_basis_expansion             offline-corpus 916567a7 -> discovery
+  2026-06-14T09:37:56.360456+00:00  g2_basis_expansion             offline-corpus d0c2ff6e -> confirmatory
+  2026-06-13T00:00:55.971134+00:00  g2_basis_level                 offline-corpus 58654db6 -> discovery
+  2026-06-14T09:37:56.345452+00:00  g2_basis_level                 offline-corpus 6551c14b -> confirmatory
+  2026-06-13T00:00:55.954804+00:00  g2_funding_acceleration        offline-corpus 87d86090 -> discovery
+  2026-06-14T09:37:56.330450+00:00  g2_funding_acceleration        offline-corpus 1a86fee8 -> confirmatory
+  2026-06-13T00:00:55.964297+00:00  g2_funding_divergence          offline-corpus 9101b51b -> discovery
+  2026-06-14T09:37:56.338913+00:00  g2_funding_divergence          offline-corpus 29372223 -> confirmatory
+  2026-06-13T00:00:55.938597+00:00  g2_funding_level               offline-corpus cc916a89 -> discovery
+  2026-06-14T09:37:56.313011+00:00  g2_funding_level               offline-corpus 288df1a1 -> confirmatory
+  2026-06-13T00:00:56.088376+00:00  g3_atr_compression             offline-corpus 3fa9d836 -> discovery
+  2026-06-14T09:37:56.442903+00:00  g3_atr_compression             offline-corpus ff2e6fd2 -> confirmatory
+  2026-06-13T00:00:56.055255+00:00  g3_atr_expansion               offline-corpus be1849d4 -> discovery
+  2026-06-14T09:37:56.410991+00:00  g3_atr_expansion               offline-corpus ed84b4a6 -> confirmatory
+  2026-06-25T18:27:53.128687+00:00  g3_atr_expansion               offline-corpus 0c7e1bf9 -> confirmatory
+  2026-06-13T00:00:56.041630+00:00  g3_mean_reversion_rsi          offline-corpus 61d522e7 -> discovery
+  2026-06-14T09:37:56.402061+00:00  g3_mean_reversion_rsi          offline-corpus 006f5829 -> confirmatory
+  2026-06-13T00:00:55.997255+00:00  g3_momentum_tsmom              offline-corpus c75f6a4e -> discovery
+  2026-06-14T09:37:56.367249+00:00  g3_momentum_tsmom              offline-corpus 9fa7906e -> confirmatory
+  2026-06-13T00:00:56.027924+00:00  g3_trend_continuation_er       offline-corpus 3a80db88 -> discovery
+  2026-06-14T09:37:56.395735+00:00  g3_trend_continuation_er       offline-corpus bda2b49e -> confirmatory
+  2026-06-13T00:00:56.100343+00:00  g4_engulfing                   offline-corpus fa509875 -> discovery
+  2026-06-14T09:37:56.458256+00:00  g4_engulfing                   offline-corpus 061c6119 -> confirmatory
+  2026-06-13T00:00:56.153576+00:00  g4_evening_star                offline-corpus 779c82db -> discovery
+  2026-06-14T09:37:56.494004+00:00  g4_evening_star                offline-corpus d5808c79 -> confirmatory
+  2026-06-13T00:00:56.125011+00:00  g4_inside_bar                  offline-corpus 3b8bcaee -> discovery
+  2026-06-14T09:37:56.471791+00:00  g4_inside_bar                  offline-corpus dcc61461 -> confirmatory
+  2026-06-13T00:00:56.145415+00:00  g4_morning_star                offline-corpus 7a23ecbd -> discovery
+  2026-06-14T09:37:56.487689+00:00  g4_morning_star                offline-corpus 1e02964d -> confirmatory
+  2026-06-13T00:00:56.137038+00:00  g4_outside_bar                 offline-corpus 5a0003ff -> discovery
+  2026-06-14T09:37:56.480582+00:00  g4_outside_bar                 offline-corpus f163b9c9 -> confirmatory
+  2026-06-13T00:00:56.113912+00:00  g4_pin_bar                     offline-corpus 1d111f3e -> discovery
+  2026-06-14T09:37:56.465704+00:00  g4_pin_bar                     offline-corpus 642639a7 -> confirmatory
+  2026-06-13T00:00:56.189096+00:00  g5_trend_1d                    offline-corpus 4446b8b7 -> discovery
+  2026-06-14T09:37:56.521693+00:00  g5_trend_1d                    offline-corpus 23699872 -> confirmatory
+  2026-06-13T00:00:56.161774+00:00  g5_trend_1h                    offline-corpus 775db096 -> discovery
+  2026-06-14T09:37:56.500742+00:00  g5_trend_1h                    offline-corpus 5b076633 -> confirmatory
+  2026-06-13T00:00:56.172294+00:00  g5_trend_4h                    offline-corpus ca05220e -> discovery
+  2026-06-14T09:37:56.507210+00:00  g5_trend_4h                    offline-corpus 33f2a7a2 -> confirmatory
+  2026-06-13T00:00:56.197587+00:00  g5_trend_alignment             offline-corpus 9a906f33 -> discovery
+  2026-06-14T09:37:56.532253+00:00  g5_trend_alignment             offline-corpus c314e5ec -> confirmatory
+  2026-06-13T00:00:56.210443+00:00  g5_trend_misalignment          offline-corpus 563f905a -> discovery
+  2026-06-14T09:37:56.539912+00:00  g5_trend_misalignment          offline-corpus 07fc5f17 -> confirmatory
+  2026-06-13T00:00:56.226720+00:00  g6_chaikin_money_flow          offline-corpus 65293bbc -> discovery
+  2026-06-14T09:37:56.552999+00:00  g6_chaikin_money_flow          offline-corpus b389b27b -> confirmatory
+  2026-06-13T00:00:56.218699+00:00  g6_clv_pressure                offline-corpus daaab03a -> discovery
+  2026-06-14T09:37:56.547285+00:00  g6_clv_pressure                offline-corpus 15e204cb -> confirmatory
+  2026-06-13T00:00:56.258688+00:00  g6_funding_basis_composite     offline-corpus a6bed269 -> discovery
+  2026-06-14T09:37:56.573979+00:00  g6_funding_basis_composite     offline-corpus c3c10197 -> confirmatory
+  2026-06-13T00:00:56.236082+00:00  g6_obv_trend                   offline-corpus 15a98761 -> discovery
+  2026-06-14T09:37:56.560360+00:00  g6_obv_trend                   offline-corpus 467f48cb -> confirmatory
+  2026-06-13T00:00:56.250504+00:00  g6_volume_surge                offline-corpus 4f29d74a -> discovery
+  2026-06-14T09:37:56.565378+00:00  g6_volume_surge                offline-corpus 88930ba9 -> confirmatory
+  2026-06-13T00:00:55.818142+00:00  h5_vol_regime                  offline-corpus 036349a1 -> discovery
+  2026-06-14T09:37:56.214158+00:00  h5_vol_regime                  offline-corpus d4f7baa9 -> confirmatory
+  2026-06-13T00:00:55.834758+00:00  h6_funding_vol_regime          offline-corpus 6b29cb25 -> discovery
+  2026-06-14T09:37:56.233652+00:00  h6_funding_vol_regime          offline-corpus 0f07ceba -> confirmatory
+  2026-06-21T14:08:41+00:00  ivrv_vrp_spread                offline-corpus b98c9685 -> discovery

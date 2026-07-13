@@ -41,6 +41,12 @@ _BASE_TRANSITIONS: dict[str, set[str]] = {
 
 _TERMINAL = frozenset({"disqualified", "rejected", "retired"})
 
+# States whose entry requires a justifying_run_id -- the evidence the
+# family was promoted on. Shared with record.append_transition() (PR-5,
+# evidence_reporting_architecture.md §7.3) and validate_registry() below,
+# so the two enforcement points (write-time, check-time) can never diverge.
+STATES_REQUIRING_RUN = frozenset({"candidate", "validated", "promotion_ready", "production_ready"})
+
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {}
 for _s, _targets in _BASE_TRANSITIONS.items():
     _extra: set[str] = set()
@@ -50,6 +56,23 @@ for _s, _targets in _BASE_TRANSITIONS.items():
 
 
 def can_transition(from_state: str, to_state: str) -> bool:
+    """
+    PR-5 (docs/governance/evidence_reporting_architecture.md §9 PR-2, item 4)
+    — THE ONE STATE-MACHINE TOUCH IN THIS DESIGN. Flagged explicitly here,
+    in the migration docs, and in the PR-5 deliverables for review: a
+    self-transition (from_state == to_state) is now structurally legal, for
+    every state including terminal ones. It adds NO new arc between
+    distinct states — the existing ALLOWED_TRANSITIONS graph is unchanged.
+
+    A self-transition is a RE-PIN: the family's state does not change, but
+    record.append_transition() requires a non-NULL justifying_run_id for
+    it — enforced there, not here, because this function has no visibility
+    into justifying_run_id. can_transition() only answers "is this arc
+    shape legal"; append_transition() answers "is this specific write
+    legal", which includes the re-pin evidence requirement.
+    """
+    if from_state == to_state:
+        return True
     return to_state in ALLOWED_TRANSITIONS.get(from_state, frozenset())
 
 
@@ -254,15 +277,29 @@ def validate_registry(
     registry: dict,
     ledger_db_path: Path | str,
     thresholds: dict,
+    as_of: str | None = None,
 ) -> list[str]:
     """
     Check that every state in registry.yaml is supported by evidence in ledger.db.
     Returns a list of error strings (empty = clean).
+
+    PR-5 (evidence_reporting_architecture.md §8) adds invariants C1-C9,
+    appended after the pre-existing checks below (unchanged). `as_of`, if
+    given, must already be a fully-qualified ISO datetime (report.py
+    normalises a bare date before calling this).
+
+    C4/C5/C8/C9 compare against `registry` as passed in -- there is only
+    ever one copy of registry.yaml (it is not versioned per-date), so those
+    four invariants are always evaluated against the CURRENT registry
+    regardless of `as_of`. The remaining invariants (C1/C2/C3/C6/C7) are
+    pure ledger-internal checks and DO respect `as_of` -- "was the ledger
+    internally consistent as of that date" is a meaningful question; "does
+    today's registry.yaml match a past ledger state" is not, and this
+    function does not pretend otherwise.
     """
     import record
 
     errors: list[str] = []
-    states_needing_run = {"candidate", "validated", "promotion_ready", "production_ready"}
 
     for fam_id, fam in registry.items():
         state = fam.get("state", "discovery")
@@ -271,7 +308,7 @@ def validate_registry(
             errors.append(f"{fam_id}: unknown state '{state}'")
             continue
 
-        if state in states_needing_run:
+        if state in STATES_REQUIRING_RUN:
             pinned_run_id = fam.get("pinned_run")
             if not pinned_run_id:
                 errors.append(
@@ -307,7 +344,170 @@ def validate_registry(
                 "a superseded family must be in 'retired' state"
             )
 
+    errors += _check_invariants_c1_to_c9(registry, ledger_db_path, as_of)
     return errors
+
+
+# ---------------------------------------------------------------------------
+# Invariants C1-C9 (evidence_reporting_architecture.md §8)
+# ---------------------------------------------------------------------------
+
+def _check_invariants_c1_to_c9(
+    registry: dict,
+    ledger_db_path: Path | str,
+    as_of: str | None,
+) -> list[str]:
+    import sqlite3
+    import record
+
+    errors: list[str] = []
+    con = sqlite3.connect(ledger_db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        run_filter = " WHERE run_ts <= ?" if as_of is not None else ""
+        run_params = (as_of,) if as_of is not None else ()
+        runs = con.execute(f"SELECT * FROM runs{run_filter}", run_params).fetchall()
+
+        # C1 — every run has a valid run_kind, and (provenance, run_kind) is a legal lane.
+        for r in runs:
+            rk = r["run_kind"]
+            if rk not in record._VALID_RUN_KIND:
+                errors.append(
+                    f"C1: run '{r['run_id'][:8]}' ({r['family_id']}) has invalid run_kind "
+                    f"{rk!r} — must be one of {sorted(record._VALID_RUN_KIND)}"
+                )
+                continue
+            if (r["provenance"], rk) not in record._VALID_LANE_PAIRS:
+                errors.append(
+                    f"C1: run '{r['run_id'][:8]}' ({r['family_id']}) has an illegal lane "
+                    f"(provenance={r['provenance']!r}, run_kind={rk!r})"
+                )
+
+        # C2 — exactly one current run per (family, lane); asserts the tiebreak is total.
+        dupe_filter = " WHERE run_ts <= ?" if as_of is not None else ""
+        c2_sql = f"""
+            SELECT family_id, provenance, run_kind, COUNT(*) AS n FROM (
+                SELECT r.*, ROW_NUMBER() OVER (
+                    PARTITION BY family_id, provenance, run_kind
+                    ORDER BY run_ts DESC, run_id DESC
+                ) AS rn
+                FROM runs r{dupe_filter}
+            ) WHERE rn = 1
+            GROUP BY family_id, provenance, run_kind
+            HAVING COUNT(*) > 1
+        """
+        for row in con.execute(c2_sql, run_params).fetchall():
+            errors.append(
+                f"C2: {row['n']} current runs found for "
+                f"({row['family_id']}, {row['provenance']}/{row['run_kind']}) — tiebreak is not total"
+            )
+
+        # C3 — at most one L0/discovery run per family.
+        c3_sql = f"SELECT family_id, COUNT(*) AS n FROM runs{run_filter} " \
+                 f"{'AND' if run_filter else 'WHERE'} run_kind = 'discovery' GROUP BY family_id HAVING COUNT(*) > 1"
+        for row in con.execute(c3_sql, run_params).fetchall():
+            errors.append(f"C3: {row['family_id']} has {row['n']} L0/discovery runs — at most one is allowed")
+
+        # C6 — every transition into a run-requiring state has a non-NULL
+        # justifying_run_id that exists in runs.
+        t_filter = " WHERE ts <= ?" if as_of is not None else ""
+        t_params = (as_of,) if as_of is not None else ()
+        transitions = con.execute(f"SELECT * FROM state_transitions{t_filter}", t_params).fetchall()
+        run_ids = {r["run_id"] for r in runs}
+        for t in transitions:
+            if t["to_state"] in STATES_REQUIRING_RUN:
+                jrid = t["justifying_run_id"]
+                if not jrid:
+                    errors.append(
+                        f"C6: transition #{t['id']} ({t['family_id']} -> {t['to_state']}) "
+                        f"has no justifying_run_id"
+                    )
+                elif jrid not in run_ids:
+                    errors.append(
+                        f"C6: transition #{t['id']} ({t['family_id']} -> {t['to_state']}) "
+                        f"justifying_run_id '{jrid[:8]}' does not exist in runs"
+                    )
+
+        # C7 — state=validated => pinned run's lane in {L2, L3} (forward/production).
+        derived = record.derive_all_states_at(ledger_db_path, as_of)
+        for fam_id, (state, pinned_run_id, _ts) in derived.items():
+            if state != "validated":
+                continue
+            if not pinned_run_id:
+                errors.append(f"C7: {fam_id} is validated with no pinned run")
+                continue
+            run = next((r for r in runs if r["run_id"] == pinned_run_id), None)
+            if run is None:
+                errors.append(f"C7: {fam_id} validated pinned run '{pinned_run_id[:8]}' not found (as-of window)")
+                continue
+            if run["run_kind"] not in ("forward", "production"):
+                errors.append(
+                    f"C7: {fam_id} is validated but pinned run is lane "
+                    f"{run['provenance']}/{run['run_kind']} — must be L2 or L3"
+                )
+    finally:
+        con.close()
+
+    # C4/C5/C8/C9 — always evaluated against the CURRENT registry (see docstring).
+    current_derived = record.derive_all_states_at(ledger_db_path, as_of=None)
+    transition_family_ids = {row[0] for row in _all_transition_family_ids(ledger_db_path)}
+
+    for fam_id, fam in registry.items():
+        has_transitions = fam_id in current_derived
+        derived_state, derived_pinned, _ts = current_derived.get(fam_id, ("discovery", None, None))
+        registry_state = fam.get("state", "discovery")
+
+        # C4 — registry.yaml: state == state derived from state_transitions.
+        if registry_state != derived_state:
+            errors.append(
+                f"C4: {fam_id} registry.yaml state={registry_state!r} but ledger-derived "
+                f"state={derived_state!r} — hand-edit bypassing the ledger?"
+            )
+
+        # C5 — registry.yaml: pinned_run == justifying_run_id of the latest transition.
+        # Only meaningful once the ledger has an opinion, i.e. the family has at
+        # least one transition. A pure-'discovery' family's registry.yaml
+        # `pinned_run` (if set) records which run classified/evaluated it -- not
+        # a governance decision the ledger tracks -- and is not what this
+        # invariant polices; comparing it against a non-existent "latest
+        # transition" would be a false positive, not a detected re-pin gap.
+        if has_transitions:
+            registry_pinned = fam.get("pinned_run")
+            if (registry_pinned or None) != (derived_pinned or None):
+                errors.append(
+                    f"C5: {fam_id} registry.yaml pinned_run={registry_pinned!r} but ledger-derived "
+                    f"pinned_run={derived_pinned!r} — a re-pin that was never recorded?"
+                )
+
+        # C8 — no family has registry.yaml: provenance set (deleted field).
+        if "provenance" in fam:
+            errors.append(
+                f"C8: {fam_id} has registry.yaml 'provenance' set — this field is deleted "
+                f"(denormalised copy of a per-run property); remove it"
+            )
+
+        # C9b — every family with a non-default state must appear in state_transitions.
+        if registry_state != "discovery" and fam_id not in transition_family_ids:
+            errors.append(
+                f"C9: {fam_id} has state={registry_state!r} in registry.yaml but no "
+                f"state_transitions row exists for it"
+            )
+
+    # C9a — every family_id in state_transitions must exist in registry.yaml.
+    for fam_id in transition_family_ids:
+        if fam_id not in registry:
+            errors.append(f"C9: state_transitions references family_id={fam_id!r}, not present in registry.yaml")
+
+    return errors
+
+
+def _all_transition_family_ids(ledger_db_path: Path | str) -> list[tuple[str]]:
+    import sqlite3
+    con = sqlite3.connect(ledger_db_path)
+    try:
+        return con.execute("SELECT DISTINCT family_id FROM state_transitions").fetchall()
+    finally:
+        con.close()
 
 
 # ---------------------------------------------------------------------------
