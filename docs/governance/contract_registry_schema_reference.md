@@ -172,3 +172,34 @@ nullable, populated only by `activate()`) and requires no change to
 anything built in PR-2 — `append_contract()` already accepts arbitrary
 placeholder columns (`activated_at`, `retired_at`) that stay `NULL` until a
 later PR populates them; `activated_receipt_id` joins that pattern.
+
+---
+
+## PR-3 update to this module (2026-07-13)
+
+PR-3 (`docs/governance/contract_lifecycle_schema_reference.md`) modified
+`contract_registry.py` in exactly the two ways this document said a later
+PR would have to:
+
+1. **`activated_receipt_id TEXT` column added** to `_SCHEMA_SQL`, plus a
+   migration branch in `init_db()` (`PRAGMA table_info` check +
+   `ALTER TABLE ... ADD COLUMN` if missing) so a pre-existing PR-2 database
+   upgrades cleanly. Still a placeholder — PR-3's `activate_contract()`
+   writes it as `NULL`; only PR-4 populates it.
+2. **The blanket `trg_contracts_no_update` trigger was dropped** (by
+   `init_db()`, for any database created under the PR-2 schema) **and
+   replaced** with `trg_contracts_guard_update` — the documented "phase
+   only advances" exception from `contract_versioning.md` §11, implemented
+   as a `CONTRACT_TAMPER`-raising guard rather than a bare `CHECK` (SQLite
+   trigger `WHEN`/`CASE` logic, since the legality of a phase transition
+   depends on both `OLD` and `NEW` values, which a column-level `CHECK`
+   cannot see). Full detail in `contract_lifecycle_schema_reference.md`.
+
+`append_contract()`'s `INSERT` gained the `activated_receipt_id` column;
+`ContractRecord` gained the corresponding field (default `None`). No other
+PR-2 public interface changed. One PR-2 test
+(`TestImmutabilityOfActivatedContracts::test_active_contract_cannot_be_updated`)
+was updated to assert against a still-illegal operation (mutating `body`)
+rather than `phase = 'retired'`, which the guarded trigger now legitimately
+permits — this is a deliberate, documented behavior change, not a
+regression; see that test's inline comment.

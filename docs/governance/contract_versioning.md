@@ -1,11 +1,12 @@
 # Data Completeness Contracts — Versioning & Lifecycle Specification
 
-**Status:** Design. **PR-2 (Contract Registry, storage layer only) implemented
-and merged 2026-07-13** — see `contract_registry_schema_reference.md` for the
-implemented schema and this PR's deliberate scope narrowing (no
-activate()/supersede()/retire(), no receipt emission). PR-3+ (activation
-orchestration, engine/check versioning, impact report, reprocessing,
-governance wiring) not yet implemented.
+**Status:** Design. **PR-2 (Contract Registry, storage layer) and PR-3
+(Contract Lifecycle: activation, retirement, tamper detection) implemented
+and merged 2026-07-13** — see `contract_registry_schema_reference.md` and
+`contract_lifecycle_schema_reference.md` for the implemented schema. No
+receipt emission yet (PR-4), no engine/check versioning (PR-B), no impact
+report / change-class classifier (PR-C), no reprocessing policy (PR-D), no
+governance/Evidence Ledger/Feature Store wiring (PR-E).
 **Author:** Principal Data Platform Architect
 **Date:** 2026-07-13
 **Depends on:** `docs/governance/data_completeness_gate.md`,
