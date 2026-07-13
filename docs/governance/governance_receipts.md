@@ -2,8 +2,13 @@
 
 **Status:** Design. **PR-1 (Governance Receipt Foundation) implemented and merged
 2026-07-13** — see `receipt_schema_reference.md` for the implemented schema.
-PR-2+ (per-subsystem wiring: family transitions, contract activation, readiness
-verdicts, signing, anchoring) not yet implemented.
+**PR-4 (2026-07-13) wires the first two decision types into production**:
+`contract.activate` and `contract.retire`, emitted atomically alongside
+Contract Registry activation/retirement — see
+`contract_receipts_schema_reference.md`. Every other decision type in the
+taxonomy (`family.transition`, `family.promote`, `readiness.verdict`,
+`evidence.admit`/`.reject`, `feature.*`, `dataset.*`, `model.*`, `reversal`)
+remains unemitted. No signing, no anchoring, no `--verify-chain` CLI/cron.
 **Author:** Principal Data Platform / Governance Architect
 **Date:** 2026-07-13
 **Depends on:** `evidence_reporting_architecture.md`, `data_completeness_gate.md`,

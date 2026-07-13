@@ -19,10 +19,17 @@ only advance along the allowed lifecycle arcs) -- see trg_contracts_guard_update
 below. Every other column remains fully frozen post-insert; an attempt to
 change one raises CONTRACT_TAMPER.
 
+PR-4 (contract_receipts.py) wires governance receipt emission into
+activation/retirement and, correspondingly, this file's schema grew again:
+retired_receipt_id (mirrors activated_receipt_id for the retirement event)
+and activation_receipt_status / retirement_receipt_status (an explicit
+enum -- PENDING_RECEIPT | RECORDED | LEGACY_IMPORT | BOOTSTRAP -- replacing
+the bare-NULL ambiguity PR-3's own review flagged: is a NULL
+*_receipt_id a legacy row, a pending write, a migration artifact, or a
+defect?). See RECEIPT_STATUSES and the CHECK constraints below.
+
 Still explicitly NOT implemented (deferred to later PRs per
 contract_versioning.md §11):
-  - governance receipt emission (contract.activate / contract.retire) --
-    activated_receipt_id is a nullable placeholder, populated by PR-4
   - the impact report / change-class classifier (PR-C)
   - engine/check versioning (PR-B)
   - reprocessing policy (PR-D)
@@ -42,7 +49,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -81,6 +88,9 @@ class ContractNotFoundError(ContractRegistryError):
     """
 
 
+RECEIPT_STATUSES = frozenset({"PENDING_RECEIPT", "RECORDED", "LEGACY_IMPORT", "BOOTSTRAP"})
+
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS contract_registry (
     contract_hash      TEXT PRIMARY KEY,   -- sha256(LF-normalised canonical bytes) -- THE identity
@@ -97,9 +107,24 @@ CREATE TABLE IF NOT EXISTS contract_registry (
     created_at         TEXT NOT NULL,      -- when this row was appended to the registry
     activated_at       TEXT,               -- set at INSERT time by contract_lifecycle.activate_contract()
     retired_at         TEXT,               -- set by contract_lifecycle.retire_contract(); NULL until retired
-    activated_receipt_id TEXT,             -- placeholder (PR-3): permanently NULL until PR-4 wires receipt emission
+    activated_receipt_id TEXT,             -- ref into governance_receipts (contract.activate); see receipt_status below
+    retired_receipt_id   TEXT,             -- ref into governance_receipts (contract.retire); PR-4
+    -- PR-4 item 8: explicit receipt lifecycle status -- replaces bare NULL
+    -- ambiguity on *_receipt_id. See contract_receipts.py / trg_contracts_guard_update.
+    activation_receipt_status TEXT,        -- NULL only for phase='draft' (never activated)
+    retirement_receipt_status TEXT,        -- NULL unless phase='retired'
     CHECK (phase IN ('draft','active','superseded','retired')),
     CHECK (change_class IS NULL OR change_class IN ('editorial','relaxing','tightening','corrective')),
+    CHECK (activation_receipt_status IS NULL OR activation_receipt_status IN
+        ('PENDING_RECEIPT','RECORDED','LEGACY_IMPORT','BOOTSTRAP')),
+    CHECK (retirement_receipt_status IS NULL OR retirement_receipt_status IN
+        ('PENDING_RECEIPT','RECORDED','LEGACY_IMPORT','BOOTSTRAP')),
+    CHECK (phase = 'draft' OR activation_receipt_status IS NOT NULL),
+    CHECK (phase != 'retired' OR retirement_receipt_status IS NOT NULL),
+    CHECK (activation_receipt_status != 'RECORDED' OR activated_receipt_id IS NOT NULL),
+    CHECK (activation_receipt_status != 'LEGACY_IMPORT' OR activated_receipt_id IS NULL),
+    CHECK (retirement_receipt_status != 'RECORDED' OR retired_receipt_id IS NOT NULL),
+    CHECK (retirement_receipt_status != 'LEGACY_IMPORT' OR retired_receipt_id IS NULL),
     UNIQUE (contract_id, version)
 );
 
@@ -155,6 +180,37 @@ BEGIN
         THEN RAISE(ABORT, 'CONTRACT_TAMPER: activated_receipt_id is write-once')
     END;
     SELECT CASE
+        WHEN OLD.retired_receipt_id IS NOT NULL AND NEW.retired_receipt_id IS NOT OLD.retired_receipt_id
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: retired_receipt_id is write-once')
+    END;
+    -- activation_receipt_status: NULL -> anything (first write, e.g. the
+    -- LEGACY_IMPORT migration backfill), or PENDING_RECEIPT -> RECORDED
+    -- (item 3/7: "store receipt reference", the second half of the atomic
+    -- activate-with-receipt transaction attaching a just-persisted
+    -- receipt_id to a row inserted moments earlier in the same transaction).
+    -- Every other transition -- including RECORDED/LEGACY_IMPORT/BOOTSTRAP
+    -- changing to anything else -- is tamper.
+    SELECT CASE
+        WHEN NEW.activation_receipt_status IS NOT OLD.activation_receipt_status
+         AND NOT (
+              OLD.activation_receipt_status IS NULL
+           OR (OLD.activation_receipt_status = 'PENDING_RECEIPT' AND NEW.activation_receipt_status = 'RECORDED')
+         )
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: illegal activation_receipt_status transition '
+                          || COALESCE(OLD.activation_receipt_status,'NULL') || ' -> '
+                          || COALESCE(NEW.activation_receipt_status,'NULL'))
+    END;
+    SELECT CASE
+        WHEN NEW.retirement_receipt_status IS NOT OLD.retirement_receipt_status
+         AND NOT (
+              OLD.retirement_receipt_status IS NULL
+           OR (OLD.retirement_receipt_status = 'PENDING_RECEIPT' AND NEW.retirement_receipt_status = 'RECORDED')
+         )
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: illegal retirement_receipt_status transition '
+                          || COALESCE(OLD.retirement_receipt_status,'NULL') || ' -> '
+                          || COALESCE(NEW.retirement_receipt_status,'NULL'))
+    END;
+    SELECT CASE
         WHEN OLD.retired_at IS NOT NULL AND NEW.retired_at IS NOT OLD.retired_at
         THEN RAISE(ABORT, 'CONTRACT_TAMPER: retired_at is write-once')
     END;
@@ -187,6 +243,9 @@ class ContractRecord:
     activated_at: str | None = None
     retired_at: str | None = None
     activated_receipt_id: str | None = None
+    retired_receipt_id: str | None = None
+    activation_receipt_status: str | None = None
+    retirement_receipt_status: str | None = None
 
 
 def now_iso() -> str:
@@ -255,6 +314,35 @@ def validate_record(record: ContractRecord) -> list[str]:
     if not (record.reason or "").strip():
         errors.append("reason is required and must be non-empty")
 
+    # PR-4 item 8: receipt lifecycle status. Mirrors the DB CHECK constraints
+    # exactly, so a malformed record fails here with a clear message rather
+    # than a bare sqlite3.IntegrityError deep in append_contract().
+    if record.activation_receipt_status is not None and record.activation_receipt_status not in RECEIPT_STATUSES:
+        errors.append(
+            f"activation_receipt_status, if set, must be one of {sorted(RECEIPT_STATUSES)}, "
+            f"got '{record.activation_receipt_status}'"
+        )
+    if record.retirement_receipt_status is not None and record.retirement_receipt_status not in RECEIPT_STATUSES:
+        errors.append(
+            f"retirement_receipt_status, if set, must be one of {sorted(RECEIPT_STATUSES)}, "
+            f"got '{record.retirement_receipt_status}'"
+        )
+    if record.phase != "draft" and record.activation_receipt_status is None:
+        errors.append(
+            f"activation_receipt_status is required for phase '{record.phase}' "
+            f"(only 'draft' may leave it NULL — never rely on bare NULL ambiguity)"
+        )
+    if record.phase == "retired" and record.retirement_receipt_status is None:
+        errors.append("retirement_receipt_status is required for phase 'retired'")
+    if record.activation_receipt_status == "RECORDED" and record.activated_receipt_id is None:
+        errors.append("activation_receipt_status='RECORDED' requires a non-NULL activated_receipt_id")
+    if record.activation_receipt_status == "LEGACY_IMPORT" and record.activated_receipt_id is not None:
+        errors.append("activation_receipt_status='LEGACY_IMPORT' requires activated_receipt_id to be NULL")
+    if record.retirement_receipt_status == "RECORDED" and record.retired_receipt_id is None:
+        errors.append("retirement_receipt_status='RECORDED' requires a non-NULL retired_receipt_id")
+    if record.retirement_receipt_status == "LEGACY_IMPORT" and record.retired_receipt_id is not None:
+        errors.append("retirement_receipt_status='LEGACY_IMPORT' requires retired_receipt_id to be NULL")
+
     # Canonical-serialization / malformed-contract defense in depth: confirm
     # the body is actually hashable (rejects e.g. a dict body containing a
     # raw float) before it is ever handed to the registry.
@@ -280,10 +368,13 @@ def validate_record_or_raise(record: ContractRecord) -> None:
 
 def init_db(path: Path | str) -> None:
     """
-    Idempotent. Safe to call against a fresh path or a pre-existing PR-2
-    database: migrates in the activated_receipt_id column if it is missing,
-    drops PR-2's blanket update-blocking trigger if present, and installs
-    the PR-3 guarded trigger.
+    Idempotent. Safe to call against a fresh path or a pre-existing PR-2/PR-3
+    database: migrates in any missing columns (activated_receipt_id from
+    PR-3; retired_receipt_id / activation_receipt_status /
+    retirement_receipt_status from PR-4), backfills receipt-status on
+    pre-existing rows so nothing is ever left with the bare-NULL ambiguity
+    item 8 exists to eliminate, drops PR-2's blanket update-blocking trigger
+    if present, and installs the current guarded trigger.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -292,8 +383,49 @@ def init_db(path: Path | str) -> None:
         con.executescript(_SCHEMA_SQL)
 
         columns = {row[1] for row in con.execute("PRAGMA table_info(contract_registry)")}
+
         if "activated_receipt_id" not in columns:
             con.execute("ALTER TABLE contract_registry ADD COLUMN activated_receipt_id TEXT")
+
+        if "retired_receipt_id" not in columns:
+            con.execute("ALTER TABLE contract_registry ADD COLUMN retired_receipt_id TEXT")
+
+        if "activation_receipt_status" not in columns:
+            # SQLite validates a CHECK added via ALTER TABLE ADD COLUMN
+            # against EVERY existing row immediately -- confirmed empirically
+            # -- so a cross-column CHECK here (e.g. referencing `phase`)
+            # would fail at ALTER time for any pre-existing non-draft row,
+            # before the backfill below ever runs. Only a single-column CHECK
+            # (satisfied trivially by NULL) is safe to add this way. The
+            # cross-column invariants ARE still enforced -- in _SCHEMA_SQL
+            # for any freshly-created table (which starts empty, so the
+            # ordering problem doesn't arise), and in Python by
+            # validate_record() for every write through append_contract(),
+            # regardless of which schema path the database took.
+            con.execute(
+                "ALTER TABLE contract_registry ADD COLUMN activation_receipt_status TEXT "
+                "CHECK (activation_receipt_status IS NULL OR activation_receipt_status IN "
+                "('PENDING_RECEIPT','RECORDED','LEGACY_IMPORT','BOOTSTRAP'))"
+            )
+            # Pre-existing rows predate this column entirely -- they are, by
+            # definition, LEGACY_IMPORT (never RECORDED, since no receipt was
+            # ever emitted for them; the migration itself is not a governance
+            # decision, just a historical fact about when this column arrived).
+            con.execute(
+                "UPDATE contract_registry SET activation_receipt_status = 'LEGACY_IMPORT' "
+                "WHERE activation_receipt_status IS NULL AND phase != 'draft'"
+            )
+
+        if "retirement_receipt_status" not in columns:
+            con.execute(
+                "ALTER TABLE contract_registry ADD COLUMN retirement_receipt_status TEXT "
+                "CHECK (retirement_receipt_status IS NULL OR retirement_receipt_status IN "
+                "('PENDING_RECEIPT','RECORDED','LEGACY_IMPORT','BOOTSTRAP'))"
+            )
+            con.execute(
+                "UPDATE contract_registry SET retirement_receipt_status = 'LEGACY_IMPORT' "
+                "WHERE retirement_receipt_status IS NULL AND phase = 'retired'"
+            )
 
         con.execute("DROP TRIGGER IF EXISTS trg_contracts_no_update")
         con.executescript(_GUARD_TRIGGER_SQL)
@@ -319,7 +451,23 @@ def append_contract(db_path: Path | str, record: ContractRecord) -> dict:
     Does not assign `version` -- the caller supplies it. Automatic monotonic
     version stamping is the activation tool's job (contract_versioning.md
     §2.2), which is out of scope for this PR.
+
+    receipt-status defaulting (PR-4 item 8): this is the raw, low-level
+    archive primitive -- it has no lifecycle-orchestration or
+    receipt-emission guarantee attached, so a caller who doesn't specify
+    activation_receipt_status / retirement_receipt_status explicitly gets
+    'PENDING_RECEIPT' (never 'LEGACY_IMPORT' -- that value is reserved
+    exclusively for init_db()'s one-time schema-migration backfill of rows
+    that predate these columns; it is never chosen by a live code path).
+    This keeps every PR-2/PR-3 caller of append_contract() working
+    unchanged -- they get an honest, non-committal status rather than a
+    validation error for a field they don't know exists.
     """
+    if record.phase != "draft" and record.activation_receipt_status is None:
+        record = replace(record, activation_receipt_status="PENDING_RECEIPT")
+    if record.phase == "retired" and record.retirement_receipt_status is None:
+        record = replace(record, retirement_receipt_status="PENDING_RECEIPT")
+
     validate_record_or_raise(record)
 
     canonical_body = canonicalize_contract_body(record.body)
@@ -350,8 +498,9 @@ def append_contract(db_path: Path | str, record: ContractRecord) -> dict:
                     contract_hash, contract_id, version, contract_schema_v,
                     body, phase, change_class, impact_report_hash,
                     superseded_by, actor, reason, created_at, activated_at, retired_at,
-                    activated_receipt_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    activated_receipt_id, retired_receipt_id,
+                    activation_receipt_status, retirement_receipt_status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     contract_hash, record.contract_id, record.version,
@@ -359,7 +508,8 @@ def append_contract(db_path: Path | str, record: ContractRecord) -> dict:
                     record.change_class, record.impact_report_hash,
                     record.superseded_by, record.actor, record.reason,
                     created_at, record.activated_at, record.retired_at,
-                    record.activated_receipt_id,
+                    record.activated_receipt_id, record.retired_receipt_id,
+                    record.activation_receipt_status, record.retirement_receipt_status,
                 ),
             )
         except sqlite3.IntegrityError as exc:

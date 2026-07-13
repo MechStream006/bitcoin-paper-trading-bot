@@ -120,3 +120,20 @@ to a CLI flag or a daily cron (later PR).
   backup-manifest head publication).
 - No `state_transitions` / `contract_registry` / `data_readiness` migration
   or dual-write. Those tables are untouched.
+
+---
+
+## PR-4 update to this module (2026-07-13)
+
+PR-4 (`docs/governance/contract_receipts_schema_reference.md`) is the first
+real caller of `append_receipt()`, and needed to write a `governance_receipts`
+row in the SAME transaction as a `contract_registry` row — which
+`append_receipt()`'s own `connect()`/`BEGIN`/`COMMIT` cannot share with
+another module's connection. `receipt_ledger.py` gained
+**`append_receipt_on_connection(con, body) -> dict`**: the core chain-linking,
+validation, and duplicate-detection logic, extracted so a caller who already
+holds an open transaction (via `BEGIN IMMEDIATE`) can include a receipt write
+alongside another table's write. `append_receipt()` is now a thin wrapper —
+opens its own connection/transaction and delegates to the extracted function;
+its behavior and signature are unchanged, and PR-1's full test suite passes
+unmodified against the refactor.

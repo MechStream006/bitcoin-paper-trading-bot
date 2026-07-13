@@ -6,10 +6,13 @@ docs/governance/governance_receipts.md §1.2. Mirrors the existing style of
 record.py (function-based, sqlite3 stdlib, no ORM) rather than introducing a
 new pattern.
 
-Nothing on the platform calls append_receipt() yet. This PR only makes it
-possible to open a ledger, append a receipt, and query/verify the chain.
-Wiring any real decision path (family transitions, contract activation,
-readiness verdicts, ...) into this ledger is out of scope here.
+PR-4 (contract_receipts.py) is the first caller: it needs to write a
+contract_registry row and a governance_receipts row in one atomic
+transaction, which append_receipt()'s own connect/BEGIN/COMMIT cannot
+share with another module's connection. append_receipt_on_connection()
+below is the extraction that makes that possible without duplicating the
+chain-linking logic -- append_receipt() itself is now a thin wrapper around
+it and its behavior is unchanged.
 """
 from __future__ import annotations
 
@@ -107,6 +110,74 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return d
 
 
+def append_receipt_on_connection(con: sqlite3.Connection, body: ReceiptBody) -> dict:
+    """
+    The core of append_receipt(), operating on a connection the CALLER
+    manages the transaction for (BEGIN/COMMIT/ROLLBACK are the caller's
+    responsibility -- this function issues no transaction control of its
+    own). Exists so a caller writing to another table in the same
+    transaction (contract_receipts.py's atomic activate-with-receipt) can
+    include the receipt write without a second, unshareable connection.
+
+    con must have con.row_factory = sqlite3.Row and a transaction already
+    open (e.g. via "BEGIN IMMEDIATE") for the chain-head read below to be
+    consistent with the eventual write.
+
+    Same chain-linking, validation, and duplicate-detection behavior as
+    append_receipt() -- this IS that logic, not a reimplementation of it.
+    """
+    cur = con.execute(
+        "SELECT receipt_id, seq FROM governance_receipts ORDER BY seq DESC LIMIT 1"
+    )
+    head = cur.fetchone()
+    prev_hash = head["receipt_id"] if head else None
+    next_seq = (head["seq"] if head else 0) + 1
+
+    chained_body = replace(body, prev_receipt_hash=prev_hash)
+    validate_body_or_raise(chained_body)
+    body_dict = chained_body.to_dict()
+    receipt_id = compute_receipt_id(body_dict)
+
+    subject = body_dict["subject"]
+    authority_hash = body_dict["authority"]["policy_hash"]
+    rule_hash = body_dict["rule"]["rule_hash"]
+    engine_version = body_dict["rule"]["engine_version"]
+
+    try:
+        con.execute(
+            """
+            INSERT INTO governance_receipts (
+                receipt_id, seq, prev_receipt_hash, schema_version,
+                decision_type, decision_class, action,
+                subject_kind, subject_id, subject_version,
+                from_state, to_state, as_of, decided_at,
+                actor_type, actor_id, authority_hash, rule_hash,
+                engine_version, body_json, signature_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                receipt_id, next_seq, prev_hash, body_dict["schema_version"],
+                body_dict["decision_type"], body_dict["decision_class"], body_dict["action"],
+                subject["kind"], subject["id"], subject["version_or_hash"],
+                body_dict["from_state"], body_dict["to_state"],
+                body_dict["as_of"], body_dict["decided_at"],
+                body_dict["actor"]["type"], body_dict["actor"]["id"],
+                authority_hash, rule_hash, engine_version,
+                json.dumps(body_dict, sort_keys=True), "[]",
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise DuplicateReceiptError(
+            f"receipt_id {receipt_id} already exists in the ledger "
+            f"(byte-identical body was submitted twice)"
+        ) from exc
+
+    row = con.execute(
+        "SELECT * FROM governance_receipts WHERE receipt_id = ?", (receipt_id,)
+    ).fetchone()
+    return _row_to_dict(row)
+
+
 def append_receipt(db_path: Path | str, body: ReceiptBody) -> dict:
     """
     Append a receipt to the chain.
@@ -119,64 +190,25 @@ def append_receipt(db_path: Path | str, body: ReceiptBody) -> dict:
     this can only happen for a byte-identical body).
 
     Returns the persisted row as a dict (including parsed 'body' and
-    'signatures').
+    'signatures'). Thin wrapper around append_receipt_on_connection() --
+    opens its own connection and transaction, since most callers don't need
+    to share one with another table's write.
     """
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     try:
         con.execute("BEGIN IMMEDIATE")
-        cur = con.execute(
-            "SELECT receipt_id, seq FROM governance_receipts ORDER BY seq DESC LIMIT 1"
-        )
-        head = cur.fetchone()
-        prev_hash = head["receipt_id"] if head else None
-        next_seq = (head["seq"] if head else 0) + 1
-
-        chained_body = replace(body, prev_receipt_hash=prev_hash)
-        validate_body_or_raise(chained_body)
-        body_dict = chained_body.to_dict()
-        receipt_id = compute_receipt_id(body_dict)
-
-        subject = body_dict["subject"]
-        authority_hash = body_dict["authority"]["policy_hash"]
-        rule_hash = body_dict["rule"]["rule_hash"]
-        engine_version = body_dict["rule"]["engine_version"]
-
         try:
-            con.execute(
-                """
-                INSERT INTO governance_receipts (
-                    receipt_id, seq, prev_receipt_hash, schema_version,
-                    decision_type, decision_class, action,
-                    subject_kind, subject_id, subject_version,
-                    from_state, to_state, as_of, decided_at,
-                    actor_type, actor_id, authority_hash, rule_hash,
-                    engine_version, body_json, signature_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    receipt_id, next_seq, prev_hash, body_dict["schema_version"],
-                    body_dict["decision_type"], body_dict["decision_class"], body_dict["action"],
-                    subject["kind"], subject["id"], subject["version_or_hash"],
-                    body_dict["from_state"], body_dict["to_state"],
-                    body_dict["as_of"], body_dict["decided_at"],
-                    body_dict["actor"]["type"], body_dict["actor"]["id"],
-                    authority_hash, rule_hash, engine_version,
-                    json.dumps(body_dict, sort_keys=True), "[]",
-                ),
-            )
-        except sqlite3.IntegrityError as exc:
+            result = append_receipt_on_connection(con, body)
+        except Exception:
             con.rollback()
-            raise DuplicateReceiptError(
-                f"receipt_id {receipt_id} already exists in the ledger "
-                f"(byte-identical body was submitted twice)"
-            ) from exc
-
-        con.commit()
+            raise
+        else:
+            con.commit()
     finally:
         con.close()
 
-    return get_receipt(db_path, receipt_id)
+    return result
 
 
 def get_receipt(db_path: Path | str, receipt_id: str) -> dict | None:

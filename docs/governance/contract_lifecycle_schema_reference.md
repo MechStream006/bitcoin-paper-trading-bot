@@ -223,3 +223,38 @@ this PR ever writes falls cleanly into "legacy activation" once PR-4 lands,
 and `activated_receipt_id`'s write-once-from-`NULL` guard (§ tamper
 detection above) already accommodates a future single write with no
 migration needed to the column itself.
+
+---
+
+## PR-4 resolved this carry-over (2026-07-13)
+
+`activation_receipt_status` / `retirement_receipt_status` (see
+`contract_receipts_schema_reference.md`) implement exactly the four values
+anticipated above, with one refinement discovered during implementation: the
+"legacy activation" and "pending receipt emission" cases needed to be
+**structurally distinct at the write path**, not just at read time, because
+`contract_lifecycle.activate_contract()` (this module's bare, receipt-less
+functions — kept for backward compatibility, not removed) is still callable
+*after* PR-4 exists, and a row it writes then is neither historically legacy
+nor migration-related. Resolution: `LEGACY_IMPORT` is written **exclusively**
+by `contract_registry.init_db()`'s one-time migration backfill and by no
+live code path, ever; every live write path that doesn't emit a receipt
+(this module's bare functions) writes `PENDING_RECEIPT` instead. Only
+`contract_receipts.py`'s governed, receipt-emitting functions ever write
+`RECORDED`.
+
+### `_activate_on_connection()` / `_retire_on_connection()` extraction
+
+To let PR-4 share ONE transaction across a `contract_registry` write and a
+`governance_receipts` write, this module's `activate_contract()` /
+`retire_contract()` were refactored (not behaviorally changed) the same way
+PR-1's `receipt_ledger.append_receipt()` was: the core logic (assign
+version, supersede, insert / validate transition, update) was extracted
+into `_activate_on_connection()` / `_retire_on_connection()`, functions that
+assume the caller already holds an open transaction. `activate_contract()`
+and `retire_contract()` are now thin wrappers — open a connection,
+`BEGIN IMMEDIATE`, delegate, commit/rollback, close — with unchanged public
+behavior (all 48 PR-3 tests pass unmodified against the refactor).
+`contract_receipts.py` imports these two private functions directly and
+calls them on its own shared connection, alongside a receipt write, before
+either is committed.

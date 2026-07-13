@@ -154,6 +154,13 @@ def activate_contract(
     # a doomed call). `version=1` here is a placeholder for the validator's
     # shape check only -- the real, monotonic version is assigned below,
     # under the transaction's lock, and is never taken from this candidate.
+    #
+    # activation_receipt_status='PENDING_RECEIPT': this is the bare,
+    # receipt-less activation path (kept for backward compatibility -- see
+    # contract_receipts.py for the governed path PR-4 actually wires
+    # production use to). PENDING_RECEIPT, not LEGACY_IMPORT: that value is
+    # reserved exclusively for init_db()'s one-time historical-migration
+    # backfill and is never chosen by a live code path.
     candidate = ContractRecord(
         contract_id=contract_id,
         version=1,
@@ -164,6 +171,7 @@ def activate_contract(
         reason=reason,
         change_class=change_class,
         impact_report_hash=impact_report_hash,
+        activation_receipt_status="PENDING_RECEIPT",
     )
     errors = validate_record(candidate)
     if errors:
@@ -173,54 +181,11 @@ def activate_contract(
     try:
         con.execute("BEGIN IMMEDIATE")
         try:
-            version = next_version(con, contract_id)
-
-            prev_active_row = con.execute(
-                "SELECT contract_hash, phase FROM contract_registry "
-                "WHERE contract_id = ? AND phase = 'active'",
-                (contract_id,),
-            ).fetchone()
-
-            if prev_active_row is not None:
-                prev_hash, prev_phase = prev_active_row
-                if not can_transition(prev_phase, "superseded"):
-                    # Structurally unreachable given the partial unique index
-                    # (only one row can ever be phase='active'), but checked
-                    # explicitly rather than assumed -- lifecycle invariants
-                    # (item 6/8) are enforced, not merely hoped for.
-                    raise InvalidTransitionError(
-                        f"cannot supersede contract_id '{contract_id}': "
-                        f"existing active row is in phase '{prev_phase}', not 'active'"
-                    )
-                con.execute(
-                    "UPDATE contract_registry SET phase = 'superseded', superseded_by = ? "
-                    "WHERE contract_hash = ?",
-                    (contract_hash, prev_hash),
-                )
-
-            created_at = now_iso()
-            try:
-                con.execute(
-                    """
-                    INSERT INTO contract_registry (
-                        contract_hash, contract_id, version, contract_schema_v,
-                        body, phase, change_class, impact_report_hash,
-                        superseded_by, actor, reason, created_at,
-                        activated_at, retired_at, activated_receipt_id
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        contract_hash, contract_id, version, contract_schema_version,
-                        canonical_body, "active", change_class, impact_report_hash,
-                        None, actor, reason, created_at,
-                        created_at, None, None,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise DuplicateContractError(
-                    f"contract_hash {contract_hash} already exists in the registry "
-                    f"(byte-identical body submitted twice)"
-                ) from exc
+            _activate_on_connection(
+                con, contract_id, canonical_body, contract_hash, actor, reason,
+                contract_schema_version, change_class, impact_report_hash,
+                activated_receipt_id=None, activation_receipt_status="PENDING_RECEIPT",
+            )
         except Exception:
             con.rollback()
             raise
@@ -230,6 +195,86 @@ def activate_contract(
         con.close()
 
     return reg.get_by_hash(db_path, contract_hash)
+
+
+def _activate_on_connection(
+    con: sqlite3.Connection,
+    contract_id: str,
+    canonical_body: str,
+    contract_hash: str,
+    actor: str,
+    reason: str,
+    contract_schema_version: int,
+    change_class: str | None,
+    impact_report_hash: str | None,
+    activated_receipt_id: str | None,
+    activation_receipt_status: str,
+) -> int:
+    """
+    The core of activation (assign version, supersede, insert), extracted so
+    contract_receipts.py's governed atomic activate-with-receipt can share
+    ONE transaction across the contract write and the receipt write, rather
+    than duplicating this SQL. Caller manages BEGIN/COMMIT/ROLLBACK; this
+    function issues neither. Returns the assigned version.
+
+    activated_receipt_id / activation_receipt_status are supplied by the
+    caller rather than defaulted here: activate_contract() (this module,
+    receipt-less) passes (None, 'PENDING_RECEIPT'); contract_receipts.py
+    (governed, receipt-emitting) passes the real receipt_id and 'RECORDED'.
+    Neither path leaves activation_receipt_status NULL -- see item 8.
+    """
+    version = next_version(con, contract_id)
+
+    prev_active_row = con.execute(
+        "SELECT contract_hash, phase FROM contract_registry "
+        "WHERE contract_id = ? AND phase = 'active'",
+        (contract_id,),
+    ).fetchone()
+
+    if prev_active_row is not None:
+        prev_hash, prev_phase = prev_active_row
+        if not can_transition(prev_phase, "superseded"):
+            # Structurally unreachable given the partial unique index
+            # (only one row can ever be phase='active'), but checked
+            # explicitly rather than assumed -- lifecycle invariants
+            # (item 6/8) are enforced, not merely hoped for.
+            raise InvalidTransitionError(
+                f"cannot supersede contract_id '{contract_id}': "
+                f"existing active row is in phase '{prev_phase}', not 'active'"
+            )
+        con.execute(
+            "UPDATE contract_registry SET phase = 'superseded', superseded_by = ? "
+            "WHERE contract_hash = ?",
+            (contract_hash, prev_hash),
+        )
+
+    created_at = now_iso()
+    try:
+        con.execute(
+            """
+            INSERT INTO contract_registry (
+                contract_hash, contract_id, version, contract_schema_v,
+                body, phase, change_class, impact_report_hash,
+                superseded_by, actor, reason, created_at,
+                activated_at, retired_at, activated_receipt_id, retired_receipt_id,
+                activation_receipt_status, retirement_receipt_status
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                contract_hash, contract_id, version, contract_schema_version,
+                canonical_body, "active", change_class, impact_report_hash,
+                None, actor, reason, created_at,
+                created_at, None, activated_receipt_id, None,
+                activation_receipt_status, None,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise DuplicateContractError(
+            f"contract_hash {contract_hash} already exists in the registry "
+            f"(byte-identical body submitted twice)"
+        ) from exc
+
+    return version
 
 
 # ---------------------------------------------------------------------------
@@ -258,26 +303,12 @@ def retire_contract(db_path: Path | str, contract_hash: str, actor: str, reason:
     try:
         con.execute("BEGIN IMMEDIATE")
         try:
-            row = con.execute(
-                "SELECT phase FROM contract_registry WHERE contract_hash = ?",
-                (contract_hash,),
-            ).fetchone()
-            if row is None:
-                raise ContractNotFoundError(
-                    f"contract_hash {contract_hash} not found in registry"
-                )
-            current_phase = row[0]
-            if not can_transition(current_phase, "retired"):
-                raise InvalidTransitionError(
-                    f"cannot transition '{current_phase}' -> 'retired'; "
-                    f"allowed destinations from '{current_phase}': "
-                    f"{sorted(ALLOWED_TRANSITIONS.get(current_phase, frozenset()))}"
-                )
-            retired_at = now_iso()
-            con.execute(
-                "UPDATE contract_registry SET phase = 'retired', retired_at = ? "
-                "WHERE contract_hash = ?",
-                (retired_at, contract_hash),
+            # PENDING_RECEIPT: bare, receipt-less retirement path (backward
+            # compatible). contract_receipts.py's governed path passes the
+            # real receipt_id and 'RECORDED' via _retire_on_connection directly.
+            _retire_on_connection(
+                con, contract_hash,
+                retired_receipt_id=None, retirement_receipt_status="PENDING_RECEIPT",
             )
         except Exception:
             con.rollback()
@@ -288,3 +319,39 @@ def retire_contract(db_path: Path | str, contract_hash: str, actor: str, reason:
         con.close()
 
     return reg.get_by_hash(db_path, contract_hash)
+
+
+def _retire_on_connection(
+    con: sqlite3.Connection,
+    contract_hash: str,
+    retired_receipt_id: str | None,
+    retirement_receipt_status: str,
+) -> None:
+    """
+    The core of retirement (validate transition, update), extracted for the
+    same reason as _activate_on_connection: contract_receipts.py's governed
+    atomic retire-with-receipt shares this connection/transaction rather
+    than duplicating the SQL. Caller manages the transaction.
+    """
+    row = con.execute(
+        "SELECT phase FROM contract_registry WHERE contract_hash = ?",
+        (contract_hash,),
+    ).fetchone()
+    if row is None:
+        raise ContractNotFoundError(
+            f"contract_hash {contract_hash} not found in registry"
+        )
+    current_phase = row[0]
+    if not can_transition(current_phase, "retired"):
+        raise InvalidTransitionError(
+            f"cannot transition '{current_phase}' -> 'retired'; "
+            f"allowed destinations from '{current_phase}': "
+            f"{sorted(ALLOWED_TRANSITIONS.get(current_phase, frozenset()))}"
+        )
+    retired_at = now_iso()
+    con.execute(
+        "UPDATE contract_registry SET phase = 'retired', retired_at = ?, "
+        "retired_receipt_id = ?, retirement_receipt_status = ? "
+        "WHERE contract_hash = ?",
+        (retired_at, retired_receipt_id, retirement_receipt_status, contract_hash),
+    )
