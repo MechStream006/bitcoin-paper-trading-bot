@@ -310,3 +310,41 @@ flag, verified to be silent on any ledger this PR has not touched).
   `receipts.DECISION_TAXONOMY` since PR-1.
 - No Feature Store, ML, operational timer, Telegram, or Docker change.
 - No signing, no anchoring beyond what PR-1's chain already provides.
+
+---
+
+## PR-6 review outcome (2026-07-13)
+
+**Merge approved and completed**, after a post-review architectural
+correction to the first implementation. Review identified that
+`evidence_governance.py` called `lifecycle.check_candidate_gate()`
+directly by name in three places, and that `verify_admission_receipt()`
+ignored a receipt's own recorded `rule_id`/`engine_version`, always
+re-executing whatever `check_candidate_gate` happened to be at replay
+time — violating `contract_versioning.md` §3's engine-pinning discipline
+and risking silent historical replay corruption if that function were
+ever edited in place.
+
+Corrected before merge by introducing `AdmissibilityRule` (a genuine
+substitution point), `CandidateGateRule` (the default provider, verified
+byte-for-byte behavior-identical to calling `check_candidate_gate`
+directly), and a `(rule_id, engine_version)`-keyed registry
+(`register_rule`/`get_rule`) that replay dispatches through. An
+unregistered historical rule now raises `UnknownRuleError` rather than
+being silently substituted — demonstrated directly with an adversarial
+case where the substituted default would have produced the *opposite*
+verdict from what was actually recorded. A standalone rule defined
+entirely outside this module was registered and replayed successfully
+alongside `CandidateGateRule`, in the same registry, without either
+module needing to change — proving the substitution point works and is
+the concrete seam PR-7's Data Completeness Gate will use.
+
+14 new tests added for the correction (70 total in the file); all 56
+pre-correction tests pass unmodified. Full suite post-merge: 727 passed,
+same 14 pre-existing failures (missing `apscheduler` in this dev
+interpreter, unrelated), no regressions, no merge conflicts. Real ledger
+re-verified post-merge: `report.py --check` clean, `receipt_ledger
+.verify_chain()` confirms all 13 bootstrap receipts still form a valid
+chain, untouched by the correction (bootstrap receipts refuse replay
+before `rule_fn` is ever called, so they never depended on the coupling
+being fixed).

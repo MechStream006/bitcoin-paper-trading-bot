@@ -7,17 +7,25 @@ production**: `contract.activate` and `contract.retire`, emitted atomically
 alongside Contract Registry activation/retirement — see
 `contract_receipts_schema_reference.md`.
 
-**Governance Architecture PR-6 (2026-07-13, merged) wires two more**:
-`evidence.admit` and `evidence.reject`, emitted by the Evidence Library
-(`evidence_governance.py`) for a run's pass/fail against
-`lifecycle.check_candidate_gate()` — see
+**Governance Architecture PR-6 (2026-07-13, merged, including a
+post-review architectural correction) wires two more**: `evidence.admit`
+and `evidence.reject`, emitted by the Evidence Library
+(`evidence_governance.py`) for a run's pass/fail against a replaceable
+`AdmissibilityRule` (default provider: `CandidateGateRule`, wrapping
+`lifecycle.check_candidate_gate()` with zero behavior change) — see
 `evidence_library_governance_schema_reference.md`, including the explicit
 scoping note on what these two receipt types do and do not attest (the
 Data Completeness Gate's readiness-based admissibility rule does not exist
 yet; these receipts attest gate-check outcome, not input-data
-completeness). This is also the first real exercise of the `derived`
-replay path (`rule_fn` injection) — PR-4's contract receipts are all
-`discretionary` and never exercised it.
+completeness). Replay resolves the exact historical rule implementation
+via `get_rule(receipt.rule.rule_id, receipt.rule.engine_version)` and
+fails loudly (`UnknownRuleError`) rather than silently substituting the
+current default — the first real exercise of the `derived` replay path
+(`rule_fn` injection) in this codebase, and the first receipt-emitting
+module to honor `contract_versioning.md` §3's engine-pinning discipline.
+`register_rule()` is the substitution point a future Data Completeness
+Gate rule will use — PR-4's contract receipts are all `discretionary` and
+never exercised any of this.
 
 Still unemitted: `family.transition`, `family.promote`, `readiness.verdict`,
 `feature.*`, `dataset.*`, `model.*`, `reversal`. No signing, no anchoring,
