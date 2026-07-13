@@ -278,3 +278,32 @@ as_of=None)`. CLI gained `--as-of`.
   `append_run()` call site will need an explicit `run_kind="forward"`
   argument — this PR's schema is ready for it, but the bridge itself does
   not exist on `main` and was out of scope here.
+
+---
+
+## PR-5 review outcome (2026-07-13)
+
+**Merge approved and completed**, after an independent, read-only audit
+(zero files modified during the audit itself) covering: exhaustive
+repo-wide search confirming zero stale callers of the deleted/changed
+selection functions; a structural (parsed-YAML, not line-diff-only)
+semantic diff of `registry.yaml` proving the only change across all 35
+families is the `provenance` field removal; a governance regression audit
+comparing the live `ledger.db` against the pre-migration backup
+byte-for-byte on every evidence column and on the full `state_transitions`
+table, plus `derive_all_states_at()` re-run against both databases at two
+`as_of` points to confirm identical historical replay; migration
+idempotency and backup integrity (`PRAGMA integrity_check`) verified live;
+lane independence demonstrated on a throwaway copy of the real ledger
+(with the real files hash-verified untouched before/after); and all nine
+invariants confirmed both through `validate_registry()` and through
+independent SQL/YAML spot-checks that do not share its code path. Full
+suite post-merge: 657 passed, same 14 pre-existing failures (missing
+`apscheduler` in this dev interpreter, unrelated), no regressions, no
+merge conflicts.
+
+**Rollback is manual, by design, and this was explicitly accepted at
+review**: `migrate_run_kind.py` has no `--rollback` flag. Recovery from a
+bad backfill is `cp ledger.pre-run_kind-migration.<ts>.db ledger.db` — the
+backup's integrity and byte-for-byte fidelity to the pre-migration state
+were verified as part of the review, not merely asserted.
