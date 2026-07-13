@@ -203,3 +203,53 @@ was updated to assert against a still-illegal operation (mutating `body`)
 rather than `phase = 'retired'`, which the guarded trigger now legitimately
 permits — this is a deliberate, documented behavior change, not a
 regression; see that test's inline comment.
+
+---
+
+## PR-4 update to this module (2026-07-13)
+
+PR-4 (`docs/governance/contract_receipts_schema_reference.md`) resolved the
+receipt-lifecycle-status enhancement carried forward from the PR-2 review
+and modified `contract_registry.py` further:
+
+1. **`retired_receipt_id TEXT`** column added (mirrors `activated_receipt_id`
+   for the retirement event).
+2. **`activation_receipt_status TEXT` / `retirement_receipt_status TEXT`**
+   added — an explicit enum (`RECEIPT_STATUSES = {PENDING_RECEIPT, RECORDED,
+   LEGACY_IMPORT, BOOTSTRAP}`) replacing bare-`NULL` ambiguity on the
+   `*_receipt_id` columns. `_SCHEMA_SQL` (fresh databases) enforces the full
+   cross-column invariants via `CHECK` (non-draft rows require
+   `activation_receipt_status`; retired rows require
+   `retirement_receipt_status`; `RECORDED` requires a non-`NULL` receipt id;
+   `LEGACY_IMPORT` requires a `NULL` one). `validate_record()` mirrors every
+   one of these checks in Python with a clear message, so a malformed
+   record fails before ever reaching the database.
+3. **Migration asymmetry, discovered empirically and worth flagging**:
+   SQLite validates a `CHECK` added via `ALTER TABLE ADD COLUMN` against
+   *every existing row* immediately — confirmed by direct test — so the
+   cross-column `CHECK`s above **cannot** be added this way to a database
+   that already has non-draft rows (they would fail at migration time,
+   before the backfill that would satisfy them ever runs). The migration
+   path therefore adds these two columns with **only** their single-column
+   enum-membership `CHECK` (satisfied trivially by `NULL`), then backfills
+   `LEGACY_IMPORT` on every pre-existing non-draft/retired row. **A database
+   that went through this migration path does not get the cross-column
+   invariants enforced by SQLite** — only a freshly-created database does.
+   `validate_record()` is the invariant's real enforcement point for a
+   migrated database; this is a deliberate, documented trade-off (a full
+   table-rebuild migration was considered and rejected as disproportionate
+   risk for a platform with no live production data yet), not an oversight.
+4. **`append_contract()` defaults `activation_receipt_status`/
+   `retirement_receipt_status` to `PENDING_RECEIPT`** (never `LEGACY_IMPORT`
+   — that value is reserved exclusively for the migration backfill) when a
+   caller omits them for a non-draft/retired phase, so every existing PR-2
+   test caller keeps working unchanged.
+5. **The guard trigger's write-once rule for the two status columns was
+   loosened to a two-state machine**: `NULL → anything` (unchanged), plus
+   specifically `PENDING_RECEIPT → RECORDED` (the "store receipt reference"
+   step of PR-4's atomic transaction). Every other transition, including
+   `RECORDED`/`LEGACY_IMPORT`/`BOOTSTRAP` changing to anything else, is
+   still `CONTRACT_TAMPER`.
+
+See `contract_receipts_schema_reference.md` for the full receipt-status
+semantics and the atomic transaction that writes these columns.

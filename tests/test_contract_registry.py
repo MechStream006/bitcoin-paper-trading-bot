@@ -47,6 +47,16 @@ def make_record(**overrides) -> cr.ContractRecord:
         reason="initial activation of the corpus_daily contract",
     )
     defaults.update(overrides)
+    # PR-4 item 8: non-draft rows require an explicit activation_receipt_status;
+    # retired rows also require retirement_receipt_status. append_contract()
+    # defaults these automatically for a caller who omits them (see its
+    # docstring) -- mirrored here so direct validate_record() calls in this
+    # file (which bypass that defaulting) see the same "valid" record
+    # append_contract() would accept.
+    if defaults.get("phase") != "draft" and "activation_receipt_status" not in overrides:
+        defaults["activation_receipt_status"] = "PENDING_RECEIPT"
+    if defaults.get("phase") == "retired" and "retirement_receipt_status" not in overrides:
+        defaults["retirement_receipt_status"] = "PENDING_RECEIPT"
     return cr.ContractRecord(**defaults)
 
 

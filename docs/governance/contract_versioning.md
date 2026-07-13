@@ -1,19 +1,24 @@
 # Data Completeness Contracts — Versioning & Lifecycle Specification
 
-**Status:** Design. **PR-2 (Contract Registry, storage layer) and PR-3
-(Contract Lifecycle: activation, retirement, tamper detection) implemented
-and merged 2026-07-13** — see `contract_registry_schema_reference.md` and
-`contract_lifecycle_schema_reference.md` for the implemented schema. No
-receipt emission yet (PR-4), no engine/check versioning (PR-B), no impact
-report / change-class classifier (PR-C), no reprocessing policy (PR-D), no
-governance/Evidence Ledger/Feature Store wiring (PR-E).
+**Status:** Design. **PR-2 (Contract Registry, storage layer), PR-3 (Contract
+Lifecycle: activation, retirement, tamper detection), and PR-4 (Contract
+Governance Receipt Emission: `contract.activate` / `contract.retire`,
+`activation_receipt_status` / `retirement_receipt_status`) implemented and
+merged 2026-07-13** — see `contract_registry_schema_reference.md`,
+`contract_lifecycle_schema_reference.md`, and
+`contract_receipts_schema_reference.md` for the implemented schema. No
+engine/check versioning (PR-B), no impact report / change-class classifier
+(PR-C), no reprocessing policy (PR-D), no Evidence Ledger/Feature Store
+wiring or `report.py --check` integration (PR-E), no receipt signing or
+anchoring.
 
-**PR-4 must also introduce an explicit receipt-lifecycle status** (or
-equivalent invariant) distinguishing, for any `active` contract with
-`activated_receipt_id IS NULL`: legacy activation (pre-PR-4, expected and
-permanent), pending receipt emission (mid-rollout, transient), a migration
-state, or an implementation defect. See
-`contract_lifecycle_schema_reference.md`'s "Carried into PR-4" section.
+**PR-4 resolved the receipt-lifecycle-status carry-over from the PR-3
+review**: `activated_receipt_id IS NULL` bare ambiguity is replaced by an
+explicit `activation_receipt_status` ∈ `{PENDING_RECEIPT, RECORDED,
+LEGACY_IMPORT, BOOTSTRAP}` (and the symmetric `retirement_receipt_status`
+for `retired_receipt_id`). See `contract_receipts_schema_reference.md`
+§"Receipt lifecycle status" for the exact semantics of each value and the
+migration that backfills `LEGACY_IMPORT` on pre-PR-4 databases.
 **Author:** Principal Data Platform Architect
 **Date:** 2026-07-13
 **Depends on:** `docs/governance/data_completeness_gate.md`,
