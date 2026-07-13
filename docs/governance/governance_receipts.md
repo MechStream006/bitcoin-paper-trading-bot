@@ -2,13 +2,25 @@
 
 **Status:** Design. **PR-1 (Governance Receipt Foundation) implemented and merged
 2026-07-13** — see `receipt_schema_reference.md` for the implemented schema.
-**PR-4 (2026-07-13) wires the first two decision types into production**:
-`contract.activate` and `contract.retire`, emitted atomically alongside
-Contract Registry activation/retirement — see
+**PR-4 (2026-07-13, merged) wires the first two decision types into
+production**: `contract.activate` and `contract.retire`, emitted atomically
+alongside Contract Registry activation/retirement — see
 `contract_receipts_schema_reference.md`. Every other decision type in the
 taxonomy (`family.transition`, `family.promote`, `readiness.verdict`,
 `evidence.admit`/`.reject`, `feature.*`, `dataset.*`, `model.*`, `reversal`)
 remains unemitted. No signing, no anchoring, no `--verify-chain` CLI/cron.
+
+**PR-5 must confirm/extend chain verification for contract receipts and
+prepare for anchoring**: every `contract.activate`/`.retire` receipt PR-4
+emits already goes through `receipt_ledger.append_receipt_on_connection()`
+and therefore already carries `seq` and `prev_receipt_hash` in the single,
+platform-wide chain — `receipt_ledger.verify_chain()` (PR-1) requires no
+new code to walk them. What PR-5 must add is the **daily operational
+surface** on top of that already-correct substrate: the `--verify-chain`
+CLI/cron entry point, and the three zero-infrastructure anchors
+(`governance_receipts.md` §3.3: git, Telegram, backup manifest) publishing
+the chain head — without changing any receipt's contents, per the
+established law that receipt bodies are frozen once written.
 **Author:** Principal Data Platform / Governance Architect
 **Date:** 2026-07-13
 **Depends on:** `evidence_reporting_architecture.md`, `data_completeness_gate.md`,
