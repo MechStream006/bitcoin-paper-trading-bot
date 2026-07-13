@@ -183,3 +183,43 @@ source-scanning test, matching PR-2's).
   contract"). `retire_contract()` does not query any evidence table.
 - No Data Completeness Gate, Feature Store, or ML wiring.
 - No CLI, no cron wiring.
+
+---
+
+## PR-3 review outcome (2026-07-13)
+
+**Merge approved and completed.** Full suite green post-merge (517 passed,
+same 14 pre-existing unrelated failures), no regressions, no conflicts. One
+enhancement was explicitly carried forward into PR-4 rather than
+implemented here:
+
+> **PR-4 must introduce an explicit receipt-lifecycle status** (or
+> equivalent invariant), because `activated_receipt_id IS NULL` on an
+> `active` row is currently ambiguous between four distinct situations that
+> demand different operator responses:
+>
+> - **legacy activation** — the row was activated under PR-3 (or earlier),
+>   before PR-4 existed to populate this field. Expected and **permanent**;
+>   never resolves to a value.
+> - **pending receipt emission** — PR-4 exists and is wired, but the
+>   receipt-write step for *this* activation has not yet run (or is
+>   in-flight). Expected and **transient**; should resolve shortly.
+> - **migration state** — a bulk backfill/bootstrap operation (mirroring
+>   PR-1's `migrate_bootstrap_transitions.py` precedent) is populating
+>   historical rows and this one hasn't been reached yet.
+> - **implementation defect** — PR-4 is wired and should have written a
+>   receipt for this activation, but didn't (a bug). This is the only case
+>   that should page anyone.
+>
+> Today, all four look identical: `NULL`. A reviewer or an automated
+> `--check` cannot tell "this is fine forever" from "this is broken right
+> now" by looking at the column alone. PR-4 needs a companion field (e.g. a
+> `receipt_status` enum, or a platform epoch/cutover marker distinguishing
+> pre-PR-4 rows from post-PR-4 rows) so that `NULL` + status is
+> unambiguous, and only the defect case is ever alertable.
+
+This does not require any change to what PR-3 already shipped — every row
+this PR ever writes falls cleanly into "legacy activation" once PR-4 lands,
+and `activated_receipt_id`'s write-once-from-`NULL` guard (§ tamper
+detection above) already accommodates a future single write with no
+migration needed to the column itself.

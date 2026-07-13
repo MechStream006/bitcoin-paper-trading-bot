@@ -7,6 +7,13 @@ and merged 2026-07-13** — see `contract_registry_schema_reference.md` and
 receipt emission yet (PR-4), no engine/check versioning (PR-B), no impact
 report / change-class classifier (PR-C), no reprocessing policy (PR-D), no
 governance/Evidence Ledger/Feature Store wiring (PR-E).
+
+**PR-4 must also introduce an explicit receipt-lifecycle status** (or
+equivalent invariant) distinguishing, for any `active` contract with
+`activated_receipt_id IS NULL`: legacy activation (pre-PR-4, expected and
+permanent), pending receipt emission (mid-rollout, transient), a migration
+state, or an implementation defect. See
+`contract_lifecycle_schema_reference.md`'s "Carried into PR-4" section.
 **Author:** Principal Data Platform Architect
 **Date:** 2026-07-13
 **Depends on:** `docs/governance/data_completeness_gate.md`,
