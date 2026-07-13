@@ -1,12 +1,21 @@
 # Evidence Lifecycle & Governance Reporting — Architectural Specification
 
-**Status:** Design. Not implemented.
+**Status:** Design. **Implemented and merged 2026-07-13 (Governance Architecture
+PR-5)** — see `evidence_matrix_schema_reference.md` for the implemented schema.
+The §9 migration (run_kind backfill) has been run against the real ledger.db
+(70 rows classified, backup + audit note retained) and the deleted
+`registry.yaml: provenance` field has been removed from all 35 entries. The
+real registry passes all nine invariants (§8) and the real ledger reproduces
+the documented known-correct L0/L1 split exactly, both verified by test.
+§10's PR-5 ("Operationalise": systemd timer, daily commit, heartbeat/alert
+wiring) is explicitly NOT part of this implementation — see the schema
+reference's "Remaining work" section.
 **Author:** Principal Research Architect / Governance Architect
 **Date:** 2026-07-13
 **Governance impact:** Introduces one new ledger column, one new ledger view, one
 one-time classification backfill, and a rewritten reporting layer. **Changes no
-threshold, no gate, no state machine arc, and no research logic.**
-**Requires sign-off from Rohith before implementation** (see §9, Migration).
+threshold, no gate, no state machine arc, and no research logic** except the
+one explicitly-flagged X→X re-pin arc (§9 PR-2 item 4).
 
 ---
 

@@ -81,6 +81,7 @@ def main() -> int:
         family_id      = FAMILY_ID,
         metrics        = _METRICS,
         provenance     = "offline-corpus",
+        run_kind       = "discovery",  # this family's sole offline-corpus (admission) run
         window_start   = "2021-01-01",
         window_end     = "2025-05-31",
         engine_version = "ivrv-1.0.0",

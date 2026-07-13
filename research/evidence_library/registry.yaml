@@ -42,7 +42,6 @@ h6_funding_vol_regime:
     Pre-registration exists; live-forward collection active.
   role:
     - edge
-  provenance: offline-corpus
   pinned_run: 6b29cb25-d5c0-458a-913b-de714344802b
   preregistration:
     path: "research/forward_evidence/pre_registration.json"
@@ -74,7 +73,6 @@ g1_market_regime_sma200:
     Assigned Feature role per FINAL_AUDIT conditioning judgment.
   role:
     - feature
-  provenance: offline-corpus
   pinned_run: e4074104-be78-46b0-896d-8f6e374f4981
   preregistration:
     path: "research/forward_evidence/pre_registration_g1_market_regime_sma200.json"
@@ -106,7 +104,6 @@ h5_vol_regime:
     IS/OOS sign disagrees (IS -0.06, OOS +0.68) — effect visible in OOS not IS.
   role:
     - feature
-  provenance: offline-corpus
   pinned_run: 036349a1-d49f-465e-9533-62d547d566db
   preregistration:
     path: "research/forward_evidence/pre_registration_h5_vol_regime.json"
@@ -139,7 +136,6 @@ g2_funding_level:
     by FINAL_AUDIT and H1 hypothesis study.
   role:
     - feature
-  provenance: offline-corpus
   pinned_run: cc916a89-ba48-4816-8bbe-73af6f3ae315
   preregistration: null
   weaknesses:
@@ -169,7 +165,6 @@ g5_trend_4h:
     Candidate gate was frozen. Formal gate is authoritative.
   role:
     - feature
-  provenance: offline-corpus
   pinned_run: ca05220e-457d-4735-b009-40a8746ad5a4
   preregistration: null
   weaknesses:
@@ -200,7 +195,6 @@ g3_momentum_tsmom:
     Candidate gate is r≥0.90 only; r=0.70 fires at Validated gate.
   role:
     - edge
-  provenance: offline-corpus
   pinned_run: c75f6a4e-256a-47c0-8840-7fe8714a9dbf
   preregistration:
     path: "research/forward_evidence/pre_registration_g3_tsmom.json"
@@ -232,7 +226,6 @@ g1_trend_regime_ma_cross:
     Formal gate is authoritative. Structural sign failed (important weakness).
   role:
     - feature
-  provenance: offline-corpus
   pinned_run: abc6078e-0dce-4c89-b73f-c1aa9467e795
   preregistration: null
   weaknesses:
@@ -272,7 +265,6 @@ ivrv_vrp_spread:
     spends the sealed lockbox, so not used). Governance classification 2026-06-19.
   role:
     - feature
-  provenance: offline-corpus
   pinned_run: b98c9685-134b-410f-ac98-684b0ee01da6    # set by migrate_ivrv_admission.py (discovery → candidate)
   preregistration:
     path: "research/forward_evidence/pre_registration_ivrv.json"
@@ -306,7 +298,6 @@ g4_inside_bar:
     Additionally: FINAL_AUDIT note that Inside Bar is a disguised trend-follower
     (construction uses sign(close-SMA50) on inside-bar days).
   role: []
-  provenance: offline-corpus
   pinned_run: 3b8bcaee-a116-4b98-b631-ae7e1e22c11d
   preregistration: null
   weaknesses: []
@@ -329,7 +320,6 @@ g6_obv_trend:
   state_since: "2026-06-13"
   state_reason: "Hard DQ E3: sensitivity 33% < 40% knife-edge threshold."
   role: []
-  provenance: offline-corpus
   pinned_run: 15a98761-8ba1-4635-8dd2-9c0007abf042
   preregistration: null
   weaknesses: []
@@ -352,7 +342,6 @@ g1_breakout_donchian:
   state_since: "2026-06-13"
   state_reason: "Hard DQ E3: sensitivity 25% < 40% knife-edge threshold."
   role: []
-  provenance: offline-corpus
   pinned_run: 4e6cae28-8a1a-4c9c-bd2b-1147b496a21b
   preregistration: null
   weaknesses: []
@@ -378,7 +367,6 @@ g1_volatility_regime:
     correlation r≈1.0). Absorbed into h5_vol_regime as cluster head.
     DQ threshold: clone r ≥ 0.90.
   role: []
-  provenance: offline-corpus
   pinned_run: 8261cea1-253d-4e37-a631-52a28fffbf65
   preregistration: null
   weaknesses: []
@@ -412,7 +400,6 @@ g3_atr_expansion:
     Validated gate evaluated on live-forward returns). Pre-registration locked.
   role:
     - edge
-  provenance: offline-corpus
   pinned_run: 0c7e1bf9-31e2-4662-a843-eef7f98c9331
   preregistration:
     path: "research/forward_evidence/pre_registration_g3_atr_expansion.json"
@@ -442,7 +429,6 @@ g3_atr_compression:
     Same situation as g3_atr_expansion.
   role:
     - feature
-  provenance: offline-corpus
   pinned_run: 3fa9d836-a011-4251-9ae3-c93b5d63925f
   preregistration: null
   weaknesses:
@@ -469,7 +455,6 @@ g6_funding_basis_composite:
     Validated gate even if Candidate gate were passed.
   role:
     - feature
-  provenance: offline-corpus
   pinned_run: a6bed269-1d07-4e83-a2f0-56bc77b02f1e
   preregistration: null
   weaknesses:
@@ -494,7 +479,6 @@ g3_trend_continuation_er:
     Sensitivity 50% — gray zone. Also: negative Sharpe -0.24 fails edge threshold.
     No feature path (OOS -0.11 negative).
   role: []
-  provenance: offline-corpus
   pinned_run: 3a80db88-11ea-4c44-b404-d94d56bad736
   preregistration: null
   weaknesses:
@@ -524,7 +508,6 @@ g2_basis_expansion:
   state_since: "2026-06-13"
   state_reason: "OOS Sharpe -0.31 (negative); LOO sign consistency 67% barely meets threshold but OOS negative blocks Feature path."
   role: []
-  provenance: offline-corpus
   pinned_run: 916567a7-c4e1-4e64-afed-153b15f96a5d
   preregistration: null
   weaknesses:
@@ -547,7 +530,6 @@ g4_morning_star:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.38 and OOS -0.19 (both negative). No standalone edge; no conditioning use."
   role: []
-  provenance: offline-corpus
   pinned_run: 7a23ecbd-cd42-47d6-9ae5-54832da2b151
   preregistration: null
   weaknesses:
@@ -570,7 +552,6 @@ g4_pin_bar:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.19 and OOS -0.25 (both negative). Negative finding: candlestick reversal family."
   role: []
-  provenance: offline-corpus
   pinned_run: 1d111f3e-5a19-4f94-9ee1-3486dc755fda
   preregistration: null
   weaknesses:
@@ -592,7 +573,6 @@ g4_outside_bar:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.12 and OOS -0.32. Negative finding: candlestick reversal family."
   role: []
-  provenance: offline-corpus
   pinned_run: 5a0003ff-3256-416a-b3c7-debd6a4517e5
   preregistration: null
   weaknesses:
@@ -614,7 +594,6 @@ g2_funding_acceleration:
   state_since: "2026-06-13"
   state_reason: "OOS Sharpe -1.00 (severe IS/OOS gap: IS +0.53 vs OOS -1.00). Classic overfitting signal."
   role: []
-  provenance: offline-corpus
   pinned_run: 87d86090-f271-467d-8c33-32baaa3a3497
   preregistration: null
   weaknesses:
@@ -637,7 +616,6 @@ g3_mean_reversion_rsi:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.29; OOS -0.19. High-confidence negative: BTC daily mean-reversion has no edge (see FINAL_AUDIT §5)."
   role: []
-  provenance: offline-corpus
   pinned_run: 61d522e7-89b5-4379-b00d-5b2159810e5a
   preregistration: null
   weaknesses:
@@ -659,7 +637,6 @@ g5_trend_misalignment:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.19 and OOS -0.50. Multi-timeframe structure negative finding."
   role: []
-  provenance: offline-corpus
   pinned_run: 563f905a-77ae-42b6-9a4c-a720e9a20a50
   preregistration: null
   weaknesses:
@@ -682,7 +659,6 @@ g6_volume_surge:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.41 and OOS -0.91. Volume/order-flow family high-confidence negative finding."
   role: []
-  provenance: offline-corpus
   pinned_run: 4f29d74a-86a2-41a0-b9b8-e527339f5646
   preregistration: null
   weaknesses:
@@ -704,7 +680,6 @@ g4_evening_star:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.05 and OOS -0.16. LOO sign consistency 50% (below threshold). Candlestick reversal negative."
   role: []
-  provenance: offline-corpus
   pinned_run: 779c82db-edef-4a0b-bf9b-ad55848ff37e
   preregistration: null
   weaknesses:
@@ -726,7 +701,6 @@ g4_engulfing:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.62 and OOS -0.12 (both negative). WF 1/6 (worst in battery). Actively loses."
   role: []
-  provenance: offline-corpus
   pinned_run: fa509875-4b6b-4f60-8413-8af2abb448b3
   preregistration: null
   weaknesses:
@@ -748,7 +722,6 @@ g5_trend_1h:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.18 and OOS -0.34. Multi-timeframe structure adds no incremental information."
   role: []
-  provenance: offline-corpus
   pinned_run: 775db096-06f1-4aea-8163-53c816b699d5
   preregistration: null
   weaknesses:
@@ -770,7 +743,6 @@ g6_clv_pressure:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.61 and OOS -0.54. Volume/order-flow family negative finding."
   role: []
-  provenance: offline-corpus
   pinned_run: daaab03a-de52-43da-85d1-e8b224eca150
   preregistration: null
   weaknesses:
@@ -792,7 +764,6 @@ g2_basis_compression:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.26 and OOS -0.08 (both negative). WF 1/5."
   role: []
-  provenance: offline-corpus
   pinned_run: 399908e9-5ab3-4f74-b4e3-a780d6821598
   preregistration: null
   weaknesses:
@@ -814,7 +785,6 @@ g1_range_regime_bb:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.30; OOS +0.00 (zero). High-confidence negative: BTC mean-reversion has no edge."
   role: []
-  provenance: offline-corpus
   pinned_run: 17f0536f-f664-49eb-8882-68018aa51753
   preregistration: null
   weaknesses:
@@ -837,7 +807,6 @@ g2_funding_divergence:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.16 and OOS -0.16 (both negative). Structural sign not preserved."
   role: []
-  provenance: offline-corpus
   pinned_run: 9101b51b-73d9-4eca-822f-cfeb62d13952
   preregistration: null
   weaknesses:
@@ -860,7 +829,6 @@ g6_chaikin_money_flow:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.06 and OOS -0.38. Sensitivity 67% (passes gate) but negative effect; no edge."
   role: []
-  provenance: offline-corpus
   pinned_run: 65293bbc-113f-42eb-900b-5b905e5633c0
   preregistration: null
   weaknesses:
@@ -882,7 +850,6 @@ g5_trend_1d:
   state_since: "2026-06-13"
   state_reason: "Sharpe +0.04 (near zero) and OOS -0.25. LOO sign consistency 50% (below threshold). Only 11 trades."
   role: []
-  provenance: offline-corpus
   pinned_run: 4446b8b7-97f0-4741-8c9e-f525e5172de7
   preregistration: null
   weaknesses:
@@ -905,7 +872,6 @@ g5_trend_alignment:
   state_since: "2026-06-13"
   state_reason: "Sharpe +0.03 (near zero) and OOS -0.15. LOO sign consistency 33% (far below threshold). Structural sign not preserved."
   role: []
-  provenance: offline-corpus
   pinned_run: 9a906f33-bbe1-40cf-8159-c294b2dcaf3d
   preregistration: null
   weaknesses:
@@ -928,7 +894,6 @@ g2_basis_level:
   state_since: "2026-06-13"
   state_reason: "Sharpe -0.22 and OOS -0.97 (severe OOS failure). Collinear with funding."
   role: []
-  provenance: offline-corpus
   pinned_run: 58654db6-7753-42ef-914c-bc850de116d3
   preregistration: null
   weaknesses:

@@ -135,11 +135,19 @@ def main() -> int:
 
         metrics = _map_metrics(raw)
 
+        # First offline-corpus run for this family -> discovery (L0, carries
+        # the multiple-testing burden). Every later one (a re-seed, e.g. the
+        # 2026-06-14 run) -> confirmatory (L1, a reproducibility check, not
+        # new evidence). At most one L0 run may ever exist per family
+        # (evidence_reporting_architecture.md §3, L0 admissibility).
+        run_kind = "discovery" if record.get_latest_run(_DB_PATH, family_id, "discovery") is None else "confirmatory"
+
         run_id = record.append_run(
             db_path        = _DB_PATH,
             family_id      = family_id,
             metrics        = metrics,
             provenance     = "offline-corpus",
+            run_kind       = run_kind,
             window_start   = "2021-01-01",
             window_end     = "2026-05-31",
             engine_version = "phase_b_v1",

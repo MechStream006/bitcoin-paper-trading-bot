@@ -32,6 +32,7 @@ research/data/ledger.db
 research/evidence_library/ledger.db
 research/evidence_library/ledger.db-wal
 research/evidence_library/ledger.db-shm
+research/evidence_library/ledger.pre-*.db
 
 # Build/run launchers and logs at repo root
 run_*.bat
