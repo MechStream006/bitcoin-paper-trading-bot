@@ -1,6 +1,14 @@
 # Data Completeness Gate — Platform Framework Specification
 
-**Status:** Design. Not implemented.
+**Status:** Design. Not implemented. **Still true as of Governance
+Architecture PR-6 (2026-07-13)** — PR-6 wired `evidence.admit`/`.reject`
+governance receipts for the Evidence Library using
+`lifecycle.check_candidate_gate()` as the admissibility rule (already
+implemented, pre-existing) specifically *because* this document's
+`readiness.verdict` engine does not exist. See
+`evidence_library_governance_schema_reference.md`'s dependency-check
+section for the reasoning and the explicit statement of what `evidence.admit`
+does and does not attest until this document's engine is actually built.
 **Author:** Principal Data Platform Architect
 **Date:** 2026-07-13
 **Scope:** Every derived pipeline on the platform — current (H6, H5, G1, G3, IVRV,
