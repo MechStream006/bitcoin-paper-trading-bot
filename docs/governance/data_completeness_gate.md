@@ -1,14 +1,31 @@
 # Data Completeness Gate — Platform Framework Specification
 
-**Status:** Design. Not implemented. **Still true as of Governance
-Architecture PR-6 (2026-07-13)** — PR-6 wired `evidence.admit`/`.reject`
-governance receipts for the Evidence Library using
-`lifecycle.check_candidate_gate()` as the admissibility rule (already
-implemented, pre-existing) specifically *because* this document's
-`readiness.verdict` engine does not exist. See
-`evidence_library_governance_schema_reference.md`'s dependency-check
-section for the reasoning and the explicit statement of what `evidence.admit`
-does and does not attest until this document's engine is actually built.
+**Status:** §12 **PR-1 (Core engine) implemented and merged 2026-07-14** as
+Governance Architecture PR-7 — package `research/dq/`, 187 tests. See
+`data_completeness_framework_schema_reference.md` for the implemented
+schema, public interfaces, three documented deviations from a literal
+reading of this document (all resolved toward its stated intent), and the
+per-criterion status of §13. The `readiness.verdict` engine now exists:
+contracts, checks, verdicts, receipts, and point-in-time replay under the
+historical contract.
+
+**No adopters yet.** §12's PR-2 (H6 / `corpus_daily` adopts it — including
+the readiness-aware `_already_processed()`, "the most important line in the
+entire body of work"), PR-3 (forward-evidence collectors), PR-4 (governance
+integration — §7's G1/G2/G3), PR-5 (observability / `readiness_board.md`)
+and PR-6 (platform rollout) are all still outstanding.
+
+**Consequently §7's governance integration is NOT yet in force**, and the
+note it superseded still holds in the interim: Governance Architecture PR-6
+wired `evidence.admit`/`.reject` receipts for the Evidence Library using
+`lifecycle.check_candidate_gate()` as the admissibility rule specifically
+*because* this engine did not exist. That rule is unchanged. Readiness is
+not yet an admissibility precondition; making it one is a governance change
+(G1/G2) and belongs to the adoption PR, not to the framework. The
+substitution point PR-6 built for exactly this purpose is proven to work —
+see the schema reference's §13 — but is deliberately left unused here. Until
+it is wired, `evidence.admit` continues to attest *gate-check pass/fail*,
+not *input-data completeness*.
 **Author:** Principal Data Platform Architect
 **Date:** 2026-07-13
 **Scope:** Every derived pipeline on the platform — current (H6, H5, G1, G3, IVRV,

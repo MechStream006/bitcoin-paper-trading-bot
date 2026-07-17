@@ -30,6 +30,20 @@ DECISION_CLASSES = frozenset({"derived", "discretionary"})
 ACTIONS = frozenset({
     "activate", "retire", "admit", "reject", "promote",
     "demote", "transition", "reverse",
+    # PR-7 (Data Completeness Framework). `readiness.verdict` has been in
+    # DECISION_TAXONOMY since PR-1, but no verb described what a readiness
+    # evaluation DOES -- a gap that only surfaced when something finally
+    # emitted one. Purely ADDITIVE: no existing receipt uses it, no existing
+    # validation is loosened, and every receipt written under PR-1..PR-6
+    # verifies and replays byte-identically.
+    #
+    # Deliberately NOT reusing "admit"/"reject": a READY verdict means
+    # COMPLETE, not ADMISSIBLE AS EVIDENCE. data_completeness_gate.md §7 G5 is
+    # explicit that readiness and admissibility are INDEPENDENT gates, both
+    # required -- Delta testnet data can be perfectly complete and still be
+    # economically synthetic. Overloading the admission verbs here would
+    # encode exactly the conflation the spec warns against.
+    "evaluate",
 })
 
 SUBJECT_KINDS = frozenset({
