@@ -6,11 +6,27 @@ Governance Receipt Emission: `contract.activate` / `contract.retire`,
 `activation_receipt_status` / `retirement_receipt_status`) implemented and
 merged 2026-07-13** — see `contract_registry_schema_reference.md`,
 `contract_lifecycle_schema_reference.md`, and
-`contract_receipts_schema_reference.md` for the implemented schema. No
-engine/check versioning (PR-B), no impact report / change-class classifier
-(PR-C), no reprocessing policy (PR-D), no Evidence Ledger/Feature Store
-wiring or `report.py --check` integration (PR-E), no receipt signing or
-anchoring.
+`contract_receipts_schema_reference.md` for the implemented schema.
+
+**PR-B (engine & check versioning) implemented and merged 2026-07-14** as
+Governance Architecture PR-7, together with §5's three resolution operations
+and §2.3's tamper detection — see
+`data_completeness_framework_schema_reference.md`. Specifically: `ENGINE_VERSION`
+and the contract's `check_id` set are recorded in every receipt; checks are
+frozen by versioned id in a registry retained forever and re-registration
+under an existing id is refused; `replay()` executes the rule and checks
+**named in the receipt** and fails loudly (`UnknownRuleError` /
+`UnknownCheckError`) rather than substituting a modern one; §5's three
+operations are three separately-named functions with no ambiguous
+`get_contract()`; `--contract-policy` has no default and refuses to run when
+missing.
+
+Still not implemented: the impact report / change-class classifier (PR-C —
+`change_class` remains author-declared and unverified; the spec requires it be
+*measured* from a replay-diff and activation *refused* on misdeclaration),
+reprocessing execution and the M2 pinned-window guard (PR-D — the policy
+*choice* exists; nothing executes a reprocess), Evidence Ledger/Feature Store
+wiring or `report.py --check` integration (PR-E), receipt signing/anchoring.
 
 **PR-4 resolved the receipt-lifecycle-status carry-over from the PR-3
 review**: `activated_receipt_id IS NULL` bare ambiguity is replaced by an
