@@ -83,7 +83,27 @@ from receipts import (
     verify_receipt,
 )
 
-ENGINE_VERSION = "transition_governance.v1"
+# PR-9: bumped v1 -> v2. `rule.rule_hash` and `rule.thresholds_hash` change
+# MEANING at this version -- under v1 both held the same combined policy digest;
+# from v2 rule_hash is the STATE MACHINE alone and thresholds_hash is the
+# THRESHOLDS alone (see state_machine_hash()).
+#
+# Bumping the version is not a workaround, it is the mechanism the platform
+# already mandates: contract_versioning.md §3 -- "A check's semantics may never
+# be redefined under an existing ID. A change in what a check means requires a
+# new ID, which contracts then opt into explicitly. Old check IDs are retained
+# and executable FOREVER." A silent redefinition would make every historical
+# receipt replay against semantics it was never rendered under, while every hash
+# still verified. So v1 receipts are never reinterpreted: verifiers dispatch on
+# the RECORDED engine_version and report v1's hashes as non-separable rather
+# than mis-reading them as a state-machine hash (see
+# governance_verification.diagnose_state_machine_evolution()).
+ENGINE_VERSION = "transition_governance.v2"
+
+# The engine versions whose rule_hash is the STATE MACHINE alone. v1 predates
+# the split and is deliberately absent -- not because v1 is untrustworthy, but
+# because its rule_hash genuinely cannot answer "did the state machine change?".
+ENGINE_VERSIONS_WITH_SPLIT_HASHES = frozenset({"transition_governance.v2"})
 
 SUBJECT_KIND = "family"
 
@@ -174,6 +194,7 @@ def validate_transition(
     family_meta: dict | None = None,
     thresholds: dict | None = None,
     from_state: str | None = None,
+    readiness_provider: "readiness_gate.ReadinessProvider | None" = None,
 ) -> TransitionValidation:
     """
     Validate a transition BEFORE it is executed. Pure w.r.t. the ledger: it
@@ -295,8 +316,11 @@ def validate_transition(
             "TG-ADM.admissibility", adm_ok, observed=adm_obs, expected=f"a {required_receipt!r} receipt",
         ))
 
-    # TG-RDY — readiness (PR-7). Checked when present; not_computed when absent.
-    checks.append(_readiness_check(run))
+    # TG-RDY — readiness (PR-7 framework, armed at the Validated gate by PR-9).
+    rdy_check = _readiness_check(db_path, run, to_state, readiness_provider)
+    checks.append(rdy_check)
+    if not rdy_check.passed:
+        errors.append(f"{family_id}: {rdy_check.observed}")
 
     # TG-PRE — governance prerequisites
     if to_state == "validated" and run is not None and thresholds is not None:
@@ -321,49 +345,123 @@ def validate_transition(
     return TransitionValidation(ok, tuple(checks), tuple(errors))
 
 
-def _readiness_check(run: dict | None) -> TransitionCheck:
+def _readiness_check(
+    db_path: Path | str,
+    run: dict | None,
+    to_state: str,
+    provider: "readiness_gate.ReadinessProvider | None" = None,
+) -> TransitionCheck:
     """
-    data_completeness_gate.md §7 G2. PR-7 built the readiness engine; G3 (the
-    `readiness` block in runs.metrics_json) is that document's own PR-4 and is
-    not implemented, so no run carries one yet.
+    data_completeness_gate.md §7 **G2**, armed by PR-9.
 
-    Enforcing it now would fail every existing family -- so absence is
-    reported honestly as `not_computed` and does not block, while a PRESENT
-    block IS enforced. The rendering distinction PR-5 established (no evidence
-    / insufficient / not-computed / n-a, never a bare '-') applies here for the
-    same reason: "we did not look" must never be indistinguishable from "we
-    looked and it was fine".
+    Two regimes, and the asymmetry is G2's, not an invention here:
+
+      * Entering **validated** (`readiness_gate.STATES_REQUIRING_READINESS`):
+        the evidence window MUST be 100% READY. Absence of readiness evidence
+        **blocks** -- L2, "absence of evidence of completeness is not evidence of
+        completeness", with the same no-silent-bypass semantics as the existing
+        NULL-DSR hard-fail. This has a real, intended consequence: until a
+        readiness producer exists, nothing can be validated. That is correct; the
+        alternative is promoting on data nobody checked.
+
+      * Every other state: readiness is REPORTED, never blocking -- unchanged
+        from PR-8. A non-computed readiness renders as `not_computed`, never as a
+        bare pass, preserving PR-5's rendering discipline: "we did not look" must
+        never be indistinguishable from "we looked and it was fine".
+
+    Backward compatible by construction: the real ledger has zero validated
+    families, so arming this gate invalidates nothing that exists.
     """
+    import readiness_gate
+
+    enforced = readiness_gate.requires_readiness(to_state)
+    expected = (
+        "every day in the evidence window READY (or declared-degraded) -- required to enter "
+        f"{to_state!r}"
+        if enforced else
+        "a readiness assessment, when one can be computed (reported, not enforced, for "
+        f"{to_state!r})"
+    )
+
     if run is None:
         return TransitionCheck(
-            "TG-RDY.readiness", True,
-            observed="n/a (no pinned run)", expected="a readiness block, when computed",
+            "TG-RDY.readiness", not enforced,
+            observed=("n/a (no pinned run)" if not enforced
+                      else "no pinned run, so no evidence window can be assessed"),
+            expected=expected,
         )
-    readiness = (run.get("metrics") or {}).get("readiness")
-    if readiness is None:
+
+    assessment = readiness_gate.assess(db_path, run, provider)
+
+    if not enforced:
         return TransitionCheck(
             "TG-RDY.readiness", True,
-            observed="not_computed (no readiness block on the pinned run)",
-            expected="a readiness block, when computed (G3 -- not yet implemented)",
+            observed=(assessment.detail if assessment.computed
+                      else f"not_computed -- {assessment.detail}"),
+            expected=expected,
         )
-    non_ready = readiness.get("days_non_ready") or []
-    return TransitionCheck(
-        "TG-RDY.readiness", not non_ready,
-        observed=(f"{len(non_ready)} non-READY day(s): {non_ready[:5]}" if non_ready
-                  else f"{readiness.get('days_ready', '?')}/{readiness.get('days_total', '?')} days READY"),
-        expected="every day in the evidence window READY or declared-degraded",
-    )
+
+    return TransitionCheck("TG-RDY.readiness", assessment.ok, observed=assessment.detail,
+                           expected=expected)
 
 
 # ---------------------------------------------------------------------------
 # Receipt construction
 # ---------------------------------------------------------------------------
 
+def state_machine_hash() -> str:
+    """
+    Identity of the STATE MACHINE alone -- `ALLOWED_TRANSITIONS` and
+    `STATES_REQUIRING_RUN`, with no thresholds mixed in.
+
+    PR-9 (the enhancement PR-8's audit identified and PR-8 deferred). PR-8's
+    `_policy_hash()` mixed the state machine AND thresholds into one digest, and
+    `replay_transition_receipt(db, receipt_id)` receives no thresholds -- so it
+    could not recompute the recorded hash, and therefore never compared it. The
+    consequence, demonstrated in the PR-8 audit: a WIDENED state machine replayed
+    green despite the governing rules having changed, and a NARROWED one reported
+    "illegal arc -- either the receipt is forged, or the state machine changed",
+    unable to distinguish the two.
+
+    Separating the digests fixes both, and needs NO change to `receipts.py`:
+    `RuleRef` already carries `rule_hash` AND `thresholds_hash` as distinct
+    fields. PR-8 simply set both (and `authority.policy_hash`) to the same
+    combined value. From `transition_governance.v2` they mean what their names
+    say. `authority.policy_hash` remains the COMBINED digest -- unchanged in
+    meaning -- so the receipt still pins the full policy in force.
+
+    Deliberately EXCLUDES `ENGINE_VERSION`. PR-8's combined hash included it, so
+    the digest changed whenever the module version changed even if the state
+    machine did not -- which would make "did the state machine change?"
+    unanswerable across an engine bump, i.e. exactly the question this hash
+    exists to answer. The engine version is recorded separately, in
+    `rule.engine_version`.
+    """
+    doc = {
+        "allowed_transitions": {k: sorted(v) for k, v in sorted(lifecycle.ALLOWED_TRANSITIONS.items())},
+        "states_requiring_run": sorted(lifecycle.STATES_REQUIRING_RUN),
+    }
+    return sha256_lf(canonical_json(doc))
+
+
+def thresholds_hash(thresholds: dict | None) -> str:
+    """
+    Identity of the THRESHOLDS alone. Reuses PR-6's decimalizer verbatim --
+    thresholds.yaml is full of floats, and canonical_json() correctly refuses to
+    hash a raw IEEE float (governance_receipts.md §1.3 rule 3).
+    """
+    return sha256_lf(canonical_json(
+        {"thresholds": eg._decimalize(thresholds) if thresholds is not None else None}
+    ))
+
+
 def _policy_hash(thresholds: dict | None) -> str:
-    """Identity of the governance policy in force. Reuses PR-6's decimalizer
-    verbatim -- thresholds.yaml is full of floats, and canonical_json()
-    correctly refuses to hash a raw IEEE float (governance_receipts.md §1.3
-    rule 3)."""
+    """
+    The COMBINED policy digest -- state machine + thresholds + engine version.
+    Recorded as `authority.policy_hash`; its meaning is unchanged from PR-8, so
+    an operator comparing an old and a new receipt's policy_hash still compares
+    like with like.
+    """
     doc = {
         "engine_version": ENGINE_VERSION,
         "allowed_transitions": {k: sorted(v) for k, v in sorted(lifecycle.ALLOWED_TRANSITIONS.items())},
@@ -389,6 +487,8 @@ def build_transition_body(
     ts: str,
 ) -> ReceiptBody:
     policy_hash = _policy_hash(thresholds)
+    sm_hash = state_machine_hash()
+    thr_hash = thresholds_hash(thresholds)
     inputs: list[InputRef] = []
     if justifying_run_id:
         inputs.append(InputRef(kind="evidence_run", id=justifying_run_id, hash=justifying_run_id))
@@ -410,11 +510,15 @@ def build_transition_body(
         actor=Actor(type=actor_type, id=actor, key_id=None),
         authority=Authority(policy_id="lifecycle.state_machine", policy_hash=policy_hash, role=None),
         inputs=tuple(inputs),
+        # PR-9: rule_hash and thresholds_hash now mean what their names say.
+        # `authority.policy_hash` (above) remains the COMBINED digest, unchanged
+        # from PR-8, so the receipt still pins the whole policy in force while
+        # ALSO making "did the state machine alone change?" answerable.
         rule=RuleRef(
             rule_id="lifecycle.validate_transition",
-            rule_hash=policy_hash,
+            rule_hash=sm_hash,
             engine_version=ENGINE_VERSION,
-            thresholds_hash=policy_hash,
+            thresholds_hash=thr_hash,
         ),
         # The PRECONDITIONS are recorded -- these are what replay re-verifies.
         # The DECISION is not among them: it is the human's, and it is attested
@@ -445,6 +549,7 @@ def transition_with_receipt(
     thresholds: dict | None = None,
     from_state: str | None = None,
     ts: str | None = None,
+    readiness_provider: "readiness_gate.ReadinessProvider | None" = None,
 ) -> dict:
     """
     The governed front door. Validate -> execute -> receipt, atomically.
@@ -514,6 +619,7 @@ def transition_with_receipt(
             validation = validate_transition(
                 db_path, family_id, to_state, justifying_run_id,
                 family_meta=family_meta, thresholds=thresholds, from_state=from_state,
+                readiness_provider=readiness_provider,
             )
             if not validation.ok:
                 raise IllegalTransitionError(
@@ -565,6 +671,7 @@ def promote_with_receipt(
     thresholds: dict | None = None,
     from_state: str | None = None,
     actor_type: str = "human",
+    readiness_provider: "readiness_gate.ReadinessProvider | None" = None,
 ) -> dict:
     """
     Promote a family. **Discretionary. Never derived.**
@@ -614,6 +721,7 @@ def promote_with_receipt(
         db_path, family_id, to_state, justifying_run_id=justifying_run_id,
         actor=actor, actor_type=actor_type, reason=reason,
         family_meta=family_meta, thresholds=thresholds, from_state=current,
+        readiness_provider=readiness_provider,
     )
 
 

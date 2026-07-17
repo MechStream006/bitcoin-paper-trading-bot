@@ -358,27 +358,29 @@ tests. No regressions.
 
 ## 12. Remaining work for PR-9
 
-**Compare the recorded `policy_hash` at replay (the audit's optional item —
-deferred, and why).** The receipt *does* record the governing state machine
-(`authority.policy_hash` covers `ALLOWED_TRANSITIONS`), but replay never compares
-it to today's. Consequence: a **widened** machine replays green despite the rules
-having changed; a **narrowed** one reports *"illegal arc — either the receipt is
-forged, or the state machine changed"*, unable to distinguish the two.
+> **PR-9 update (2026-07-18): the first two items below are DONE.** See
+> `operational_governance_schema_reference.md`. The state-machine hash split
+> shipped as the additive design this section predicted (`state_machine_hash()`
+> recorded in `rule.rule_hash` from `transition_governance.v2`;
+> `diagnose_state_machine_evolution()` compares it to today's), and the readiness
+> gate is armed at Validated (`readiness_gate.py`). The remaining items (G1
+> `INADMISSIBLE`, pairwise independence) are still open and restated below.
 
-It was assessed for inclusion in PR-8 and **is not trivial**, which is why it is
-deferred rather than rushed: `_policy_hash()` mixes the state machine *and*
-`thresholds` into one digest, and `replay_transition_receipt(db, receipt_id)`
-receives no thresholds — so comparing would require either a signature change
-(threading thresholds into replay) or a receipt-body change (recording a separate
-`state_machine_hash`). The latter is the right design and is additive: existing
-receipts keep verifying and replaying byte-identically; only new receipts gain the
-field. **No data is lost meanwhile** — the hash is already recorded, so history
-remains diagnosable retroactively once the check exists.
+**~~Compare the recorded `policy_hash` at replay~~ — DONE (PR-9).** Implemented
+exactly as the "right design and additive" option this section named: a separate
+`state_machine_hash()` recorded in `rule.rule_hash`, under a bumped
+`engine_version` (v1 → v2) so v1 receipts are never reinterpreted. Existing
+receipts verify and replay byte-identically; only v2+ receipts gain the separable
+hash. `diagnose_state_machine_evolution()` answers "did the state machine change?"
+definitively for v2 receipts and reports v1 as an honest non-answer.
 
-**Arm the readiness gate (G2/G3).** Land the `readiness` block in
-`runs.metrics_json` (`data_completeness_gate.md`'s own PR-4), then flip `TG-RDY`
-from *reported* to *blocking*. The hook and its tests already exist; PR-9 supplies
-the data and removes the `not_computed` escape.
+**~~Arm the readiness gate (G2)~~ — DONE (PR-9).** `TG-RDY` now blocks at
+Validated (fail-closed on absent evidence) and reports elsewhere, consuming the
+run's `readiness` block or PR-7's `data_readiness` receipts. Backward compatible
+by construction (zero validated families). **Still open (G3):** the *producer* —
+nothing yet writes a `readiness` block into `runs.metrics_json` or a
+`data_readiness` receipt over a run's window, so the gate is correctly closed at
+Validated until one exists.
 
 **`INADMISSIBLE` rather than refusal (G1).** A run whose window contains a
 non-READY day should be **written and flagged**, not refused — "refusing to write
