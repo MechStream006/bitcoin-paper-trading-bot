@@ -79,8 +79,14 @@ def candidate(db, family_id="fam_a"):
     return run_id
 
 
-def forward_run(db, family_id="fam_a", dsr=0.9, bh=0.01):
-    return add_run(db, family_id, metrics=dict(PASSING), provenance="live-forward",
+def forward_run(db, family_id="fam_a", dsr=0.9, bh=0.01, ready=True):
+    """A forward run suitable for Validated promotion. PR-9 armed the readiness
+    gate at Validated, so a promotable forward run now carries a READY readiness
+    block (G3's shape); pass ready=False to exercise the block firing."""
+    metrics = dict(PASSING)
+    if ready:
+        metrics["readiness"] = {"days_total": 30, "days_ready": 30, "days_non_ready": []}
+    return add_run(db, family_id, metrics=metrics, provenance="live-forward",
                    run_kind="forward", governance={"dsr_prob": dsr, "bh_p": bh})
 
 
@@ -398,14 +404,16 @@ class TestPromotion:
 
 
 # ---------------------------------------------------------------------------
-# Readiness hook (PR-7)
+# Readiness hook (PR-7 framework; PR-9 arms it at Validated only)
+#
+# G2 names the VALIDATED gate specifically. So for a NON-validated target
+# (candidate here) readiness is REPORTED, never blocking — a present block that
+# is not READY does not stop a candidate pin. Enforcement lives at Validated,
+# and is covered by TestReadinessGate in test_readiness_gate.py.
 # ---------------------------------------------------------------------------
 
 class TestReadinessHook:
-    def test_absent_readiness_is_not_computed_and_does_not_block(self, db):
-        """G3 is not implemented, so no run carries a readiness block. Making it
-        mandatory now would invalidate every existing family — a
-        backward-compatibility break masquerading as rigour."""
+    def test_absent_readiness_at_candidate_is_reported_not_blocking(self, db):
         run_id = add_run(db)
         admit(db, run_id)
         v = tg.validate_transition(db, "fam_a", "candidate", run_id,
@@ -414,7 +422,9 @@ class TestReadinessHook:
         assert rdy.passed
         assert "not_computed" in rdy.observed
 
-    def test_a_present_readiness_block_IS_enforced(self, db):
+    def test_a_non_ready_block_does_not_block_a_non_validated_target(self, db):
+        """PR-9 asymmetry: at candidate, readiness is reported, never enforced.
+        The identical block DOES block at Validated — see TestReadinessGate."""
         metrics = dict(PASSING)
         metrics["readiness"] = {"days_total": 30, "days_ready": 28,
                                 "days_non_ready": ["2026-06-14", "2026-06-15"]}
@@ -422,19 +432,10 @@ class TestReadinessHook:
         admit(db, run_id)
         v = tg.validate_transition(db, "fam_a", "candidate", run_id,
                                    family_meta=EDGE, thresholds=THRESHOLDS)
-        assert not v.ok
         rdy = next(c for c in v.checks if c.check_id == "TG-RDY.readiness")
-        assert not rdy.passed
-        assert "2 non-READY day(s)" in rdy.observed
-
-    def test_a_fully_ready_window_passes(self, db):
-        metrics = dict(PASSING)
-        metrics["readiness"] = {"days_total": 30, "days_ready": 30, "days_non_ready": []}
-        run_id = add_run(db, metrics=metrics)
-        admit(db, run_id)
-        v = tg.validate_transition(db, "fam_a", "candidate", run_id,
-                                   family_meta=EDGE, thresholds=THRESHOLDS)
         assert v.ok
+        assert rdy.passed
+        assert "not enforced" in rdy.expected
 
 
 # ---------------------------------------------------------------------------
