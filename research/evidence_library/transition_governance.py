@@ -471,41 +471,73 @@ def transition_with_receipt(
             f"non-empty reason. The ledger records why, not merely what."
         )
 
-    validation = validate_transition(
-        db_path, family_id, to_state, justifying_run_id,
-        family_meta=family_meta, thresholds=thresholds, from_state=from_state,
-    )
-    if not validation.ok:
-        raise IllegalTransitionError(
-            f"transition refused for {family_id!r} -> {to_state!r}:\n  "
-            + "\n  ".join(validation.errors or [f"failed: {c.check_id}" for c in validation.failed])
-        )
-
-    derived_state, _pinned, _ts = record.derive_state_at(db_path, family_id)
-    current = derived_state or "discovery"
-    decision_type = classify_arc(current, to_state)
-
-    admission_receipt_id = None
-    if justifying_run_id:
-        adm = eg.get_admission_receipt(db_path, justifying_run_id)
-        admission_receipt_id = adm["receipt_id"] if adm else None
-
-    ts = ts or now_iso()
-
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout = 5000")
     try:
+        # BEGIN IMMEDIATE **first**. Everything authoritative -- the state
+        # derivation, the validation, and both writes -- happens inside this one
+        # transaction, under the write lock.
+        #
+        # PR-8 review correction. Previously the state was derived BEFORE the
+        # lock, which is a lost update: two concurrent transitioners both read
+        # 'discovery', both validated against it, and both wrote -- leaving a
+        # permanently inconsistent chain in an append-only table (TG4 detected it
+        # afterwards; nothing could repair it). Reading under the lock is
+        # verbatim contract_lifecycle.next_version()'s contract (PR-3): the
+        # second caller's read does not proceed until the first has committed or
+        # rolled back, so it sees the first's transition and validates against
+        # reality rather than against a stale snapshot.
         con.execute("BEGIN IMMEDIATE")
         try:
+            # Authoritative state, read on the LOCKED connection (PR-3 pattern).
+            derived_state, _pinned, _ts = record.derive_state_on_connection(con, family_id)
+            current = derived_state or "discovery"
+
+            # `ts` is stamped HERE, under the lock -- not when this function was
+            # entered. Found by this PR's own 5-writer concurrency test: a ts
+            # assigned before BEGIN IMMEDIATE can be EARLIER than that of a writer
+            # who acquired the lock first, so ts order disagrees with commit
+            # order, and TG4 (which reads the chain in (ts, id) order) reports a
+            # broken chain for a ledger that is in fact correctly serialised.
+            # Under the lock, ts order and commit order agree, and `id` breaks any
+            # same-instant tie in commit order. An explicitly supplied ts
+            # (bootstrap/backfill) is always honoured.
+            effective_ts = ts or now_iso()
+
+            # Validated under the same lock. validate_transition() opens its own
+            # read connections; SQLite's RESERVED lock admits concurrent readers
+            # but no other writer, and nothing has been written in this
+            # transaction yet -- so those reads observe exactly the committed
+            # state `current` was derived from, and no writer can move it
+            # underneath us before COMMIT.
+            validation = validate_transition(
+                db_path, family_id, to_state, justifying_run_id,
+                family_meta=family_meta, thresholds=thresholds, from_state=from_state,
+            )
+            if not validation.ok:
+                raise IllegalTransitionError(
+                    f"transition refused for {family_id!r} -> {to_state!r}:\n  "
+                    + "\n  ".join(validation.errors
+                                  or [f"failed: {c.check_id}" for c in validation.failed])
+                )
+
+            decision_type = classify_arc(current, to_state)
+
+            admission_receipt_id = None
+            if justifying_run_id:
+                adm = eg.get_admission_receipt(db_path, justifying_run_id)
+                admission_receipt_id = adm["receipt_id"] if adm else None
+
             transition_id = record.append_transition_on_connection(
                 con, family_id, current, to_state,
-                reason=reason, justifying_run_id=justifying_run_id, actor=actor, ts=ts,
+                reason=reason, justifying_run_id=justifying_run_id, actor=actor,
+                ts=effective_ts,
             )
             body = build_transition_body(
                 family_id, transition_id, current, to_state, decision_type,
                 justifying_run_id, validation, admission_receipt_id,
-                actor, actor_type, reason, thresholds, ts,
+                actor, actor_type, reason, thresholds, effective_ts,
             )
             receipt = rl.append_receipt_on_connection(con, body)
         except Exception:
@@ -566,10 +598,22 @@ def promote_with_receipt(
             f"{sorted(_PROMOTION_ARCS)}. Use transition_with_receipt() for other arcs."
         )
 
+    # The arc check above necessarily runs OUTSIDE the write lock (it decides
+    # whether to call at all). Passing `current` as from_state makes that check
+    # binding: TG-CUR re-asserts it against the authoritative state read under
+    # the lock, so if another writer moves the family in between, the transition
+    # is REFUSED rather than silently re-classified.
+    #
+    # Without this, a promotion validated as candidate->validated could, if the
+    # family reached 'validated' concurrently, land inside the lock as a legal
+    # validated->validated re-pin and be recorded as a family.transition -- a
+    # promotion request quietly writing a non-promotion receipt. Refusing is the
+    # only correct answer: the operator asked to promote something that no
+    # longer needs promoting.
     return transition_with_receipt(
         db_path, family_id, to_state, justifying_run_id=justifying_run_id,
         actor=actor, actor_type=actor_type, reason=reason,
-        family_meta=family_meta, thresholds=thresholds, from_state=from_state,
+        family_meta=family_meta, thresholds=thresholds, from_state=current,
     )
 
 

@@ -452,19 +452,31 @@ def get_current_run(db_path: Path | str, family_id: str, run_kind: str, as_of: s
     return get_current_runs_by_lane(db_path, as_of=as_of).get(family_id, {}).get(run_kind)
 
 
-def derive_state_at(db_path: Path | str, family_id: str, as_of: str | None = None) -> tuple[str | None, str | None, str | None]:
+def derive_state_on_connection(
+    con: sqlite3.Connection, family_id: str, as_of: str | None = None
+) -> tuple[str | None, str | None, str | None]:
     """
-    Derive a family's state PURELY from state_transitions -- never from
-    registry.yaml. Returns (state, pinned_run_id, ts) for the last
-    transition at or before `as_of` (None = now / no filter), or
-    (None, None, None) if the family has no transitions at or before that
-    point (i.e. it is still 'discovery' and was never written to the
-    ledger, or as_of predates its first transition).
+    The core of derive_state_at(), operating on a caller-managed connection.
 
-    `as_of`, like get_current_runs_by_lane(), must already be a fully
-    end-of-day-normalised ISO datetime if it originated from a bare date.
+    PR-8: a caller that intends to WRITE a transition based on this state must
+    call this on a connection that already holds at least a RESERVED lock (i.e.
+    after BEGIN IMMEDIATE), so that two concurrent transitioners for the same
+    family are serialized by SQLite and never both read the same pre-transition
+    state -- the second caller's read only proceeds once the first has committed
+    (or rolled back), and therefore sees the first's transition (or doesn't, if
+    it rolled back).
+
+    This is verbatim the concurrency contract of contract_lifecycle.next_version()
+    (PR-3), and for the same reason: a value read outside the write lock and then
+    written inside it is a lost update waiting to happen. Reading it here, on the
+    locked connection, is what makes "validated before persistence" a property
+    rather than a convention.
+
+    Read-only callers with no intent to write (report.py, the evidence timeline,
+    point-in-time reconstruction) should keep using derive_state_at(), which
+    needs no lock.
     """
-    con = sqlite3.connect(db_path)
+    row_factory_was = con.row_factory
     con.row_factory = sqlite3.Row
     try:
         if as_of is not None:
@@ -481,10 +493,33 @@ def derive_state_at(db_path: Path | str, family_id: str, as_of: str | None = Non
             )
         row = cur.fetchone()
     finally:
-        con.close()
+        con.row_factory = row_factory_was
     if row is None:
         return None, None, None
     return row["to_state"], row["justifying_run_id"], row["ts"]
+
+
+def derive_state_at(db_path: Path | str, family_id: str, as_of: str | None = None) -> tuple[str | None, str | None, str | None]:
+    """
+    Derive a family's state PURELY from state_transitions -- never from
+    registry.yaml. Returns (state, pinned_run_id, ts) for the last
+    transition at or before `as_of` (None = now / no filter), or
+    (None, None, None) if the family has no transitions at or before that
+    point (i.e. it is still 'discovery' and was never written to the
+    ledger, or as_of predates its first transition).
+
+    `as_of`, like get_current_runs_by_lane(), must already be a fully
+    end-of-day-normalised ISO datetime if it originated from a bare date.
+
+    PR-8: a thin wrapper around derive_state_on_connection(); behavior is
+    unchanged. A caller deciding whether to WRITE a transition must NOT use this
+    -- see derive_state_on_connection()'s locking contract.
+    """
+    con = sqlite3.connect(db_path)
+    try:
+        return derive_state_on_connection(con, family_id, as_of)
+    finally:
+        con.close()
 
 
 def derive_all_states_at(db_path: Path | str, as_of: str | None = None) -> dict[str, tuple[str, str | None, str]]:

@@ -89,6 +89,56 @@ transition exists without its receipt, or a receipt without its transition
 (tested by forcing the receipt write to fail and asserting the transition row
 rolled back too).
 
+### Everything authoritative happens under the write lock
+
+```
+BEGIN IMMEDIATE                  <- serialize writers FIRST
+  derive_state_on_connection()   <- authoritative state, on the LOCKED connection
+  ts = now_iso()                 <- stamped under the lock (see below)
+  validate_transition()
+  persist transition
+  persist receipt
+COMMIT
+```
+
+**PR-8 review correction.** The state was previously derived *before* the lock,
+which is a lost update: the architecture audit reproduced two concurrent
+transitioners both reading `discovery`, both validating against it, and both
+writing — leaving a permanently inconsistent chain in an **append-only** table.
+TG4 detected it afterwards; nothing could repair it.
+
+Reading under the lock is verbatim `contract_lifecycle.next_version()`'s
+contract (PR-3): the second caller's read does not proceed until the first has
+committed or rolled back, so it validates against reality rather than a stale
+snapshot. The audit's exact reproduction now yields `#1 discovery→candidate`,
+`#2 candidate→candidate` (a legal re-pin) and a clean ledger.
+
+`validate_transition()` opens its own read connections. That is safe under the
+lock: SQLite's `RESERVED` admits concurrent *readers* but no other *writer*, and
+nothing has been written in the transaction at that point — so those reads
+observe exactly the committed state `current` was derived from, and no writer can
+move it before `COMMIT`.
+
+**A second bug, found by this PR's own 5-writer test:** `ts` was also stamped
+before the lock, so a writer that acquired the lock *second* could carry an
+*earlier* timestamp. TG4 reads the chain in `(ts, id)` order, so it reported a
+broken chain for a ledger that was in fact correctly serialised. `ts` is now
+stamped under the lock; `id` breaks any same-instant tie in commit order. An
+explicitly supplied `ts` (bootstrap/backfill) is still honoured.
+
+**`promote_with_receipt()`'s arc check** necessarily runs outside the lock (it
+decides whether to call at all), so it passes its observed `current` as
+`from_state`, making the check binding via `TG-CUR`. Without that, a promotion
+validated as `candidate→validated` could — if the family reached `validated`
+concurrently — land inside the lock as a legal `validated→validated` re-pin and
+be recorded as a `family.transition`: a promotion request quietly writing a
+non-promotion receipt. It now **refuses**, which is the only correct answer.
+
+Guarded by real-thread concurrency tests (2-writer, 5-writer, and the promotion
+variant, re-run 5× clean) plus two AST tests asserting `BEGIN IMMEDIATE` precedes
+the authoritative derivation and that the connection-less `derive_state_at()` is
+never used in the write path — so this cannot silently regress.
+
 ---
 
 ## 4. Validation (the seven checks)
@@ -304,6 +354,23 @@ tests. No regressions.
 ---
 
 ## 12. Remaining work for PR-9
+
+**Compare the recorded `policy_hash` at replay (the audit's optional item —
+deferred, and why).** The receipt *does* record the governing state machine
+(`authority.policy_hash` covers `ALLOWED_TRANSITIONS`), but replay never compares
+it to today's. Consequence: a **widened** machine replays green despite the rules
+having changed; a **narrowed** one reports *"illegal arc — either the receipt is
+forged, or the state machine changed"*, unable to distinguish the two.
+
+It was assessed for inclusion in PR-8 and **is not trivial**, which is why it is
+deferred rather than rushed: `_policy_hash()` mixes the state machine *and*
+`thresholds` into one digest, and `replay_transition_receipt(db, receipt_id)`
+receives no thresholds — so comparing would require either a signature change
+(threading thresholds into replay) or a receipt-body change (recording a separate
+`state_machine_hash`). The latter is the right design and is additive: existing
+receipts keep verifying and replaying byte-identically; only new receipts gain the
+field. **No data is lost meanwhile** — the hash is already recorded, so history
+remains diagnosable retroactively once the check exists.
 
 **Arm the readiness gate (G2/G3).** Land the `readiness` block in
 `runs.metrics_json` (`data_completeness_gate.md`'s own PR-4), then flip `TG-RDY`

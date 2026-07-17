@@ -812,6 +812,152 @@ class TestBackwardCompatibility:
 
 
 # ---------------------------------------------------------------------------
+# Concurrency regression (PR-8 review correction)
+#
+# The architecture audit found a TOCTOU race: the state was derived BEFORE
+# BEGIN IMMEDIATE, so two concurrent transitioners both read 'discovery', both
+# validated against it, and both wrote — leaving a permanently inconsistent
+# chain in an append-only table. TG4 detected it afterwards; nothing could
+# repair it.
+#
+# Fixed by deriving the authoritative state ON the locked connection, verbatim
+# contract_lifecycle.next_version()'s contract (PR-3). These tests use REAL
+# threads and a real SQLite lock — a mocked test would prove nothing here.
+# ---------------------------------------------------------------------------
+
+class TestConcurrency:
+    def _race(self, db, fn, n=2):
+        import threading
+        barrier = threading.Barrier(n)
+        out = []
+
+        def go(i):
+            barrier.wait()          # maximise the overlap
+            try:
+                out.append(("ok", fn(i)))
+            except Exception as exc:
+                out.append(("refused", type(exc).__name__))
+
+        threads = [threading.Thread(target=go, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return out
+
+    def test_concurrent_identical_transitions_do_not_corrupt_the_chain(self, db):
+        """THE regression. Two writers, same family, same arc, at once."""
+        runs = []
+        for _ in range(2):
+            r = add_run(db)
+            admit(db, r)
+            runs.append(r)
+
+        results = self._race(db, lambda i: tg.transition_with_receipt(
+            db, "fam_a", "candidate", justifying_run_id=runs[i], actor="rohith",
+            reason="concurrent", family_meta=EDGE, thresholds=THRESHOLDS)["from_state"])
+
+        transitions = record.get_all_transitions(db)
+        assert len(transitions) == 2, "both writers should be serialised, not lost"
+
+        # The second writer must have SEEN the first: its from_state is
+        # 'candidate' (a legal re-pin), never a second 'discovery' -> 'candidate'.
+        from_states = sorted(t["from_state"] for t in transitions)
+        assert from_states == ["candidate", "discovery"], (
+            f"chain corrupted: {from_states} — the second writer read a stale state")
+
+        # And the ledger is internally consistent, which is what the audit's
+        # reproduction failed.
+        assert tg.validate_transition_governance(db) == []
+        assert rl.verify_chain(db).ok
+
+    def test_concurrent_transitions_each_get_exactly_one_receipt(self, db):
+        runs = []
+        for _ in range(2):
+            r = add_run(db)
+            admit(db, r)
+            runs.append(r)
+        self._race(db, lambda i: tg.transition_with_receipt(
+            db, "fam_a", "candidate", justifying_run_id=runs[i], actor="rohith",
+            reason="concurrent", family_meta=EDGE, thresholds=THRESHOLDS))
+        for t in record.get_all_transitions(db):
+            assert tg.get_receipt_for_transition(db, "fam_a", t["id"]) is not None
+
+    def test_a_concurrent_move_makes_a_promotion_refuse_not_reclassify(self, db):
+        """A promotion validated as candidate->validated must never land inside
+        the lock as a legal validated->validated re-pin and be recorded as a
+        family.transition. Refusing is the only correct answer."""
+        candidate(db)
+        r1, r2 = forward_run(db), forward_run(db)
+        admit(db, r1)
+        admit(db, r2)
+
+        results = self._race(db, lambda i: tg.promote_with_receipt(
+            db, "fam_a", "validated", justifying_run_id=[r1, r2][i], actor="rohith",
+            reason="forward confirms", family_meta=EDGE, thresholds=THRESHOLDS))
+
+        outcomes = sorted(o[0] for o in results)
+        assert outcomes == ["ok", "refused"], f"expected one to refuse, got {results}"
+        promos = tg.get_promotions(db, "fam_a")
+        assert len(promos) == 1, "exactly one promotion may be recorded"
+        assert record.derive_state_at(db, "fam_a")[0] == "validated"
+        assert tg.validate_transition_governance(db) == []
+
+    def test_serialised_writers_produce_a_valid_chain_under_load(self, db):
+        """Five concurrent writers; whatever interleaving occurs, the ledger must
+        end internally consistent."""
+        runs = []
+        for _ in range(5):
+            r = add_run(db)
+            admit(db, r)
+            runs.append(r)
+        self._race(db, lambda i: tg.transition_with_receipt(
+            db, "fam_a", "candidate", justifying_run_id=runs[i], actor="rohith",
+            reason="concurrent", family_meta=EDGE, thresholds=THRESHOLDS), n=5)
+
+        assert tg.validate_transition_governance(db) == []
+        assert rl.verify_chain(db).ok
+        # exactly one 'discovery' start; every subsequent write saw its predecessor
+        starts = [t for t in record.get_all_transitions(db) if t["from_state"] == "discovery"]
+        assert len(starts) == 1
+
+    def test_the_authoritative_read_happens_under_the_lock(self):
+        """Structural guard: BEGIN IMMEDIATE must precede the authoritative state
+        derivation inside transition_with_receipt(). Asserted by AST, so this
+        cannot silently regress back into a TOCTOU."""
+        import ast
+        src = (ROOT / "research" / "evidence_library" / "transition_governance.py").read_text(
+            encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "transition_with_receipt")
+        begin_line = derive_line = write_line = None
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Constant) and node.value == "BEGIN IMMEDIATE":
+                begin_line = node.lineno
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "attr", None)
+                if name == "derive_state_on_connection":
+                    derive_line = node.lineno
+                elif name == "append_transition_on_connection":
+                    write_line = node.lineno
+        assert begin_line and derive_line and write_line
+        assert begin_line < derive_line < write_line, (
+            "the authoritative state derivation must happen AFTER BEGIN IMMEDIATE "
+            "and BEFORE the write")
+
+    def test_transition_with_receipt_never_derives_state_off_the_lock(self):
+        """It must not call the connection-less record.derive_state_at()."""
+        import ast
+        src = (ROOT / "research" / "evidence_library" / "transition_governance.py").read_text(
+            encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "transition_with_receipt")
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "derive_state_at":
+                pytest.fail("transition_with_receipt() derives state off the write lock")
+
+
+# ---------------------------------------------------------------------------
 # The real ledger
 # ---------------------------------------------------------------------------
 
