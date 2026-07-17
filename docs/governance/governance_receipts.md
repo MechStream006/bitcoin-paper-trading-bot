@@ -197,7 +197,15 @@ in five years. It is worth more than the signatures.
 
 ---
 
-> **PR-8 (2026-07-17) — State Transition Governance.** `family.transition` /
+> **PR-8 — State Transition Governance. COMPLETE: merged to `main` 2026-07-17**
+> after an independent architecture audit. The audit found one merge-blocking
+> defect — a TOCTOU race in which the state was derived *before* `BEGIN
+> IMMEDIATE`, so two concurrent transitioners could both read a stale state and
+> both write, leaving a permanently inconsistent chain in an append-only table.
+> Corrected by deriving the authoritative state (and stamping `ts`) **on the
+> locked connection**, verbatim PR-3's `contract_lifecycle.next_version()`
+> pattern; guarded by real-thread concurrency tests and AST regression guards.
+> `family.transition` /
 > `family.promote` / `family.demote`, reserved as **discretionary** in the
 > taxonomy below since PR-1, are now emitted:
 > `research/evidence_library/transition_governance.py`, 68 tests. See

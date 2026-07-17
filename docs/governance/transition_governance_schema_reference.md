@@ -1,6 +1,9 @@
 # State Transition Governance — Schema & Replay Reference
 
-**Status:** Implemented (Governance Architecture PR-8, 2026-07-17).
+**Status:** Implemented, reviewed, corrected, and **merged to `main` 2026-07-17**
+(Governance Architecture PR-8) via `feat/state-transition-governance`. Approved
+after an independent architecture audit; the one required correction (the TOCTOU
+race, §3) was implemented and re-verified before merge.
 **Module:** `research/evidence_library/transition_governance.py`
 **Implements:** `governance_receipts.md` §2's `family.transition` / `family.promote`
 / `family.demote` decision types — reserved as **discretionary** since PR-1,
