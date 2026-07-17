@@ -716,6 +716,7 @@ def run_check(
     thresholds_path: Path,
     as_of: str | None = None,
     check_evidence_governance: bool = True,
+    check_transition_governance: bool = True,
 ) -> int:
     registry = _load_registry(registry_path)
     thresholds = _load_thresholds(thresholds_path)
@@ -739,6 +740,18 @@ def run_check(
         # written a receipt into it yet.
         evidence_governance.init_db(ledger_path)
         errors = errors + evidence_governance.validate_evidence_governance(ledger_path, registry)
+
+    # PR-8 (transition_governance.py): a second additive hook, appended after
+    # C1-C9 and EG1/EG2, never folded into or renumbering either. "TG"-prefixed
+    # errors are state-transition governance (receipts for family.transition/
+    # .promote/.demote), a distinct subsystem again. Skipped for --as-of for the
+    # same reason as EG: governance_receipts has no as_of-derivation equivalent,
+    # so applying it to a historical run would misreport rather than inform.
+    if check_transition_governance and as_of_norm is None:
+        import evidence_governance as _eg  # noqa: F401 — for init_db's schema-ensure
+        import transition_governance
+        _eg.init_db(ledger_path)
+        errors = errors + transition_governance.validate_transition_governance(ledger_path, registry)
 
     if errors:
         print(f"REGISTRY CHECK FAILED — {len(errors)} error(s):")
