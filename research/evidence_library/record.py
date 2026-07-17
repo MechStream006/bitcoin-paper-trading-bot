@@ -241,8 +241,8 @@ def append_gate_result(
     con.close()
 
 
-def append_transition(
-    db_path: Path | str,
+def append_transition_on_connection(
+    con: sqlite3.Connection,
     family_id: str,
     from_state: str,
     to_state: str,
@@ -250,26 +250,25 @@ def append_transition(
     justifying_run_id: str | None = None,
     actor: str = "operator",
     ts: str | None = None,
-) -> None:
+) -> int:
     """
-    Append a state transition to the append-only ledger.
+    The core of append_transition(), operating on a connection the CALLER
+    manages the transaction for (BEGIN/COMMIT/ROLLBACK are the caller's
+    responsibility -- this function issues no transaction control of its own).
+    Returns the new row's `id`.
 
-    Validates the arc against lifecycle.ALLOWED_TRANSITIONS before writing.
-    Raises ValueError for invalid arcs so no bad row ever enters the ledger.
+    Exists so a caller writing to another table in the same transaction
+    (PR-8's transition_governance.py, which must write a state_transitions row
+    and its governance_receipts row atomically -- neither may ever exist
+    without the other) can include the transition write without a second,
+    unshareable connection.
 
-    `ts` is ISO-8601 UTC; defaults to now. Pass an explicit value only for
-    bootstrap/migration backfill — normal callers should omit it.
-
-    PR-5 additions:
-      - A self-transition (from_state == to_state) is a RE-PIN: the family's
-        state is unchanged, but justifying_run_id points at new evidence.
-        It is legal (can_transition() permits X -> X structurally) but
-        REQUIRES a non-NULL justifying_run_id and a reason -- this is the
-        enforcement point for that requirement.
-      - Any transition INTO a run-requiring state (STATES_REQUIRING_RUN)
-        requires a non-NULL justifying_run_id, UNLESS `ts` is explicitly
-        supplied and predates _JUSTIFYING_RUN_ID_CUTOFF (the grandfathered
-        pre-ledger bootstrap history, and only that history).
+    Same validation and behavior as append_transition() -- this IS that logic,
+    not a reimplementation of it. Written exactly as PR-4 did for
+    receipt_ledger.append_receipt_on_connection(), and for the same reason:
+    duplicating the arc / re-pin / grandfathering rules into a second call
+    site is precisely the divergence between enforcement points that
+    evidence_reporting_architecture.md §7.3 warns against.
     """
     from lifecycle import can_transition, ALLOWED_TRANSITIONS as _AT, STATES_REQUIRING_RUN
     if not can_transition(from_state, to_state):
@@ -293,8 +292,7 @@ def append_transition(
         )
 
     ts = ts or datetime.now(timezone.utc).isoformat()
-    con = sqlite3.connect(db_path)
-    con.execute(
+    cur = con.execute(
         """
         INSERT INTO state_transitions
             (family_id, from_state, to_state, ts, reason, justifying_run_id, actor)
@@ -302,8 +300,67 @@ def append_transition(
         """,
         (family_id, from_state, to_state, ts, reason, justifying_run_id, actor),
     )
-    con.commit()
-    con.close()
+    return cur.lastrowid
+
+
+def append_transition(
+    db_path: Path | str,
+    family_id: str,
+    from_state: str,
+    to_state: str,
+    reason: str | None = None,
+    justifying_run_id: str | None = None,
+    actor: str = "operator",
+    ts: str | None = None,
+) -> int:
+    """
+    Append a state transition to the append-only ledger.
+
+    Validates the arc against lifecycle.ALLOWED_TRANSITIONS before writing.
+    Raises ValueError for invalid arcs so no bad row ever enters the ledger.
+
+    `ts` is ISO-8601 UTC; defaults to now. Pass an explicit value only for
+    bootstrap/migration backfill — normal callers should omit it.
+
+    PR-5 additions:
+      - A self-transition (from_state == to_state) is a RE-PIN: the family's
+        state is unchanged, but justifying_run_id points at new evidence.
+        It is legal (can_transition() permits X -> X structurally) but
+        REQUIRES a non-NULL justifying_run_id and a reason -- this is the
+        enforcement point for that requirement.
+      - Any transition INTO a run-requiring state (STATES_REQUIRING_RUN)
+        requires a non-NULL justifying_run_id, UNLESS `ts` is explicitly
+        supplied and predates _JUSTIFYING_RUN_ID_CUTOFF (the grandfathered
+        pre-ledger bootstrap history, and only that history).
+
+    PR-8: now a thin wrapper around append_transition_on_connection() (opens
+    its own connection and transaction, since most callers do not need to
+    share one). Behavior is unchanged; it additionally RETURNS the new row's
+    id, which every pre-PR-8 caller ignores.
+
+    This remains the RAW primitive: it emits no governance receipt. The
+    governed front door is transition_governance.transition_with_receipt().
+    A transition written through this function is reported as an ungoverned
+    transition (TG1) by transition_governance.validate_transition_governance()
+    -- the same relationship contract_lifecycle.activate_contract() (raw) has
+    to contract_receipts.activate_contract_with_receipt() (governed).
+    """
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            transition_id = append_transition_on_connection(
+                con, family_id, from_state, to_state,
+                reason=reason, justifying_run_id=justifying_run_id, actor=actor, ts=ts,
+            )
+        except Exception:
+            con.rollback()
+            raise
+        else:
+            con.commit()
+    finally:
+        con.close()
+    return transition_id
 
 
 def get_run(db_path: Path | str, run_id: str) -> dict | None:
@@ -395,19 +452,31 @@ def get_current_run(db_path: Path | str, family_id: str, run_kind: str, as_of: s
     return get_current_runs_by_lane(db_path, as_of=as_of).get(family_id, {}).get(run_kind)
 
 
-def derive_state_at(db_path: Path | str, family_id: str, as_of: str | None = None) -> tuple[str | None, str | None, str | None]:
+def derive_state_on_connection(
+    con: sqlite3.Connection, family_id: str, as_of: str | None = None
+) -> tuple[str | None, str | None, str | None]:
     """
-    Derive a family's state PURELY from state_transitions -- never from
-    registry.yaml. Returns (state, pinned_run_id, ts) for the last
-    transition at or before `as_of` (None = now / no filter), or
-    (None, None, None) if the family has no transitions at or before that
-    point (i.e. it is still 'discovery' and was never written to the
-    ledger, or as_of predates its first transition).
+    The core of derive_state_at(), operating on a caller-managed connection.
 
-    `as_of`, like get_current_runs_by_lane(), must already be a fully
-    end-of-day-normalised ISO datetime if it originated from a bare date.
+    PR-8: a caller that intends to WRITE a transition based on this state must
+    call this on a connection that already holds at least a RESERVED lock (i.e.
+    after BEGIN IMMEDIATE), so that two concurrent transitioners for the same
+    family are serialized by SQLite and never both read the same pre-transition
+    state -- the second caller's read only proceeds once the first has committed
+    (or rolled back), and therefore sees the first's transition (or doesn't, if
+    it rolled back).
+
+    This is verbatim the concurrency contract of contract_lifecycle.next_version()
+    (PR-3), and for the same reason: a value read outside the write lock and then
+    written inside it is a lost update waiting to happen. Reading it here, on the
+    locked connection, is what makes "validated before persistence" a property
+    rather than a convention.
+
+    Read-only callers with no intent to write (report.py, the evidence timeline,
+    point-in-time reconstruction) should keep using derive_state_at(), which
+    needs no lock.
     """
-    con = sqlite3.connect(db_path)
+    row_factory_was = con.row_factory
     con.row_factory = sqlite3.Row
     try:
         if as_of is not None:
@@ -424,10 +493,33 @@ def derive_state_at(db_path: Path | str, family_id: str, as_of: str | None = Non
             )
         row = cur.fetchone()
     finally:
-        con.close()
+        con.row_factory = row_factory_was
     if row is None:
         return None, None, None
     return row["to_state"], row["justifying_run_id"], row["ts"]
+
+
+def derive_state_at(db_path: Path | str, family_id: str, as_of: str | None = None) -> tuple[str | None, str | None, str | None]:
+    """
+    Derive a family's state PURELY from state_transitions -- never from
+    registry.yaml. Returns (state, pinned_run_id, ts) for the last
+    transition at or before `as_of` (None = now / no filter), or
+    (None, None, None) if the family has no transitions at or before that
+    point (i.e. it is still 'discovery' and was never written to the
+    ledger, or as_of predates its first transition).
+
+    `as_of`, like get_current_runs_by_lane(), must already be a fully
+    end-of-day-normalised ISO datetime if it originated from a bare date.
+
+    PR-8: a thin wrapper around derive_state_on_connection(); behavior is
+    unchanged. A caller deciding whether to WRITE a transition must NOT use this
+    -- see derive_state_on_connection()'s locking contract.
+    """
+    con = sqlite3.connect(db_path)
+    try:
+        return derive_state_on_connection(con, family_id, as_of)
+    finally:
+        con.close()
 
 
 def derive_all_states_at(db_path: Path | str, as_of: str | None = None) -> dict[str, tuple[str, str | None, str]]:

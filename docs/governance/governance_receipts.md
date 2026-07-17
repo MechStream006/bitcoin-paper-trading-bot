@@ -197,6 +197,30 @@ in five years. It is worth more than the signatures.
 
 ---
 
+> **PR-8 (2026-07-17) — State Transition Governance.** `family.transition` /
+> `family.promote` / `family.demote`, reserved as **discretionary** in the
+> taxonomy below since PR-1, are now emitted:
+> `research/evidence_library/transition_governance.py`, 68 tests. See
+> `transition_governance_schema_reference.md`. Every transition through the
+> governed front door (`transition_with_receipt()`) emits a hash-chained receipt
+> atomically with the transition row; the raw `record.append_transition()`
+> primitive remains for bootstrap/migration and its use is **detected** as an
+> ungoverned transition (`TG1`) rather than made impossible — the same
+> relationship `contract_lifecycle.activate_contract()` has to
+> `contract_receipts.activate_contract_with_receipt()`.
+>
+> **Promotion is verified, never derived.** Because `family.promote` is
+> discretionary, §5's `replay()` returns `envelope-verified`: preconditions are
+> re-checked, the choice itself is attested. There is deliberately no
+> `auto_promote()`, and a service actor is refused. A promotion therefore
+> survives a later threshold change — re-running today's thresholds against a
+> past decision would not audit it, it would silently replace it.
+>
+> Real ledger: 13 bootstrap transition receipts backfilled (13 → 26), chain
+> valid, `--check` clean. State reconstructed from the receipt chain matches
+> `state_transitions` exactly on **state and pinned run** — two independent
+> derivations of the same fact, asserted by `TG5`.
+
 ## 2. Decision taxonomy
 
 | `decision_type` | Class | Subject | `rule_hash` covers | Replay asserts |

@@ -721,7 +721,13 @@ class TestGovernanceValidationHook:
         registry_path.write_text(yaml.safe_dump({"fam_a": {"state": "candidate", "role": ["edge"], "pinned_run": run_id}}))
         thr_path = tmp_path / "thresholds.yaml"
         thr_path.write_text(yaml.safe_dump(thresholds))
-        rc = report.run_check(registry_path, db, thr_path)
+        # check_transition_governance=False scopes this test to what it is
+        # actually about: PR-6's EG hook. PR-8 added a second, independent hook
+        # (TG) which correctly flags this fixture's raw record.append_transition()
+        # call as an ungoverned transition. That is the new check working, not a
+        # regression in this one -- the fixture predates the governed front door.
+        # PR-8's own suite covers the TG hook directly.
+        rc = report.run_check(registry_path, db, thr_path, check_transition_governance=False)
         assert rc == 0
 
     def test_report_check_as_of_skips_evidence_governance(self, tmp_path, thresholds):
