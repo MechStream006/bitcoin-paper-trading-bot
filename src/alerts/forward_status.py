@@ -32,11 +32,14 @@ corrupt DB, unexpected schema) is captured and returned as a ForwardStatus whose
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
 import pathlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # The five signals collected by run_daily.py.  ivrv/atr may legitimately have no
 # run_log row on a data-unavailable day, so a count < 5 is a coverage note, not a
@@ -156,6 +159,16 @@ def summarize(db_path: str, now: Optional[datetime] = None) -> ForwardStatus:
         )
         signals: Dict[str, str] = {sid: st for sid, st in cur.fetchall()}
     except Exception as exc:  # corrupt DB, locked beyond timeout, bad schema
+        # Logged (not just returned) because this state is otherwise invisible
+        # between Telegram heartbeats. "unable to open database file" on a
+        # WAL-mode DB almost always means the *directory* lacks write access
+        # in the caller's process (WAL readers must open/lock the -wal/-shm
+        # sibling files even in mode=ro) -- check the caller's sandboxing
+        # (e.g. systemd ReadWritePaths=) before suspecting this file or code.
+        logger.warning(
+            "[forward_status] summarize(%s) failed: %s: %s",
+            db_path, type(exc).__name__, exc,
+        )
         return ForwardStatus.read_error(expected, f"{type(exc).__name__}: {exc}")
     finally:
         if conn is not None:

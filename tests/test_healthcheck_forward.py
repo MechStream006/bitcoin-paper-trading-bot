@@ -22,7 +22,9 @@ Run from repo root:
 from __future__ import annotations
 
 import importlib.util
+import os
 import sqlite3
+import stat
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -172,3 +174,99 @@ class TestForwardCheckWiring:
     def test_info_severity_does_not_alert(self):
         # INFO ranks below WARNING, so a missing forward DB never pages.
         assert hc._RANK[hc.INFO] < hc._RANK[hc.WARNING]
+
+
+# ---------------------------------------------------------------------------
+# Production bug regression (2026-07-18): WAL-mode reader needs directory
+# write access, not just file read access.
+#
+# Root cause: evidence_forward.db is journal_mode=WAL (init_forward_db.py).
+# Opening a WAL database in mode=ro still requires SQLite to open/lock the
+# -wal/-shm sibling files, which requires WRITE access to the *containing
+# directory* -- regardless of the SQL-level read-only mode. btcbot.service's
+# systemd sandbox (ProtectSystem=strict) originally granted
+# ReadWritePaths=/opt/btcbot/data only, leaving /opt/btcbot/research/data
+# (where evidence_forward.db lives) read-only inside that process's mount
+# namespace. Every summarize() call from the live HeartbeatService therefore
+# failed with "unable to open database file", while the identical file opened
+# via CLI or a standalone script (outside the sandbox) succeeded. Fixed by
+# adding that path to ReadWritePaths= in deploy/btcbot.service.
+#
+# POSIX-only: os.chmod on a directory does not enforce write-denial on
+# Windows, so this only reproduces on the Linux target the bot deploys to.
+# Also skipped for root, which bypasses directory permission checks.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(os.name != "posix", reason="directory permission enforcement is POSIX-only")
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses directory permission checks",
+)
+class TestForwardStatusReadOnlyDirectory:
+    def _mk_wal(self, path, rows):
+        c = sqlite3.connect(str(path))
+        c.execute("PRAGMA journal_mode = WAL")
+        c.execute(
+            "CREATE TABLE run_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " signal_id TEXT, run_date TEXT, fn_hash TEXT, status TEXT DEFAULT 'ok',"
+            " note TEXT, created_at TEXT, UNIQUE(signal_id,run_date));"
+        )
+        c.executemany(
+            "INSERT INTO run_log (signal_id, run_date, fn_hash, status) VALUES (?,?,?,?);",
+            [(s, d, "ab" * 32, st) for (s, d, st) in rows],
+        )
+        c.commit()
+        c.close()
+        # Drop the -wal/-shm side files so the next open must recreate them --
+        # this is precisely what forces SQLite to need directory write access.
+        for ext in ("-wal", "-shm"):
+            side = Path(str(path) + ext)
+            if side.exists():
+                side.unlink()
+
+    def test_readonly_directory_reproduces_unable_to_open(self, tmp_path):
+        db = tmp_path / "evidence_forward.db"
+        self._mk_wal(db, _rows(EXPECTED))
+
+        mode = tmp_path.stat().st_mode
+        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IXUSR)  # r-x, no write
+        try:
+            result = fs.summarize(str(db))
+        finally:
+            os.chmod(tmp_path, mode)
+
+        assert result.state == "error", result
+        assert "unable to open database file" in result.detail
+
+    def test_readwrite_directory_is_the_fix(self, tmp_path):
+        """Same DB, directory left writable (what ReadWritePaths= grants) -> ok.
+
+        Regression guard for the actual production fix: adding
+        /opt/btcbot/research/data to ReadWritePaths= in deploy/btcbot.service
+        is exactly equivalent to leaving this directory writable.
+        """
+        db = tmp_path / "evidence_forward.db"
+        self._mk_wal(db, _rows(EXPECTED))
+
+        result = fs.summarize(str(db))
+
+        assert result.state == "ok", result
+        assert result.n_ok == len(fs.CANONICAL_SIGNALS)
+
+    def test_failure_is_logged(self, tmp_path, caplog):
+        """The read-error path must log. Previously silent -- only visible in
+        the Telegram heartbeat text, once per ~30 min, with no correlation to
+        a systemd/sandbox change.
+        """
+        db = tmp_path / "evidence_forward.db"
+        self._mk_wal(db, _rows(EXPECTED))
+
+        mode = tmp_path.stat().st_mode
+        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IXUSR)
+        try:
+            with caplog.at_level("WARNING", logger="src.alerts.forward_status"):
+                fs.summarize(str(db))
+        finally:
+            os.chmod(tmp_path, mode)
+
+        assert any("summarize" in rec.message for rec in caplog.records)

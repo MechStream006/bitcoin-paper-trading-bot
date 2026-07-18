@@ -33,8 +33,15 @@ SyslogIdentifier=btcbot
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-# data/ must be writable (DB, logs, backups)
-ReadWritePaths=/opt/btcbot/data
+# data/ must be writable (DB, logs, backups).
+# research/data must ALSO be writable even though this process only ever
+# reads evidence_forward.db (via alerts.forward_status, mode=ro): that DB is
+# WAL-journaled, and a WAL reader must open/lock the -wal/-shm sibling files,
+# which requires write access to the containing directory regardless of the
+# SQL-level mode. Without this, summarize() fails with sqlite3.OperationalError:
+# "unable to open database file" even though the file, its permissions, and
+# summarize() itself are all fine in isolation.
+ReadWritePaths=/opt/btcbot/data /opt/btcbot/research/data
 
 [Install]
 WantedBy=multi-user.target
