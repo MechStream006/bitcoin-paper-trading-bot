@@ -271,9 +271,17 @@ class TestDryRun:
     ) -> None:
         """Computable signals return 'dry-run'; DVOL-unavailable IVRV returns 'unavailable'."""
         fake_closes = _make_closes(300)
+        fake_ohlcv  = _make_ohlcv(300)
         run_date    = fake_closes.index[-1]
 
         monkeypatch.setattr(_run_daily, 'load_daily_closes', lambda *a, **kw: fake_closes)
+        # g3_atr_expansion enabled since Phase 5 activation (2026-07-19), so it
+        # now participates in this test. Mock its OHLCV input the same way
+        # test_GA03 does, rather than relying on real research/data/raw/spot
+        # files: those are present on a full checkout but deliberately absent
+        # from the research Docker image (its own INV-1 check), which made
+        # this outcome environment-dependent before this fix.
+        monkeypatch.setattr(_run_daily, 'load_daily_ohlcv', lambda *a, **kw: fake_ohlcv)
         def _dvol_miss(*a, **kw): raise DataUnavailableError("no dvol in test")
         monkeypatch.setattr(_run_daily, 'load_daily_dvol', _dvol_miss)
 
@@ -283,8 +291,6 @@ class TestDryRun:
         assert results.get('g1_market_regime_sma200') == 'dry-run'
         assert results.get('g3_momentum_tsmom')       == 'dry-run'
         assert results.get('ivrv_vrp_spread')         == 'unavailable'
-        # g3_atr_expansion enabled since Phase 5 activation (2026-07-19) —
-        # now computes alongside the other signals rather than being absent.
         assert results.get('g3_atr_expansion')        == 'dry-run'
 
     def test_DR03_atr_dry_run_computes_when_enabled(

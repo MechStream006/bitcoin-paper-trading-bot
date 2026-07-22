@@ -154,6 +154,17 @@ END;
 # Created separately from _SCHEMA_SQL (rather than folded into it) so
 # init_db() can DROP the old trigger and CREATE this one in a well-defined
 # order for both fresh and pre-existing databases.
+#
+# RAISE() error-message arguments below are static string literals only --
+# no `||` concatenation of OLD./NEW. values. Older SQLite (observed: the
+# version bundled with GitHub Actions' hosted Python 3.10 image) rejects
+# concatenation there with "near '||': syntax error", even though newer
+# SQLite (3.51.x, this dev machine) accepts it. The dynamic old/new values
+# aren't lost: contract_lifecycle.py's Python-level pre-checks (which run
+# first on every call through this module) raise the detailed message; this
+# trigger is only the last-resort backstop for a write that bypasses Python
+# entirely, where a static 'CONTRACT_TAMPER: ...' prefix is all any caller
+# or test asserts on.
 _GUARD_TRIGGER_SQL = """
 CREATE TRIGGER IF NOT EXISTS trg_contracts_guard_update
 BEFORE UPDATE ON contract_registry
@@ -196,9 +207,7 @@ BEGIN
               OLD.activation_receipt_status IS NULL
            OR (OLD.activation_receipt_status = 'PENDING_RECEIPT' AND NEW.activation_receipt_status = 'RECORDED')
          )
-        THEN RAISE(ABORT, 'CONTRACT_TAMPER: illegal activation_receipt_status transition '
-                          || COALESCE(OLD.activation_receipt_status,'NULL') || ' -> '
-                          || COALESCE(NEW.activation_receipt_status,'NULL'))
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: illegal activation_receipt_status transition')
     END;
     SELECT CASE
         WHEN NEW.retirement_receipt_status IS NOT OLD.retirement_receipt_status
@@ -206,9 +215,7 @@ BEGIN
               OLD.retirement_receipt_status IS NULL
            OR (OLD.retirement_receipt_status = 'PENDING_RECEIPT' AND NEW.retirement_receipt_status = 'RECORDED')
          )
-        THEN RAISE(ABORT, 'CONTRACT_TAMPER: illegal retirement_receipt_status transition '
-                          || COALESCE(OLD.retirement_receipt_status,'NULL') || ' -> '
-                          || COALESCE(NEW.retirement_receipt_status,'NULL'))
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: illegal retirement_receipt_status transition')
     END;
     SELECT CASE
         WHEN OLD.retired_at IS NOT NULL AND NEW.retired_at IS NOT OLD.retired_at
@@ -220,7 +227,7 @@ BEGIN
           OR (OLD.phase = 'active'     AND NEW.phase IN ('superseded','retired'))
           OR (OLD.phase = 'superseded' AND NEW.phase = 'retired')
         )
-        THEN RAISE(ABORT, 'CONTRACT_TAMPER: illegal phase transition ' || OLD.phase || ' -> ' || NEW.phase)
+        THEN RAISE(ABORT, 'CONTRACT_TAMPER: illegal phase transition')
     END;
 END;
 """

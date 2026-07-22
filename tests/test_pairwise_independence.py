@@ -410,11 +410,27 @@ class TestRegistryGate:
 
 
 class TestRealLedger:
-    """The live governance ledger must remain clean. Read-only."""
+    """The live governance ledger must remain clean. Read-only.
+
+    research/evidence_library/ledger.db is gitignored -- a local/production
+    artifact never checked into git, so it is absent on a fresh checkout
+    (CI, or any dev clone). sqlite3.connect() silently CREATES an empty file
+    at a missing path, so these tests must check existence themselves
+    *before* calling anything that would open the path -- otherwise a run
+    against a fresh checkout leaves a phantom empty ledger.db behind, which
+    then makes test_readiness_gate.py's own (pre-existing) existence guard
+    for the same path see a false "exists" and fail on the empty file
+    instead of skipping. Matches the existing skip convention in
+    tests/test_readiness_gate.py::TestBackwardCompat.
+    """
+
+    _LEDGER = EVL / "ledger.db"
 
     def test_real_ledger_check_still_passes(self):
+        if not self._LEDGER.exists():
+            pytest.skip("real ledger.db not present (fresh checkout / CI)")
         import report
-        rc = report.run_check(EVL / "registry.yaml", EVL / "ledger.db",
+        rc = report.run_check(EVL / "registry.yaml", self._LEDGER,
                               EVL / "thresholds.yaml")
         assert rc == 0, "Proposal 1 must not disturb the existing clean --check"
 
@@ -422,5 +438,7 @@ class TestRealLedger:
         """Context for the above: the gate is vacuous today (zero Validated
         families), which is exactly why it is safe to land now and why it
         must be landed BEFORE the first promotion, per CLAUDE.md §16."""
-        states = record.derive_all_states_at(EVL / "ledger.db")
+        if not self._LEDGER.exists():
+            pytest.skip("real ledger.db not present (fresh checkout / CI)")
+        states = record.derive_all_states_at(self._LEDGER)
         assert not [f for f, (s, *_) in states.items() if s == "validated"]
