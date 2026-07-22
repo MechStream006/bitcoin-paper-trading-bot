@@ -49,6 +49,14 @@ HEARTBEAT_UNIVERSE_WARN = os.getenv("HEARTBEAT_UNIVERSE_WARN", "1") not in ("0",
 # HEARTBEAT_JOB_AGES=0 to disable the jobs line and job-stall escalation.
 HEARTBEAT_JOB_AGES = os.getenv("HEARTBEAT_JOB_AGES", "1") not in ("0", "false", "False", "")
 
+# In-process Prometheus metrics exporter (ADR-0001 Phase 2). Binds
+# 127.0.0.1 only -- that bind address is hardcoded in
+# src/observability/metrics_exporter.py, not settable via env, so a
+# misconfiguration here can never widen exposure beyond loopback. Set
+# METRICS_EXPORTER_ENABLED=0 to disable at runtime (kill-switch, no redeploy).
+METRICS_EXPORTER_ENABLED = os.getenv("METRICS_EXPORTER_ENABLED", "1") not in ("0", "false", "False", "")
+METRICS_EXPORTER_PORT = int(os.getenv("METRICS_EXPORTER_PORT", "9108"))
+
 # Platform discriminator — "testnet" or "mainnet".
 # Default is "testnet" (safe-fail: evidence never silently promoted to mainnet
 # status by misconfiguration). Set PLATFORM=mainnet in .env only after the

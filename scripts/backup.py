@@ -16,6 +16,7 @@ Usage:
     python scripts/backup.py --fwd-hg [--dry-run]
     python scripts/backup.py --ledger [--dry-run]
     python scripts/backup.py --all [--dry-run]   # backs up all four databases
+    python scripts/backup.py --all --encrypt     # + encrypt for off-host (BK3)
 
 Environment variable:
     BACKUP_OFFHOST_CMD  Optional shell template with {file} and {manifest}
@@ -141,7 +142,7 @@ def _apply_retention(backup_dir: Path, now: datetime, dry_run: bool,
 
 
 def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
-               db_label: str = "btc_trading") -> int:
+               db_label: str = "btc_trading", encrypt: bool = False) -> int:
     if not db_path.exists():
         print(f"[error] DB not found: {db_path}", file=sys.stderr)
         return 1
@@ -199,10 +200,39 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
     print(f"[backup] sha256={sha[:16]}...  size={file_size // 1024} KB")
     print(f"[backup] manifest: {manifest_file.name}")
 
+    # --- Optional encryption before the artifact leaves the host (BK3) ------
+    # When --encrypt is set, the off-host command ships the CIPHERTEXT and its
+    # .age-manifest.json instead of the plaintext DB. The local plaintext
+    # backup is deliberately left in place: it is the fast on-host restore
+    # path, and BK3 is about what leaves the host, not what lives on it.
+    #
+    # Fail-closed: if encryption is requested and fails, the off-host transfer
+    # is SKIPPED entirely rather than falling back to shipping plaintext. A
+    # silent downgrade to unencrypted transfer would be the worst possible
+    # outcome -- it looks like success while defeating the whole control.
+    xfer_file, xfer_manifest = backup_file, manifest_file
+    if encrypt:
+        try:
+            import offhost_backup
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import offhost_backup
+        try:
+            recipient = _load_env_var("BACKUP_AGE_RECIPIENT")
+            ct, age_mf = offhost_backup.encrypt_backup(backup_file, recipient)
+            xfer_file, xfer_manifest = ct, age_mf
+            print(f"[backup] encrypted: {ct.name} ({ct.stat().st_size // 1024} KB)")
+        except Exception as exc:
+            print(f"[error] encryption failed: {exc}", file=sys.stderr)
+            print("[error] off-host transfer SKIPPED — refusing to ship plaintext",
+                  file=sys.stderr)
+            _apply_retention(backup_dir, now, dry_run=False, db_label=db_label)
+            return 1
+
     # Optional off-host transfer (non-fatal if it fails)
     offhost_cmd = _load_env_var("BACKUP_OFFHOST_CMD")
     if offhost_cmd:
-        cmd = offhost_cmd.format(file=backup_file, manifest=manifest_file)
+        cmd = offhost_cmd.format(file=xfer_file, manifest=xfer_manifest)
         print(f"[backup] off-host: {cmd}")
         result = subprocess.run(cmd, shell=True, timeout=300)
         if result.returncode != 0:
@@ -247,6 +277,12 @@ def main() -> int:
         "--dry-run", action="store_true",
         help="Show what would happen without writing anything",
     )
+    parser.add_argument(
+        "--encrypt", action="store_true",
+        help="Encrypt each artifact with age before off-host transfer (BK3). "
+             "Requires BACKUP_AGE_RECIPIENT. Fail-closed: if encryption fails, "
+             "the off-host transfer is skipped rather than shipping plaintext.",
+    )
     args = parser.parse_args()
 
     rc_evidence = 0
@@ -258,7 +294,7 @@ def main() -> int:
         evidence_db  = ROOT / "research" / "data" / "forward_evidence.db"
         evidence_dir = ROOT / "data" / "evidence-backups"
         rc_evidence  = run_backup(evidence_db, evidence_dir, args.dry_run,
-                                  db_label="evidence")
+                                  db_label="evidence", encrypt=args.encrypt)
         if args.evidence and not args.backup_all:
             return rc_evidence
 
@@ -268,6 +304,7 @@ def main() -> int:
             ROOT / "data" / "evidence-fwd-backups",
             args.dry_run,
             db_label="fwd_hg",
+            encrypt=args.encrypt,
         )
         if args.fwd_hg and not args.backup_all:
             return rc_fwd_hg
@@ -278,13 +315,14 @@ def main() -> int:
             ROOT / "data" / "ledger-backups",
             args.dry_run,
             db_label="ledger",
+            encrypt=args.encrypt,
         )
         if args.ledger and not args.backup_all:
             return rc_ledger
 
     if args.backup_all or not (args.evidence or args.fwd_hg or args.ledger):
         rc_trading = run_backup(args.db_path, args.backup_dir, args.dry_run,
-                                db_label="btc_trading")
+                                db_label="btc_trading", encrypt=args.encrypt)
 
     if args.backup_all:
         return max(rc_trading, rc_evidence, rc_fwd_hg, rc_ledger)

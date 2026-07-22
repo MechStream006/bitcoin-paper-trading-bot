@@ -283,7 +283,9 @@ class TestDryRun:
         assert results.get('g1_market_regime_sma200') == 'dry-run'
         assert results.get('g3_momentum_tsmom')       == 'dry-run'
         assert results.get('ivrv_vrp_spread')         == 'unavailable'
-        assert 'g3_atr_expansion' not in results   # disabled in production config
+        # g3_atr_expansion enabled since Phase 5 activation (2026-07-19) —
+        # now computes alongside the other signals rather than being absent.
+        assert results.get('g3_atr_expansion')        == 'dry-run'
 
     def test_DR03_atr_dry_run_computes_when_enabled(
         self, monkeypatch, tmp_path: pathlib.Path,
@@ -387,23 +389,26 @@ class TestDryRun:
 # ===========================================================================
 
 class TestAtrGating:
-    def test_GA01_production_config_has_atr_disabled(self) -> None:
-        """Phase 4 safety gate: g3_atr_expansion must be enabled:false in production config."""
+    def test_GA01_production_config_has_atr_enabled(self) -> None:
+        """Phase 5 activation gate: g3_atr_expansion must be enabled:true in production
+        config (activated 2026-07-19; see collection_config.yaml's own comment).
+        A redeploy must not silently revert this to disabled."""
         cfg     = yaml.safe_load(_run_daily._CONFIG_PATH.read_text(encoding='utf-8'))
         signals = cfg.get('signals', {})
         assert 'g3_atr_expansion' in signals, (
             "g3_atr_expansion missing from collection_config.yaml signals section"
         )
         atr_cfg = signals['g3_atr_expansion']
-        assert atr_cfg.get('enabled', False) is False, (
-            "g3_atr_expansion must have enabled: false in Phase 4 — "
-            "set to true only at Phase 5 activation"
+        assert atr_cfg.get('enabled', False) is True, (
+            "g3_atr_expansion must have enabled: true — Phase 5 activation "
+            "(2026-07-19) is in effect"
         )
 
-    def test_GA02_atr_excluded_from_results_when_disabled(
+    def test_GA02_atr_included_in_results_when_enabled(
         self, monkeypatch, db_path: pathlib.Path,
     ) -> None:
-        """With enabled:false (production config), g3_atr_expansion not in run_all() results."""
+        """With enabled:true (production config, Phase 5), g3_atr_expansion appears
+        in run_all() results, and core signals remain unaffected either way."""
         fake_closes = _make_closes(300)
         run_date    = fake_closes.index[-1]
 
@@ -416,7 +421,7 @@ class TestAtrGating:
 
         results = _run_daily.run_all(run_date, db_path=db_path)
 
-        assert 'g3_atr_expansion' not in results
+        assert 'g3_atr_expansion' in results
         # Core signals must be unaffected by the ATR gate check
         assert results['h5_vol_regime']           == 'ok'
         assert results['g1_market_regime_sma200'] == 'ok'

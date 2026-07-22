@@ -22,6 +22,7 @@ PR-5 (docs/governance/evidence_reporting_architecture.md) additions:
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -71,6 +72,47 @@ CREATE TABLE IF NOT EXISTS state_transitions (
     justifying_run_id   TEXT REFERENCES runs(run_id),
     actor               TEXT DEFAULT 'operator'
 );
+
+-- Proposal 1 (CLAUDE.md §16): pairwise correlation measurements between
+-- signal families, the substrate for the Validated independence gate
+-- (thresholds.yaml validated.<role>.max_pairwise_r, frozen at 0.70).
+--
+-- The CHECK enforces canonical lexicographic ordering, which makes a pair
+-- have exactly one representation: (A,B) and (B,A) cannot both exist, so a
+-- lookup can never miss a measurement because it was recorded "the other way
+-- round". Callers must sort; append_pairwise_r() refuses unsorted input.
+--
+-- Append-only, like every other governance table here: a correlation is a
+-- measurement made at a point in time, and re-measuring appends a new row
+-- rather than editing history. Readers take the latest row per pair.
+CREATE TABLE IF NOT EXISTS pairwise_r (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    family_id_a TEXT NOT NULL,
+    family_id_b TEXT NOT NULL,
+    r           REAL NOT NULL,
+    method      TEXT NOT NULL,
+    actor       TEXT NOT NULL DEFAULT 'operator',
+    CHECK (family_id_a < family_id_b)   -- canonical ordering, prevents duplicates
+);
+
+CREATE INDEX IF NOT EXISTS idx_pairwise_r_pair
+    ON pairwise_r(family_id_a, family_id_b);
+
+-- Append-only enforced at the DB layer, matching the governance_receipts and
+-- contract_registry precedent: the guarantee must not depend on every caller
+-- going through the Python API.
+CREATE TRIGGER IF NOT EXISTS trg_pairwise_r_no_update
+BEFORE UPDATE ON pairwise_r
+BEGIN
+    SELECT RAISE(ABORT, 'pairwise_r is append-only: UPDATE forbidden');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_pairwise_r_no_delete
+BEFORE DELETE ON pairwise_r
+BEGIN
+    SELECT RAISE(ABORT, 'pairwise_r is append-only: DELETE forbidden');
+END;
 
 -- Law 3: "current run for (family, lane) = latest run in that lane."
 -- The ONLY sanctioned way to select a "current" run. Explicit run_id
@@ -361,6 +403,110 @@ def append_transition(
     finally:
         con.close()
     return transition_id
+
+
+def append_pairwise_r(
+    db_path: Path | str,
+    family_id_a: str,
+    family_id_b: str,
+    r: float,
+    method: str,
+    actor: str = "operator",
+    ts: str | None = None,
+) -> int:
+    """
+    Record one pairwise correlation measurement. Returns the new row id.
+
+    Proposal 1 (CLAUDE.md §16, step 2). Append-only: re-measuring a pair
+    appends a new row; readers take the latest.
+
+    Raises ValueError if `family_id_a >= family_id_b` -- the caller must sort.
+    This is deliberately the caller's job rather than something this function
+    silently fixes: swapping the arguments would also swap the meaning the
+    caller believes it is recording, and `r` is symmetric while the operator's
+    intent may not be (they think "X against Y"). Refusing is honest; silently
+    reordering hides a caller bug that would otherwise surface here.
+    """
+    if not isinstance(r, (int, float)) or math.isnan(float(r)):
+        raise ValueError(
+            f"r must be a real number, got {r!r}. A NaN correlation is not a "
+            "measurement -- it is a failed computation, and recording it would "
+            "let an unmeasurable pair masquerade as a measured one."
+        )
+    r = float(r)
+    if not -1.0 <= r <= 1.0:
+        raise ValueError(f"r must lie in [-1, 1], got {r}")
+    if family_id_a == family_id_b:
+        raise ValueError(
+            f"family_id_a and family_id_b are both {family_id_a!r}: a family's "
+            "correlation with itself is not an independence measurement"
+        )
+    if family_id_a >= family_id_b:
+        raise ValueError(
+            f"family_id_a must sort before family_id_b (got {family_id_a!r}, "
+            f"{family_id_b!r}). Pass the lexicographically lesser id as `a` -- "
+            "canonical ordering is what makes a pair have exactly one row."
+        )
+    if not method or not str(method).strip():
+        raise ValueError(
+            "method is required: a correlation without a stated method is not "
+            "reproducible, and reproducibility is the point of recording it"
+        )
+
+    ts = ts or datetime.now(timezone.utc).isoformat()
+    con = sqlite3.connect(str(db_path))
+    try:
+        cur = con.execute(
+            "INSERT INTO pairwise_r (ts, family_id_a, family_id_b, r, method, actor) "
+            "VALUES (?,?,?,?,?,?)",
+            (ts, family_id_a, family_id_b, r, str(method).strip(), actor),
+        )
+        con.commit()
+        return int(cur.lastrowid)
+    finally:
+        con.close()
+
+
+def get_pairwise_r(
+    db_path: Path | str,
+    as_of: str | None = None,
+) -> dict[tuple[str, str], dict]:
+    """
+    Latest measurement per canonical pair, keyed (family_id_a, family_id_b).
+
+    Deterministic and replay-safe:
+      * `as_of` filters to measurements that existed at that instant, so a
+        historical `--as-of` check evaluates the independence evidence the
+        operator actually had, not evidence recorded later.
+      * "Latest" breaks ties on (ts, id) -- the same explicit tiebreak
+        PR-5 introduced for `current_run_per_lane`, so two rows sharing a
+        timestamp still resolve to one deterministic winner rather than
+        whichever SQLite happened to return first.
+    """
+    con = sqlite3.connect(str(db_path))
+    try:
+        sql = "SELECT id, ts, family_id_a, family_id_b, r, method, actor FROM pairwise_r"
+        params: tuple = ()
+        if as_of:
+            sql += " WHERE ts <= ?"
+            params = (as_of,)
+        sql += " ORDER BY ts ASC, id ASC"
+        rows = con.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        # Ledger predates Proposal 1. Absence of the table is not an error
+        # here; the callers decide what missing coverage means.
+        return {}
+    finally:
+        con.close()
+
+    latest: dict[tuple[str, str], dict] = {}
+    for rid, ts, a, b, r, method, actor in rows:
+        # Ascending order => the last write for a pair wins.
+        latest[(a, b)] = {
+            "id": rid, "ts": ts, "family_id_a": a, "family_id_b": b,
+            "r": float(r), "method": method, "actor": actor,
+        }
+    return latest
 
 
 def get_run(db_path: Path | str, run_id: str) -> dict | None:

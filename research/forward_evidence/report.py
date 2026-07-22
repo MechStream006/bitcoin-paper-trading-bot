@@ -63,7 +63,20 @@ def _sharpe(returns: list[float]) -> float:
 
 
 def _dsr_proxy(returns: list[float], n_trials: int = 38) -> float:
-    """Quick DSR using governance.py logic."""
+    """Quick, NON-GOVERNANCE DSR for the human-readable H6 summary only.
+
+    This is a display proxy, not the governance statistic. Its default
+    n_trials=38 and the 0.95 cutoff in the caller are DISCOVERY-SCREEN
+    parameters (see research/evidence/run_dvol_family.py), and it uses a
+    sr_std*0.5 dispersion heuristic rather than the real cross-trial std.
+
+    The CANONICAL governance denominator is n_trials=34 (FROZEN) — see
+    research/forward_evidence/compute_dsr_for_registration.py and
+    docs/governance/n_trials_denominator_reconciliation.md. The Validated
+    gate never consumes this proxy; do not read the '38' here as the
+    governance value. The number is intentionally left unchanged so this
+    display is not mistaken for a governance-aligned DSR.
+    """
     try:
         sys.path.insert(0, str(_HERE.parent / "evidence"))
         from governance import deflated_sr

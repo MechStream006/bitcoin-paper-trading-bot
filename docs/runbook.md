@@ -135,6 +135,87 @@ sudo systemctl start btcbot
 sudo systemctl status btcbot
 ```
 
+**After any restore, check whether the schema needs to catch up** — a backup
+taken before the latest `migrate.py` shipped will restore at its old
+`user_version`:
+
+```bash
+python scripts/migrate.py --db-path /opt/btcbot/data/btc_trading.db --dry-run
+# if it shows pending steps:
+python scripts/migrate.py --db-path /opt/btcbot/data/btc_trading.db
+```
+
+---
+
+## Encrypted off-host backup (ADR-0001 §12 BK3)
+
+Full design, key management, and DR procedure:
+`docs/ops/offhost-backup.md`. **Not enabled in production yet** — see that
+document §8 for the gated enable sequence.
+
+```bash
+# Encrypt one artifact manually (host side)
+python scripts/offhost_backup.py encrypt data/ledger-backups/ledger_<ts>.db
+
+# Audit an off-host copy WITHOUT the private key — safe to run anywhere
+python scripts/offhost_backup.py verify /srv/backups/ledger_<ts>.db.age
+
+# Backup + encrypt in one step (what the unit will eventually run)
+python scripts/backup.py --all --encrypt
+```
+
+**Key facts, in one place:**
+- The host holds only the **public** recipient (`age1...`). The private
+  identity (`AGE-SECRET-KEY-1...`) must **never** be on the production host.
+- **Losing the private key makes every off-host backup permanently
+  unrecoverable.** Keep two independent copies (password manager + paper).
+- `verify` proves a ciphertext is *intact*, **not** that it is *decryptable*.
+  Only a real decrypt drill proves the key still works — do one quarterly.
+- Encryption is **fail-closed**: if it fails, the off-host transfer is
+  skipped rather than shipping plaintext.
+
+---
+
+## Restore drill (quarterly — ADR-0001 §12 BK2)
+
+BK2: *"Backups are worthless until a restore drill proves them."* Full
+write-up of the first drill: `docs/ops/restore-drill-2026-07-19.md`.
+
+Repeat quarterly, **on the production host**, against a real backup
+artifact, restoring into an isolated scratch path (never the live DB path):
+
+```bash
+DRILL=/tmp/restore-drill-$(date +%Y%m%d)
+mkdir -p "$DRILL"
+
+# 1. Restore the most recent real artifacts into isolation
+python scripts/restore.py /opt/btcbot/data/backups/btc_trading_<ts>.db \
+    --db-path "$DRILL/restored_btc_trading.db" --skip-service
+python scripts/restore.py /opt/btcbot/data/ledger-backups/ledger_<ts>.db \
+    --db-path "$DRILL/restored_ledger.db" --skip-service
+
+# 2. Governance chain — the two checks BK2 names explicitly
+cd research/evidence_library
+python -c "import receipt_ledger; print(receipt_ledger.verify_chain(r'$DRILL/restored_ledger.db'))"
+python -c "
+from pathlib import Path
+import report
+print(report.run_check(Path('registry.yaml'), Path(r'$DRILL/restored_ledger.db'), Path('thresholds.yaml')))
+"
+
+# 3. Application-level check against the restored trading copy
+python scripts/healthcheck.py --db-path "$DRILL/restored_btc_trading.db" \
+    --no-forward-check --no-telegram --full-integrity
+
+# 4. Clean up
+rm -rf "$DRILL"
+```
+
+Pass criteria: both restores complete, `verify_chain().ok == True`,
+`run_check(...) == 0`, `healthcheck.py`'s `integrity` check is `OK` (ignore
+`db_liveness`/`backup` — they report on the restored *file's* age/location,
+not the drill's success).
+
 ---
 
 ## Health check
@@ -169,6 +250,82 @@ Check timer status:
 
 ```bash
 sudo systemctl list-timers btcbot-healthcheck.timer
+```
+
+---
+
+## Daily evidence certifier
+
+Certifies each completed UTC collection day and writes a verdict to
+`daily_certifier_log`. This is the gate CLAUDE.md refers to when it says
+evidence accumulation requires "the daily certifier reports green".
+
+Runs at **01:30 UTC** via `btcbot-certify.timer`.
+
+```bash
+# Timer status / next run
+sudo systemctl list-timers btcbot-certify.timer
+
+# Logs (verdict JSON is printed in full)
+sudo journalctl -u btcbot-certify.service -n 100 --no-pager
+
+# Manual run of the scheduled job (safe: skips days already certified)
+sudo -u btcbot /opt/btcbot/venv/bin/python scripts/certify_catchup.py
+
+# See what it WOULD do, without certifying anything
+sudo -u btcbot /opt/btcbot/venv/bin/python scripts/certify_catchup.py --dry-run
+
+# Re-certify one specific day (deliberate override — the wrapper never does this)
+sudo -u btcbot /opt/btcbot/venv/bin/python scripts/certify_day.py --date 2026-07-18
+
+# Backfill a longer outage (bounded lookback, oldest first)
+sudo -u btcbot /opt/btcbot/venv/bin/python scripts/certify_catchup.py --lookback 30
+```
+
+### Reading the result — the unit state is NOT the verdict
+
+| Verdict | `certify_day.py` exit | Unit state | Meaning |
+|---|---|---|---|
+| GREEN | 0 | success | Day is admissible evidence |
+| AMBER | 1 | **success** | Requires adjudication before research use |
+| RED | 2 | **success** | Day is non-admissible |
+| error | 3 | **failed** | Certifier could not reach a verdict |
+
+`SuccessExitStatus=0 1 2` is deliberate. The job's purpose is to *produce* a
+verdict, not to produce a particular one. **While `PLATFORM=testnet`, C7 marks
+every day AMBER by policy** — without this the unit would report `failed` every
+single day and the operator would learn to ignore it.
+
+**So: a green unit does not mean a green day.** Read the verdict from the DB:
+
+```bash
+sudo -u btcbot sqlite3 -header -column /opt/btcbot/data/btc_trading.db \
+  "SELECT day, verdict, platform FROM daily_certifier_log ORDER BY day DESC LIMIT 14;"
+```
+
+AMBER and RED days also send a Telegram alert (most recent day only — a
+backfill after an outage suppresses alerts for older days to avoid an alert
+storm, but still records every verdict).
+
+### Missed executions
+
+`Persistent=true` replays only **one** missed timer activation, which would
+leave a multi-day outage permanently uncertified. `certify_catchup.py` closes
+that gap: it certifies every day in a 7-day lookback that has collection data
+but no verdict yet. Days with no `collection_metrics` rows are skipped, not
+marked RED — an outage is a gap in the collection record (already reported by
+the heartbeat and healthcheck), not a data-quality verdict.
+
+For an outage longer than 7 days, pass a larger `--lookback`.
+
+### Requires schema v4+
+
+The certifier needs `collection_metrics` (v2/v3) and `daily_certifier_log` (v4).
+On an older database it exits 3 and the unit correctly reports `failed`. Fix by
+running the migration, not by editing the unit:
+
+```bash
+python scripts/migrate.py --dry-run && python scripts/migrate.py
 ```
 
 ---

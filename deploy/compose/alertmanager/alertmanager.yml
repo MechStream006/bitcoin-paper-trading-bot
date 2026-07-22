@@ -1,0 +1,51 @@
+# Alertmanager config for the BTC bot observability stack (ADR-0001 §15.6).
+#
+# Secret handling (S2): the bot token is NEVER in this file. It's read from
+# /etc/alertmanager/secrets/telegram_bot_token, a file bind-mounted read-only
+# (see docker-compose.yml) from deploy/compose/alertmanager/secrets/ --
+# gitignored, operator-provisioned, distinct from the bot's own .env.
+# Confirmed supported: `bot_token_file` validated against alertmanager
+# v0.28.1 via `amtool check-config` before this file was written.
+#
+# chat_id below is NOT secret in the same sense as the bot token (it grants
+# no send-as-bot capability on its own) so it is committed directly, same
+# as the placeholder convention in .env.example. Replace it with the real
+# TELEGRAM_CHANNEL_ID before deploying.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: telegram-alerts
+  group_by: ['alertname']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Watchdog never notifies -- see prometheus/alert_rules.yml header.
+    # Its absence from Prometheus's firing list is the signal, not a message.
+    - match:
+        alertname: Watchdog
+      receiver: 'null'
+
+receivers:
+  - name: 'null'
+
+  - name: telegram-alerts
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/secrets/telegram_bot_token
+        chat_id: -1001234567890   # CHANGEME: your TELEGRAM_CHANNEL_ID
+        parse_mode: 'HTML'
+        message: >-
+          [Prometheus TREND] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}
+          {{ range .Alerts }}
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+
+inhibit_rules:
+  # A tamper CRITICAL supersedes a mere staleness WARNING for the same cycle.
+  - source_match:
+      alertname: BtcBotForwardEvidenceTamperCritical
+    target_match:
+      alertname: BtcBotForwardEvidenceStaleTrend
+    equal: []

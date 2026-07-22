@@ -35,7 +35,9 @@ Dependency construction order (bootstrap)
   7. Sender adapter (Telegram or log stub)
   8. RateLimiter + HeartbeatService
   9. SchedulerService + job registrations
-  10. Supervisor (registers all components)
+  9b. MetricsExporter (optional -- ADR-0001 Phase 2; read-only over 3-9)
+  10. Supervisor (registers all components; MetricsExporter excluded --
+      see src/observability/metrics_exporter.py module docstring)
   11. Signal handlers
 
 Component start order (run)
@@ -44,18 +46,20 @@ Component start order (run)
   2. ChainRefresher  (stub start)
   3. SnapshotWriter  (stub start)
   4. HeartbeatService (stub start)
+  5. MetricsExporter (optional; binds 127.0.0.1, no data dependency)
   [warmup: wait for MarketState coverage]
-  5. SchedulerService (starts APScheduler; jobs begin firing)
+  6. SchedulerService (starts APScheduler; jobs begin firing)
 
 Component stop order (drain -- reverse of start)
 -------------------------------------------------
   1. SchedulerService.stop(wait=True)  [jobs drain first]
   [shutdown notice sent]
-  2. HeartbeatService.stop()
-  3. SnapshotWriter.stop()
-  4. ChainRefresher.stop()
-  5. WSManager.stop()
-  6. DB close
+  2. MetricsExporter.stop()  (if enabled -- stops accepting scrapes first)
+  3. HeartbeatService.stop()
+  4. SnapshotWriter.stop()
+  5. ChainRefresher.stop()
+  6. WSManager.stop()
+  7. DB close
 """
 from __future__ import annotations
 
@@ -79,6 +83,7 @@ from src.expiry.expiry_context import ExpiryContext
 from src.expiry.models import ExpiryConfig
 from src.reports.eod import ExpiryAnalyticsWriter
 from src.ingestion.chain_refresher import ChainRefresher
+from src.observability.metrics_exporter import MetricsExporter
 from src.persistence.snapshot_writer import SnapshotWriter
 from src.runtime.health import HealthStatus
 from src.runtime.supervisor import Supervisor
@@ -152,6 +157,8 @@ class Runtime:
         heartbeat_deltas: bool = True,
         heartbeat_universe_warn: bool = True,
         heartbeat_job_ages: bool = True,
+        metrics_exporter_enabled: bool = True,
+        metrics_exporter_port: int = 9108,
         n_strikes: int = 5,
         n_expiries: int = 3,
         snapshot_interval_sec: int = 60,
@@ -177,6 +184,8 @@ class Runtime:
         self._hb_deltas             = heartbeat_deltas
         self._hb_universe_warn      = heartbeat_universe_warn
         self._hb_job_ages           = heartbeat_job_ages
+        self._metrics_exporter_enabled = metrics_exporter_enabled
+        self._metrics_exporter_port    = metrics_exporter_port
         self._n_strikes             = n_strikes
         self._n_expiries            = n_expiries
         self._snapshot_interval      = snapshot_interval_sec
@@ -207,6 +216,7 @@ class Runtime:
         self._scheduler:        Optional[SchedulerService]    = None
         self._rate_limiter:     Optional[RateLimiter]         = None
         self._heartbeat:        Optional[HeartbeatService]    = None
+        self._metrics_exporter: Optional[MetricsExporter]     = None
         self._supervisor:       Optional[Supervisor]          = None
         self._sender:           Optional[Callable[[str], None]] = None
 
@@ -408,6 +418,25 @@ class Runtime:
         # (scheduler is constructed after the heartbeat; read-only job_ages()).
         heartbeat.set_scheduler(scheduler)
 
+        # 9b. MetricsExporter (optional, in-process Prometheus exporter --
+        # ADR-0001 Phase 2). Read-only over components already constructed
+        # above; not registered with Supervisor (see metrics_exporter.py
+        # module docstring -- an observability failure must never influence
+        # trading-runtime restart/halt decisions).
+        metrics_exporter: Optional[MetricsExporter] = None
+        if self._metrics_exporter_enabled:
+            metrics_exporter = MetricsExporter(
+                market_state=market_state,
+                ws_manager=ws_manager,
+                snapshot_writer=snapshot_writer,
+                chain_refresher=refresher,
+                scheduler=scheduler,
+                heartbeat=heartbeat,
+                expiry_context=expiry_context,
+                port=self._metrics_exporter_port,
+            )
+        self._metrics_exporter = metrics_exporter
+
         # 10. Supervisor
         supervisor = Supervisor(
             poll_interval_sec=self._sup_poll,
@@ -456,6 +485,8 @@ class Runtime:
         self._start_component("expiry_context",  self._expiry_context)
         self._start_component("snapshot_writer", self._snapshot_writer)
         self._start_component("heartbeat",       self._heartbeat)
+        if self._metrics_exporter is not None:
+            self._start_component("metrics_exporter", self._metrics_exporter)
 
         self._set_state(RuntimeState.WARMING)
 

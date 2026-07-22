@@ -1,0 +1,76 @@
+[Unit]
+Description=BTC Bot Read-Only Operational API (ADR-0001 Phase 4)
+Documentation=file:/opt/btcbot/docs/api/read-only-api.md
+After=network.target
+
+# NOTE the absence of Requires=, BindsTo=, PartOf=, or Wants=btcbot.service.
+# This is deliberate and load-bearing: the requirement is that API failure can
+# never affect btcbot.service, and systemd dependencies are the one mechanism
+# that could violate it. This unit reads the databases directly and has no
+# startup dependency on the bot (§15.3) -- if the bot is down, that is data
+# this API reports, not a reason for it to stop serving.
+
+[Service]
+Type=simple
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+
+# Its OWN venv, not /opt/btcbot/venv. A FastAPI/pydantic upgrade here must not
+# be able to alter the dependency set under the live runtime.
+ExecStart=/opt/btcbot/venv-api/bin/python -m src.api.main
+
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/opt/btcbot/.env
+
+Restart=always
+RestartSec=10
+# Give up after 5 restarts in 5 minutes rather than restart-storm against a
+# genuine config error. The bot is unaffected either way.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-api
+
+# Non-root hardening (mirrors btcbot.service)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# Resource ceiling: the observability plane must never be able to starve the
+# runtime on a 1-2 GB VPS (same principle as the §15.5-15.8 container limits).
+MemoryMax=384M
+CPUQuota=50%
+
+# --- WAL constraint V1 (ADR-0001 §7.3) ---
+# Every directory containing a WAL database this service READS must be listed
+# here, even though the service only ever reads. A WAL reader opens and locks
+# the -wal/-shm siblings, which requires write permission on the containing
+# directory regardless of the SQL-level mode. Omitting any of these produces
+# "sqlite3.OperationalError: unable to open database file" on an otherwise
+# perfectly readable database -- the exact 2026-07-18 failure class V1 exists
+# to prevent.
+#
+#   /opt/btcbot/data                      btc_trading.db      (healthcheck.py)
+#   /opt/btcbot/research/data             evidence_forward.db (forward_status)
+#   /opt/btcbot/research/evidence_library ledger.db           (governance)
+#
+# Per V3 this list is default-deny: adding a path requires an explicit review.
+# Note this grants directory-level write to satisfy WAL locking; it does NOT
+# make this service a writer. Read-only-ness is enforced by construction in the
+# code (no write endpoint, no mutation import) and asserted by tests/test_api.py.
+ReadWritePaths=/opt/btcbot/data /opt/btcbot/research/data /opt/btcbot/research/evidence_library
+
+[Install]
+WantedBy=multi-user.target

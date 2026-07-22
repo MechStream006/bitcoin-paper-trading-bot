@@ -1,0 +1,57 @@
+[Unit]
+Description=BTC Bot daily evidence certifier (one-shot)
+Documentation=file:/opt/btcbot/docs/runbook.md
+After=network.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+
+# certify_catchup.py is a scheduling wrapper only -- it contains no
+# certification logic. It certifies every day in a bounded lookback window that
+# has collection data but no verdict yet, invoking scripts/certify_day.py
+# unmodified via its documented --date CLI, one day per invocation.
+#
+# Why not call certify_day.py directly: Persistent=true replays only ONE missed
+# timer activation, not one per missed day. After a 3-day outage the catch-up
+# run would certify yesterday and leave the two older days permanently
+# uncertified -- a silent hole in the evidence record on a platform whose
+# admissibility argument is "the certifier reported green".
+ExecStart=/opt/btcbot/venv/bin/python scripts/certify_catchup.py
+
+# --- THE critical setting -------------------------------------------------
+# certify_day.py exit codes: 0=GREEN, 1=AMBER, 2=RED, 3=could-not-run.
+# AMBER and RED are successful runs that reached a verdict -- the job's purpose
+# is to PRODUCE a verdict, not to produce a particular one. Worse, C7 marks all
+# testnet data AMBER by policy, so while PLATFORM=testnet this unit would exit 1
+# every single day. Without this line `systemctl is-failed` would be red
+# permanently, training the operator to ignore it and destroying the value of
+# unit state as a signal.
+#
+# Exit 3 (schema too old, DB missing, certifier crashed) is NOT listed and
+# therefore remains a genuine failure that surfaces normally.
+SuccessExitStatus=0 1 2
+
+# Bound the run so it can never overlap btcbot-backup.timer at 02:00 UTC, which
+# does a VACUUM INTO over the same database. The certifier's C6 check is a full
+# PRAGMA integrity_check (~2.4 min at 10 GB, seconds today), so 20 min is a wide
+# margin against the ~28 min gap to backup, not a tight fit.
+TimeoutStartSec=1200
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-certify
+
+# Non-root hardening, mirroring btcbot.service.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+# WAL constraint V1 (ADR-0001 §7.3): btc_trading.db is WAL-journaled and a WAL
+# reader must open/lock the -wal/-shm siblings, which needs write permission on
+# the CONTAINING DIRECTORY regardless of SQL-level mode. The certifier also
+# genuinely writes daily_certifier_log in this same database.
+ReadWritePaths=/opt/btcbot/data

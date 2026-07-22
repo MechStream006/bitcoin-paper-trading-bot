@@ -182,6 +182,12 @@ class HeartbeatService:
         self._total_sent: int = 0
         self._last_send_at: Optional[float] = None       # monotonic
         self._last_failure_reason: Optional[str] = None
+        # Cache of the most recent forward-evidence read (see _forward_summary).
+        # Lets MetricsExporter (Phase 2) expose forward-evidence metrics without
+        # ever opening evidence_forward.db itself on the scrape path — it only
+        # ever reads this already-computed, in-memory value. A single reference
+        # assignment/read is atomic under the GIL; no separate lock needed.
+        self._last_forward_status: Optional["_forward_status.ForwardStatus"] = None
 
     # -----------------------------------------------------------------------
     # Lifecycle (Component contract — lightweight, no background thread)
@@ -627,17 +633,32 @@ class HeartbeatService:
 
         Never raises: forward_status.summarize() is total, and any unexpected
         error is folded into an 'error' ForwardStatus so the heartbeat still
-        renders.
+        renders. The result is cached (see last_forward_status()) so a later
+        consumer never needs to re-read evidence_forward.db itself.
         """
         if not self._forward_status_path:
             return None
         try:
-            return _forward_status.summarize(self._forward_status_path)
+            fs = _forward_status.summarize(self._forward_status_path)
         except Exception as exc:  # defensive; summarize is designed not to raise
-            return _forward_status.ForwardStatus.read_error(
+            fs = _forward_status.ForwardStatus.read_error(
                 _forward_status.expected_run_date(),
                 f"{type(exc).__name__}: {exc}",
             )
+        self._last_forward_status = fs
+        return fs
+
+    def last_forward_status(self) -> Optional["_forward_status.ForwardStatus"]:
+        """Return the most recently read ForwardStatus, or None if not yet read.
+
+        Read-only, safe from any thread. This is a cache of the last value
+        _forward_summary() computed during a heartbeat composition — it never
+        triggers a new read of evidence_forward.db itself. None means either
+        forward_status_path was never configured, or no heartbeat has composed
+        yet (the very first heartbeat fires at startup — see Runtime._emit_
+        startup_notice — so this window is brief).
+        """
+        return self._last_forward_status
 
     def _disk_info(self) -> Optional["_storage_status.DiskInfo"]:
         """Free-disk info for the collector data volume, or None if not configured."""

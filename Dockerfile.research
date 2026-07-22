@@ -1,0 +1,68 @@
+# Dockerfile.research — CI-reproducibility image for the research/corpus
+# pipeline (ADR-0001 §5.3). This is NOT a production artifact: it is never
+# deployed, never referenced by deploy/*.service or Docker Compose, and has
+# no production role. Its only job is making corpus builds byte-reproducible
+# outside of any one developer's machine.
+#
+# INV-1 (ADR-0001 §2): no container reads or writes project data. This image
+# ships no .env, no *.db, and no research/evidence_library/ (the governance
+# ledger's home) — enforced by .dockerignore, not by convention.
+#
+# Base pinned by digest, not tag (ADR-0001 §5.1/§5.4). Tag reference kept in
+# the comment for humans; the digest is what actually gets pulled.
+#   python:3.10.20-slim-bookworm  (3.10.20 matches the validated btc_bot
+#   conda pinset — CLAUDE.md §4 "pinset validated on 3.10.20")
+#
+# To refresh the digest after an intentional base-image bump:
+#   docker pull python:3.10.20-slim-bookworm
+#   docker inspect python:3.10.20-slim-bookworm --format='{{index .RepoDigests 0}}'
+FROM python@sha256:9643927a6fc74bd81b0f1bbb5cce3cb4a491f46b4c5dbee770f28e575f180015
+
+LABEL org.opencontainers.image.title="btcbot-research" \
+      org.opencontainers.image.description="CI-only image for byte-reproducible research/corpus builds. Not deployed to production." \
+      org.opencontainers.image.source="https://github.com/MechStream006/bitcoin-paper-trading-bot"
+
+# Prevent .pyc writes and stdout buffering noise in CI logs.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Non-root user. Matches the project-wide convention (btcbot runs as a
+# dedicated non-root systemd user) rather than introducing a new pattern.
+RUN groupadd --gid 10001 researcher \
+    && useradd --uid 10001 --gid researcher --create-home --shell /usr/sbin/nologin researcher
+
+WORKDIR /app
+
+# The base image's pip (23.0.1) and setuptools (79.0.1) were flagged by
+# `docker scout cves` (HIGH): setuptools vendors its own internal copies of
+# wheel 0.45.1 and jaraco-context 5.3.0 under setuptools/_vendor/, both
+# below their fixed versions. Upgrading both refreshes those vendored
+# copies. Verified by re-scanning after this change (see
+# docs/docker/research-image.md "Known security findings").
+RUN pip install --upgrade pip setuptools
+
+# Lockfile copied and installed before the rest of the source so dependency
+# layers cache independently of code changes (research/requirements-research.txt
+# comment: "Full reproducible lockfile: requirements-research-lock.txt").
+COPY research/requirements-research-lock.txt research/requirements-research-lock.txt
+RUN pip install --no-cache-dir -r research/requirements-research-lock.txt
+
+# Only research/ is copied — no src/, no config/, no repo-root tests/. Nothing
+# under research/ imports from src/ or config/ (verified: no module-level
+# `from src` / `import config` anywhere in research/), so the research and
+# runtime planes stay dependency-isolated inside this image too (ADR-0001 B3).
+# .dockerignore strips research/data/ and research/evidence_library/ from
+# this COPY regardless of what's on disk.
+COPY research/ research/
+
+RUN chown -R researcher:researcher /app
+USER researcher
+
+# No corpus-build entrypoint is universal enough to hardcode (build_corpus.py,
+# build_perp_corpus.py, build_dvol_corpus.py, hypotheses/*/run_*.py all take
+# different arguments). CI and operators run a specific script explicitly:
+#   docker run --rm <image> python research/build_corpus.py --help
+# The default CMD only self-documents on a bare `docker run`.
+CMD ["python", "--version"]

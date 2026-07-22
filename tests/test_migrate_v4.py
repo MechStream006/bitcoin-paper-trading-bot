@@ -87,7 +87,11 @@ class TestMigrationV3toV4:
     def test_advances_user_version(self):
         conn = _v3_db()
         migrate(conn)
-        assert _user_version(conn) == 4
+        # migrate() always runs the chain to its head. This file's subject is
+        # the v3->v4 STEP (daily_certifier_log, asserted below), not the head
+        # version, so track TARGET_VERSION rather than pinning a literal that
+        # every future migration would have to come back and edit.
+        assert _user_version(conn) == TARGET_VERSION
 
     def test_creates_daily_certifier_log(self):
         conn = _v3_db()
@@ -102,8 +106,13 @@ class TestMigrationV3toV4:
         expected = {"day", "run_ts", "verdict", "platform", "certifier_version", "checks_json"}
         assert expected.issubset(set(cols))
 
-    def test_target_version_is_4(self):
-        assert TARGET_VERSION == 4
+    def test_v4_step_is_still_in_the_chain(self):
+        # Was `TARGET_VERSION == 4` until ENG-017 added v5. The invariant this
+        # file actually cares about is that the v4 step has not been dropped or
+        # reordered out of the chain -- pinning the head version here would just
+        # make every future migration fail an unrelated test.
+        # The head itself is pinned in tests/test_migrate_v5.py.
+        assert TARGET_VERSION >= 4
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +123,7 @@ class TestMigrationIdempotent:
     def test_version_unchanged_on_second_run(self):
         conn = _v4_db()
         migrate(conn)
-        assert _user_version(conn) == 4
+        assert _user_version(conn) == TARGET_VERSION
 
     def test_no_duplicate_table(self):
         conn = _v4_db()
@@ -163,7 +172,7 @@ class TestMigrationSelfHeal:
 
         migrate(conn)
 
-        assert _user_version(conn) == 4
+        assert _user_version(conn) == TARGET_VERSION
         assert _table_exists(conn, "daily_certifier_log")
 
 
@@ -185,7 +194,7 @@ class TestDryRun:
     def test_dry_run_idempotent_on_v4(self):
         conn = _v4_db()
         migrate(conn, dry_run=True)
-        assert _user_version(conn) == 4
+        assert _user_version(conn) == TARGET_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +207,7 @@ class TestFullChain:
         conn = _fresh_db()
         assert _user_version(conn) == 0
         migrate(conn)
-        assert _user_version(conn) == 4
+        assert _user_version(conn) == TARGET_VERSION
         assert _table_exists(conn, "instrument_map_log")
         assert _table_exists(conn, "collection_metrics")
         assert _column_names(conn, "option_quotes").__contains__("exch_ts")
@@ -210,4 +219,4 @@ class TestFullChain:
         conn = _fresh_db()
         migrate(conn)
         migrate(conn)
-        assert _user_version(conn) == 4
+        assert _user_version(conn) == TARGET_VERSION

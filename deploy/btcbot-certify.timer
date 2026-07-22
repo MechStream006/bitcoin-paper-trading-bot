@@ -1,0 +1,39 @@
+[Unit]
+Description=BTC Bot daily evidence certifier at 01:30 UTC
+Documentation=file:/opt/btcbot/docs/runbook.md
+Requires=btcbot-certify.service
+
+[Timer]
+# 01:30 UTC. Slot chosen against the existing schedule, not arbitrarily:
+#
+#   00:00  UTC day D closes -- D's data is complete and certifiable
+#   00:05  btcbot-evidence   (corpus refresh + evidence job)
+#   01:00  btcbot-fwd-hg     (H5/G1/G3/ivrv/ATR collection)
+#   01:30  btcbot-certify    <-- here
+#   02:00  btcbot-backup     (VACUUM INTO over btc_trading.db)
+#   12:30  btcbot-mapsnap
+#   *:0/10 btcbot-healthcheck
+#
+# Three constraints pin this slot:
+#   1. After 00:00 UTC, or day D is still being written and C1's cycle count
+#      would under-report.
+#   2. OUTSIDE 00:05-01:00. ADR-0001 §15.4 makes fwd-hg's 55-minute margin after
+#      the evidence job a "hard ordering precondition, not a tuning parameter".
+#      Nothing new belongs inside that window.
+#   3. BEFORE 02:00, so day D's verdict is already in daily_certifier_log when
+#      that night's backup runs -- the verdict ships with the data it describes
+#      rather than a day late.
+OnCalendar=*-*-* 01:30:00 UTC
+
+# Small spread, deliberately much smaller than backup's 300s: the whole point of
+# 01:30 is to stay clear of 02:00, so the jitter must not erode that gap.
+RandomizedDelaySec=120
+
+# Persistent=true: unlike the healthcheck (a point-in-time read, correctly
+# Persistent=false), a missed certification is a permanent hole in the evidence
+# record -- the day cannot re-certify itself later. This replays one missed
+# activation on boot; the wrapper's lookback window covers longer outages.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

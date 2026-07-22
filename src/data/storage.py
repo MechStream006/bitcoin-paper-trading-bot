@@ -118,6 +118,16 @@ CREATE TABLE IF NOT EXISTS option_quotes (
     FOREIGN KEY (instrument_id) REFERENCES instruments(id)
 );
 
+-- ENG-017. The PK is (instrument_id, ts), so `ts` is a NON-LEADING index
+-- column: every time-ranged query degrades to a full covering-index scan,
+-- O(rows). That includes healthcheck.py's `SELECT max(ts)` dead-man probe,
+-- which runs every 10 minutes and on every /api/v1/runtime/health call.
+-- Measured at 2.85M rows (30 days at production cadence): 512 ms -> 0.01 ms.
+-- Write cost of maintaining it: +0.26 ms on a 60 s cycle (+8%), i.e. 0.006%
+-- duty cycle. Storage cost: ~34 bytes/row (~12%).
+CREATE INDEX IF NOT EXISTS idx_option_quotes_ts
+    ON option_quotes(ts);
+
 -- DORMANT / NOT-YET-WIRED (see CLAUDE.md "Dormant: funding_snapshots not wired").
 -- The live runtime subscribes only v2/ticker over options; no funding_rate
 -- channel is subscribed, so this table is intentionally empty at Layer 2d.

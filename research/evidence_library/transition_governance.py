@@ -324,12 +324,27 @@ def validate_transition(
 
     # TG-PRE — governance prerequisites
     if to_state == "validated" and run is not None and thresholds is not None:
+        # Proposal 1: peers are derived from the LEDGER, not from a registry
+        # argument. PR-8 made ledger-derived state authoritative for
+        # transitions, and `family_meta` is optional here -- a caller that
+        # passed no registry must not thereby promote into an unchecked peer
+        # set. Deriving means the peer set is the same one TG-CUR just used.
+        all_states = record.derive_all_states_at(db_path)
+        validated_peers = {
+            fid for fid, (st, *_ ) in all_states.items()
+            if st == "validated" and fid != family_id
+        }
         prec_ok, prec_errs = lifecycle.check_validated_preconditions(
-            family_meta or {}, run, thresholds
+            family_meta or {}, run, thresholds,
+            pairwise_rows=record.get_pairwise_r(db_path),
+            validated_peers=validated_peers,
+            family_id=family_id,
         )
         checks.append(TransitionCheck(
             "TG-PRE.prerequisites", prec_ok,
-            observed=("; ".join(prec_errs) if prec_errs else "DSR/BH-FDR/provenance satisfied"),
+            observed=("; ".join(prec_errs) if prec_errs
+                      else f"DSR/BH-FDR/provenance satisfied; independent of "
+                           f"{len(validated_peers)} Validated peer(s)"),
             expected="check_validated_preconditions() passes",
         ))
         for e in prec_errs:

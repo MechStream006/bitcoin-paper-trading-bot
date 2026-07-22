@@ -1,0 +1,124 @@
+name: CI
+
+# Phase 0 + Phase 1 of ADR-0001 (docs/adr/0001-infrastructure-architecture.md).
+#
+# `test` job = Phase 0 (§13.1, §13.3 D1: "CI must be green before any
+# production deploy. No manual override."). Dependency install + full test
+# suite. No lint/format step (no lint/format config exists in this repo).
+#
+# `docker-research-image` job = Phase 1 build-verification (§5.3): builds
+# Dockerfile.research and checks it's still non-root and still free of
+# project data on every push, so Dockerfile drift is caught immediately
+# rather than at the next manual build.
+#
+# Since Phase 4 the `test` job also installs requirements-api.txt, because
+# tests/test_api.py imports FastAPI. In production the API has its OWN venv
+# (/opt/btcbot/venv-api) and its deps are NOT installed alongside the runtime;
+# CI merges them only so the whole suite runs in one job. The API's read-only
+# structural guards must run on every push -- they are the enforcement §15.3
+# requires for "no write endpoints".
+#
+# Neither job touches Docker Compose, Prometheus, Grafana, Alertmanager,
+# PostgreSQL, or Redis -- all later or rejected per §18/§19.
+#
+# Runs on Python 3.10 because research/requirements-research.txt is pinned
+# to 3.10 ("do NOT install into a 3.11 environment" -- CLAUDE.md §4,
+# research/environment.yml) and this job installs both the runtime and
+# research dependency sets into one environment so the full tests/ suite
+# (which spans src/ and research/) can run in a single job.
+#
+# No secrets are used or required: config/settings.py falls back to safe
+# defaults when .env is absent, and no test in tests/ makes a live network
+# call to Delta/Telegram. Per CLAUDE.md's credentials policy, this workflow
+# must never be given DELTA_* or TELEGRAM_* secrets.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python 3.10)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            research/requirements-research.txt
+            requirements-api.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r research/requirements-research.txt
+          pip install -r requirements-api.txt
+          # httpx is required by fastapi.testclient (test-only, not a runtime dep
+          # of the API itself, so it is deliberately absent from
+          # requirements-api.txt).
+          pip install pytest==9.0.3 httpx==0.28.1
+
+      - name: Run test suite
+        run: |
+          python -m pytest tests/ -v --junitxml=pytest-report.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report
+          path: pytest-report.xml
+          retention-days: 30
+
+  docker-research-image:
+    name: Build & verify Dockerfile.research
+    runs-on: ubuntu-latest
+    # Phase 1 of ADR-0001 (§5.3): this image is CI-reproducibility tooling
+    # only, never deployed. This job is the "build verification" deliverable
+    # for that phase -- it proves the image still builds and is still clean
+    # on every push, rather than relying on a one-time manual check.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f Dockerfile.research -t btcbot-research:ci .
+
+      - name: Verify non-root user
+        run: |
+          uid=$(docker run --rm btcbot-research:ci id -u)
+          if [ "$uid" = "0" ]; then
+            echo "::error::image runs as root (uid 0)"; exit 1
+          fi
+          echo "runs as uid $uid (non-root)"
+
+      - name: Verify no project data or secrets in the image (INV-1)
+        run: |
+          matches=$(docker run --rm btcbot-research:ci sh -c \
+            'find /app \( -iname "*.db" -o -iname ".env" -o -path "*/evidence_library*" -o -path "*/research/data*" \)')
+          if [ -n "$matches" ]; then
+            echo "::error::project data found inside image:"; echo "$matches"; exit 1
+          fi
+          echo "no project data or evidence_library found in /app"
+
+      - name: Run self-contained research test suite inside the image
+        run: |
+          docker run --rm btcbot-research:ci sh -c \
+            'cd /app && python -m pytest research/forward_evidence/tests/ -q'

@@ -14,6 +14,14 @@ Schema versions
             - collection_metrics.stale_count INTEGER  (stalls hidden by coverage)
   3 -> 4  Daily certifier infrastructure:
             - daily_certifier_log table       (per-day evidence admissibility verdicts)
+  4 -> 5  ENG-017 time-series index:
+            - idx_option_quotes_ts on option_quotes(ts)
+
+Note on 4 -> 5: CREATE INDEX is the one migration step here whose cost scales
+with table size (it sorts every existing row). Measured ~4.3 s at 2.85M rows;
+extrapolate ~55 s at the 36M rows that correspond to a 10 GB database. It takes
+a write lock for that duration, so prefer running it with the bot stopped on a
+large database. Every earlier step is metadata-only and effectively instant.
 
 Run from the repo root (bot stopped is recommended but not required — the
 ALTER is a metadata-only operation under WAL):
@@ -33,7 +41,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-TARGET_VERSION = 4
+TARGET_VERSION = 5
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -157,6 +165,33 @@ def migrate(conn: sqlite3.Connection, *, dry_run: bool = False) -> int:
         print("  + PRAGMA user_version = 4")
         if not dry_run:
             conn.execute("PRAGMA user_version = 4")
+
+    # --- 4 -> 5 (ENG-017) -------------------------------------------------
+    # option_quotes' PK is (instrument_id, ts): `ts` is non-leading, so every
+    # time-ranged query is a full scan, O(rows). Chief victim is healthcheck.py's
+    # `SELECT max(ts)` dead-man probe (every 10 min, plus every API health call),
+    # measured at 512 ms on 2.85M rows and growing linearly.
+    #
+    # Guarded on sqlite_master rather than user_version so a database that
+    # already has the index (created fresh from storage.py's SCHEMA) is a no-op.
+    need_ts_index = not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_option_quotes_ts'"
+    ).fetchone()
+
+    if need_ts_index:
+        print("  + CREATE INDEX idx_option_quotes_ts ON option_quotes(ts)")
+        print("    (sorts every existing row; ~4s per 3M rows, holds a write lock)")
+        if not dry_run:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_option_quotes_ts ON option_quotes(ts)"
+            )
+    else:
+        print("  = idx_option_quotes_ts already present")
+
+    if version < 5:
+        print("  + PRAGMA user_version = 5")
+        if not dry_run:
+            conn.execute("PRAGMA user_version = 5")
 
     if not dry_run:
         conn.commit()

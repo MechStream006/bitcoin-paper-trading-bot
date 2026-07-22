@@ -1,0 +1,16 @@
+# Dashboard provisioning (ADR-0001 §15.7: "dashboards provisioned from git so
+# the volume holds no source of truth"). allowUiUpdates is false so an
+# operator's in-UI edit is never silently lost on the next provisioning
+# pass -- the JSON files in ../../dashboards/ are the only source of truth.
+apiVersion: 1
+
+providers:
+  - name: btcbot
+    orgId: 1
+    folder: 'BTC Bot'
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

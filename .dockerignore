@@ -1,0 +1,64 @@
+# Applies to every Docker build in this repo (ADR-0001 §5.4: "must exclude").
+# Default-deny for anything that is project data, a secret, or VCS/editor
+# noise. Add new source directories to the allow-list in each Dockerfile's
+# COPY step, not by loosening this file.
+
+# Secrets — never in any image (ADR-0001 §5.4, §9 S1/S4)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Project data / governance ledgers — INV-1: no container touches project data
+data/
+research/data/
+research/evidence_library/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# VCS / CI / editor
+.git/
+.github/
+.gitignore
+.dockerignore
+.vscode/
+.idea/
+.claude/
+**/.pytest_cache/
+
+# Python artifacts
+# Docker (unlike .gitignore) does not match a bare "dirname/" recursively —
+# it must be prefixed with "**/" to exclude at any depth. Verified empirically
+# (docker build + `find /app -iname __pycache__` inside the built image)
+# during this image's own build-verification pass.
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+venv/
+.venv/
+
+# Local build logs and launchers (repo-root clutter, not image inputs)
+run_*.bat
+corpus_build*.log
+corpus_build*.err*
+perp_build*.log
+perp_build*.err*
+h1_build*.log
+h1_build*.err*
+h4_build*.log
+h4_build*.err*
+h5_build*.log
+h5_build*.err*
+h6_build*.log
+h6_build*.err*
+h6_validation*.log
+h6_validation*.err*
+
+# Regenerable research report output (research/reports/ — see .gitignore)
+research/reports/
+
+# Local-only project instructions, not needed inside any image
+CLAUDE.md

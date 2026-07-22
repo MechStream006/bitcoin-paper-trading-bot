@@ -47,9 +47,11 @@ signals:
   # its own isolated OHLCV branch in run_daily.py, separate from the close-only
   # signal loop and from the IVRV two-input branch. Decision function locked by
   # fn_hash acaf70e9... (pre_registration_g3_atr_expansion.json).
-  # Phase 4: wired but not active. Set enabled: true to start collection (Phase 5).
+  # Phase 5: ACTIVE since 2026-07-19 (ATR_ACTIVATION_RUNBOOK.md). The runbook's
+  # required post-activation step is that this repo file match the server, so a
+  # redeploy cannot silently revert ATR to disabled.
   g3_atr_expansion:
-    enabled: false
+    enabled: true
     cost_bps: 15.0
     pre_reg_file: forward_evidence/pre_registration_g3_atr_expansion.json
     decision_function_file: forward_evidence/decision_function_g3_atr_expansion.py

@@ -1,0 +1,101 @@
+{
+  "title": "BTC Bot Operations",
+  "uid": "btcbot-operations",
+  "tags": ["btcbot"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    { "id": 100, "type": "row", "title": "Runtime", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+
+    { "id": 1, "type": "stat", "title": "Coverage", "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "mode": "absolute",
+        "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 0.8 }, { "color": "green", "value": 0.95 } ] } }, "overrides": [] },
+      "targets": [ { "expr": "btcbot_coverage_ratio", "refId": "A" } ] },
+
+    { "id": 2, "type": "stat", "title": "Universe Size", "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "targets": [ { "expr": "btcbot_universe_size", "refId": "A" } ] },
+
+    { "id": 3, "type": "stat", "title": "Stale Symbols", "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute",
+        "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "targets": [ { "expr": "btcbot_stale_symbols", "refId": "A" } ] },
+
+    { "id": 4, "type": "stat", "title": "Reconcile Count (cum.)", "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "targets": [ { "expr": "btcbot_reconcile_count_total", "refId": "A" } ] },
+
+    { "id": 5, "type": "stat", "title": "WS Connected", "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": {
+        "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } } ],
+        "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "targets": [ { "expr": "btcbot_ws_connected", "refId": "A" } ] },
+
+    { "id": 6, "type": "stat", "title": "Heartbeat Healthy", "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": {
+        "0": { "text": "FAILING", "color": "red" }, "1": { "text": "OK", "color": "green" } } } ] }, "overrides": [] },
+      "targets": [ { "expr": "btcbot_heartbeat_healthy", "refId": "A" } ] },
+
+    { "id": 7, "type": "timeseries", "title": "WS Messages Rate", "gridPos": { "h": 7, "w": 8, "x": 0, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [ { "expr": "rate(btcbot_ws_messages_total[5m])", "legendFormat": "msgs/s", "refId": "A" } ] },
+
+    { "id": 8, "type": "timeseries", "title": "WS Reconnects (cumulative)", "gridPos": { "h": 7, "w": 8, "x": 8, "y": 5 },
+      "targets": [ { "expr": "btcbot_ws_reconnects_total", "legendFormat": "reconnects", "refId": "A" } ] },
+
+    { "id": 9, "type": "timeseries", "title": "WS Last Message Age", "gridPos": { "h": 7, "w": 8, "x": 16, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [ { "expr": "btcbot_ws_last_message_age_seconds", "legendFormat": "age", "refId": "A" } ] },
+
+    { "id": 10, "type": "timeseries", "title": "Scheduler Job Last-Success Age", "gridPos": { "h": 7, "w": 12, "x": 0, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [ { "expr": "btcbot_scheduler_job_last_success_age_seconds", "legendFormat": "{{job}}", "refId": "A" } ] },
+
+    { "id": 11, "type": "timeseries", "title": "Heartbeat Last-Send Age", "gridPos": { "h": 7, "w": 6, "x": 12, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [ { "expr": "btcbot_heartbeat_last_send_age_seconds", "legendFormat": "age", "refId": "A" } ] },
+
+    { "id": 12, "type": "timeseries", "title": "Process RSS", "gridPos": { "h": 7, "w": 6, "x": 18, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [ { "expr": "process_resident_memory_bytes{job=\"btcbot\"}", "legendFormat": "rss", "refId": "A" } ] },
+
+    { "id": 13, "type": "table", "title": "Component Health Rollup", "gridPos": { "h": 6, "w": 24, "x": 0, "y": 19 },
+      "targets": [ { "expr": "btcbot_component_healthy", "format": "table", "instant": true, "refId": "A" } ] },
+
+    { "id": 200, "type": "row", "title": "Forward Evidence", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 } },
+
+    { "id": 20, "type": "stat", "title": "Days Behind", "gridPos": { "h": 4, "w": 6, "x": 0, "y": 26 },
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute",
+        "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 2 } ] } }, "overrides": [] },
+      "targets": [ { "expr": "btcbot_forward_days_behind", "refId": "A" } ] },
+
+    { "id": 21, "type": "stat", "title": "Signals OK / Logged", "gridPos": { "h": 4, "w": 6, "x": 6, "y": 26 },
+      "targets": [
+        { "expr": "btcbot_forward_signals_ok", "legendFormat": "ok", "refId": "A" },
+        { "expr": "btcbot_forward_signals_logged", "legendFormat": "logged", "refId": "B" }
+      ] },
+
+    { "id": 22, "type": "stat", "title": "fn_hash Violations", "gridPos": { "h": 4, "w": 6, "x": 12, "y": 26 },
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute",
+        "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "targets": [ { "expr": "btcbot_forward_fn_hash_violations", "refId": "A" } ] },
+
+    { "id": 300, "type": "row", "title": "Host (node_exporter)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 } },
+
+    { "id": 30, "type": "timeseries", "title": "CPU Usage %", "gridPos": { "h": 7, "w": 8, "x": 0, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [ { "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "legendFormat": "cpu", "refId": "A" } ] },
+
+    { "id": 31, "type": "timeseries", "title": "Load Average", "gridPos": { "h": 7, "w": 8, "x": 8, "y": 32 },
+      "targets": [
+        { "expr": "node_load1", "legendFormat": "1m", "refId": "A" },
+        { "expr": "node_load5", "legendFormat": "5m", "refId": "B" },
+        { "expr": "node_load15", "legendFormat": "15m", "refId": "C" }
+      ] },
+
+    { "id": 32, "type": "timeseries", "title": "Memory Available", "gridPos": { "h": 7, "w": 8, "x": 16, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [ { "expr": "node_memory_MemAvailable_bytes", "legendFormat": "available", "refId": "A" } ] }
+  ]
+}

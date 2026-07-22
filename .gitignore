@@ -10,6 +10,11 @@ CLAUDE.md
 .idea/
 .claude/
 
+# Observability stack secrets (ADR-0001 Phase 3) — never in git
+deploy/compose/.env
+deploy/compose/alertmanager/secrets/*
+!deploy/compose/alertmanager/secrets/README.md
+
 # Research data lake — raw + derived are regenerable; calendar is tracked
 research/data/raw/
 research/data/derived/

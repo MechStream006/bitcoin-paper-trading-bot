@@ -135,6 +135,8 @@ sudo cp /opt/btcbot/deploy/btcbot-mapsnap.service      /etc/systemd/system/
 sudo cp /opt/btcbot/deploy/btcbot-mapsnap.timer        /etc/systemd/system/
 sudo cp /opt/btcbot/deploy/btcbot-fwd-hg.service       /etc/systemd/system/
 sudo cp /opt/btcbot/deploy/btcbot-fwd-hg.timer         /etc/systemd/system/
+sudo cp /opt/btcbot/deploy/btcbot-certify.service      /etc/systemd/system/
+sudo cp /opt/btcbot/deploy/btcbot-certify.timer        /etc/systemd/system/
 
 sudo systemctl daemon-reload
 ```
@@ -170,6 +172,15 @@ sudo systemctl start  btcbot-mapsnap.timer
 # must be bootstrapped (§9 below) before this timer will succeed.
 sudo systemctl enable btcbot-fwd-hg.timer
 sudo systemctl start  btcbot-fwd-hg.timer
+
+# Daily evidence certifier timer (runs daily at 01:30 UTC)
+# PRE-CONDITION: schema must be at user_version >= 4 (daily_certifier_log).
+#   python scripts/migrate.py --dry-run && python scripts/migrate.py
+# NOTE: AMBER/RED are successful runs (SuccessExitStatus=0 1 2). A green unit
+# does NOT mean a green day -- read the verdict from daily_certifier_log.
+# While PLATFORM=testnet every day is AMBER by policy (check C7).
+sudo systemctl enable btcbot-certify.timer
+sudo systemctl start  btcbot-certify.timer
 ```
 
 ---

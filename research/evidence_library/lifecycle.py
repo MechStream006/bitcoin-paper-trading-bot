@@ -182,10 +182,100 @@ def check_hard_dq(
 # Validated gate pre-conditions (checked structurally — stats are in the run)
 # ---------------------------------------------------------------------------
 
+def check_validated_independence(
+    family_id: str,
+    family_meta: dict,
+    thresholds: dict,
+    pairwise_rows: dict,
+    validated_peers: set[str] | frozenset[str],
+) -> tuple[bool, list[str]]:
+    """
+    Proposal 1 (CLAUDE.md §16): pairwise independence at the Validated gate.
+
+    Enforces the already-frozen `max_pairwise_r` threshold. Introduces no new
+    governance rule -- the threshold has been declared in thresholds.yaml since
+    2026-06-13 and was, until now, enforced nowhere.
+
+    `pairwise_rows` is `record.get_pairwise_r()` output (latest row per
+    canonical pair). `validated_peers` is the set of family ids currently in
+    the Validated state, EXCLUDING `family_id` itself.
+
+    Returns (ok, [errors]).
+
+    Three ways a family fails, all fail-closed:
+
+      1. **Missing measurement.** A Validated peer with no recorded pair is a
+         failure, not a pass. This follows R1's precedent exactly -- "NULL or
+         NaN for either governance stat is a hard failure; there is no silent
+         bypass" -- because the alternative is not enforcement at all: a rule
+         that applies only when someone volunteers the data can always be
+         satisfied by volunteering nothing.
+      2. **Exceeds the ceiling.** |r| > max_pairwise_r.
+      3. **Unusable value.** NaN reaching the comparison.
+
+    Correlation is compared as |r|. `max_pairwise_r`'s stated purpose is that
+    a "signal must be independent of other validated signals", and a family at
+    r = -0.95 to an existing Validated family is a near-perfect inverse
+    duplicate carrying the same risk factor with the sign flipped -- it is not
+    independent in any sense the threshold is protecting. Comparing raw r would
+    admit exactly that case. This is the standard reading of a correlation
+    ceiling, not a change of statistical methodology.
+    """
+    errors: list[str] = []
+    t_validated = thresholds.get("validated", {})
+    roles = _roles(family_meta)
+
+    ceilings = [
+        t_validated[role]["max_pairwise_r"]
+        for role in roles
+        if role in t_validated and "max_pairwise_r" in t_validated[role]
+    ]
+    if not ceilings:
+        # No ceiling declared for any of this family's roles => nothing to
+        # enforce. Threshold-driven, exactly like min_dsr_prob / max_bh_p.
+        return True, []
+    max_r = min(ceilings)  # most conservative across roles
+
+    for peer in sorted(validated_peers):
+        if peer == family_id:
+            continue
+        key = (family_id, peer) if family_id < peer else (peer, family_id)
+        row = pairwise_rows.get(key)
+
+        if row is None:
+            errors.append(
+                f"no pairwise correlation recorded against Validated family "
+                f"'{peer}' — compute it and record it with "
+                f"record.append_pairwise_r() before promoting "
+                f"(thresholds.yaml validated.<role>.max_pairwise_r={max_r})"
+            )
+            continue
+
+        r = row["r"]
+        if r is None or math.isnan(float(r)):
+            errors.append(
+                f"pairwise correlation against '{peer}' is NaN (row id={row['id']}) "
+                "— not a measurement; recompute and re-record"
+            )
+            continue
+
+        if abs(float(r)) > max_r:
+            errors.append(
+                f"pairwise |r|={abs(float(r)):.4f} against Validated family "
+                f"'{peer}' exceeds max_pairwise_r={max_r} "
+                f"(measured {row['ts']} via {row['method']}, row id={row['id']})"
+            )
+
+    return len(errors) == 0, errors
+
+
 def check_validated_preconditions(
     family_meta: dict,
     pinned_run: dict,
     thresholds: dict,
+    pairwise_rows: dict | None = None,
+    validated_peers: set[str] | frozenset[str] | None = None,
+    family_id: str | None = None,
 ) -> tuple[bool, list[str]]:
     """
     Structural pre-conditions for Validated state.
@@ -266,6 +356,22 @@ def check_validated_preconditions(
                 "(thresholds.yaml validated.<role>.max_bh_p)"
             )
 
+    # ── Pairwise independence (Proposal 1) ────────────────────────────────────
+    # Evaluated only when the caller supplies the peer set. `None` means "this
+    # caller cannot determine the Validated peers" -- not "there are none" --
+    # so the check is skipped rather than silently passed on an empty set,
+    # which would be a fail-open bypass. Every caller that CAN determine the
+    # peer set passes it; see validate_registry() and validate_transition().
+    if validated_peers is not None:
+        indep_ok, indep_errs = check_validated_independence(
+            family_id or family_meta.get("family_id") or "<unknown>",
+            family_meta,
+            thresholds,
+            pairwise_rows or {},
+            validated_peers,
+        )
+        errors.extend(indep_errs)
+
     return len(errors) == 0, errors
 
 
@@ -301,6 +407,19 @@ def validate_registry(
 
     errors: list[str] = []
 
+    # Proposal 1 substrate, loaded once for the whole pass rather than per
+    # family. `as_of` is honoured so a historical check evaluates the
+    # independence evidence that existed then, not evidence recorded later.
+    pairwise_rows = record.get_pairwise_r(ledger_db_path, as_of=as_of)
+    # Peers come from the REGISTRY here, because that is what this function
+    # validates: if registry.yaml claims two families are simultaneously
+    # Validated, they must be independent of each other. (validate_transition()
+    # instead derives peers from the ledger -- see its own note. The two
+    # sources answer different questions and are deliberately not unified.)
+    registry_validated = {
+        fid for fid, f in registry.items() if f.get("state") == "validated"
+    }
+
     for fam_id, fam in registry.items():
         state = fam.get("state", "discovery")
 
@@ -332,7 +451,12 @@ def validate_registry(
                 )
 
             if state == "validated":
-                prec_ok, prec_errs = check_validated_preconditions(fam, run, thresholds)
+                prec_ok, prec_errs = check_validated_preconditions(
+                    fam, run, thresholds,
+                    pairwise_rows=pairwise_rows,
+                    validated_peers=registry_validated - {fam_id},
+                    family_id=fam_id,
+                )
                 for e in prec_errs:
                     errors.append(f"{fam_id}: {e}")
 

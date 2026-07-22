@@ -1,0 +1,175 @@
+# BTC Bot observability plane -- ADR-0001 Phase 3.
+#
+# Scope: Prometheus, Alertmanager, Grafana, node_exporter ONLY. This file
+# never starts, builds, or references the bot itself or any future API --
+# both stay on bare systemd (INV-1, ADR-0001 §2/§5.2). No service here
+# mounts /opt/btcbot/data, /opt/btcbot/research, any *.db, or .env -- the
+# only bind mounts are this directory's own config files (:ro) and two
+# read-only kernel pseudo-filesystems for node_exporter.
+#
+# ---------------------------------------------------------------------------
+# NETWORKING DEVIATION FROM ADR-0001 §6 (documented, not silent):
+#
+# §6 describes prometheus/alertmanager/grafana on a bridge network reaching
+# host-side targets via `host.docker.internal` (§8 N4). That does not work
+# for this bot's actual metrics exporter: it is hardcoded to bind 127.0.0.1
+# ONLY (Phase 2, "localhost only" was an explicit hard requirement, and
+# Phase 3 must not modify it). A socket bound to 127.0.0.1 only accepts
+# connections that arrive via the real loopback interface -- traffic
+# arriving through a bridge/gateway path is a DIFFERENT interface at the
+# kernel level and is refused, regardless of how the hostname resolved.
+# This is not a config nuance, it is how AF_INET loopback binding works.
+#
+# The only topology where "127.0.0.1" means the same loopback for both the
+# host process and a container is `network_mode: host`. So all four
+# services here use it, each pinning its own listen address to 127.0.0.1
+# via its own flag/env var (since Compose `ports:` is silently a no-op
+# under host networking -- enforcement moves to the process itself). No
+# bridge network is defined; none is needed since every cross-service call
+# (prometheus->alertmanager, grafana->prometheus, prometheus->btcbot
+# exporter, prometheus->node_exporter) is 127.0.0.1 either way.
+#
+# Verify after every deploy: `ss -tlnp` must show 127.0.0.1:9090/9093/9100
+# /3000 and NOT 0.0.0.0 on any of them (ADR-0001 §16 item 6) -- this check
+# matters MORE here than in the ADR's original bridge design, precisely
+# because host networking means a missed listen-address flag is a real
+# public exposure, not just a container-local one.
+#
+# ---------------------------------------------------------------------------
+# NODE_EXPORTER MOUNT SCOPE DEVIATION FROM ADR-0001 §15.8 (documented):
+#
+# §15.8's standard node_exporter recipe also bind-mounts the host root
+# filesystem read-only (`/:/host:ro`) for per-mount disk-space metrics,
+# justified there as "host metrics, not project data" since node_exporter
+# only calls statvfs()/reads /proc/mounts, never file contents. This repo's
+# operator chose the stricter reading for this deployment: node_exporter
+# mounts ONLY /proc and /sys (pure kernel-virtual, zero project data by
+# construction) and does NOT mount host `/`, so no project path is ever
+# reachable inside any container, full stop -- even as inert metadata.
+# Trade-off: no node_filesystem_* (disk-space) metrics from node_exporter.
+# Disk-free is already covered by the bot's own heartbeat storage line
+# (src/alerts/storage_status.py), which needs no container at all.
+services:
+  node-exporter:
+    image: prom/node-exporter@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a
+    container_name: btcbot-node-exporter
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--web.listen-address=127.0.0.1:9100'
+      - '--no-collector.filesystem'
+    mem_limit: 64m
+    cpus: 0.25
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9100/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+    container_name: btcbot-prometheus
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      node-exporter:
+        condition: service_healthy
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prom-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=90d'
+      - '--storage.tsdb.retention.size=1GB'
+      - '--web.listen-address=127.0.0.1:9090'
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  alertmanager:
+    image: prom/alertmanager@sha256:27c475db5fb156cab31d5c18a4251ac7ed567746a2483ff264516437a39b15ba
+    container_name: btcbot-alertmanager
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./alertmanager/secrets:/etc/alertmanager/secrets:ro
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--web.listen-address=127.0.0.1:9093'
+    mem_limit: 64m
+    cpus: 0.25
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana@sha256:62d2b9d20a19714ebfe48d1bb405086081bc602aa053e28cf6d73c7537640dfb
+    container_name: btcbot-grafana
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in deploy/compose/.env}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  # Derived data only -- neither is backed up (ADR-0001 §7.2). Prometheus's
+  # TSDB is re-observable; Grafana's own state holds no source of truth
+  # since dashboards are provisioned from git (§15.7).
+  prom-data:
+  grafana-data:

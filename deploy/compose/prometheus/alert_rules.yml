@@ -1,0 +1,125 @@
+# Trend/degradation alert rules for the BTC bot (ADR-0001 §11 M1-M3).
+#
+# Design rule (M3): this file alerts on TREND/PERSISTENCE, never on the same
+# point-in-time STATE the Telegram heartbeat (layer 1, ~30min) or
+# scripts/healthcheck.py (layer 2, external dead-man, 10min) already page on.
+# Every rule below either (a) requires a condition to persist far longer than
+# either of those cadences before firing, or (b) measures something neither
+# layer measures at all (RSS growth trend, reconnect-storm rate, the
+# heartbeat's own silence). See each rule's description for which case it is.
+#
+# Exception: BtcBotForwardEvidenceTamperCritical intentionally has no `for:`
+# grace and no minimum-persistence requirement, matching the heartbeat's own
+# treatment of fn_hash_violation as an instant CRITICAL (a tamper signal
+# must not wait for a trend window) -- this is a second, independent
+# detection path (M1), not a duplicate suppression of the first.
+groups:
+  - name: btcbot-watchdog
+    rules:
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: "Alerting pipeline watchdog -- always firing by design"
+          description: >-
+            Routed to a null receiver (see alertmanager.yml) -- it must never
+            itself send a Telegram message. Its purpose is the inverse: if
+            this alert is NOT visible as firing in Prometheus's own alert
+            list or Alertmanager's UI, the rule-evaluation or notification
+            pipeline itself is broken. This is the "scheduled synthetic
+            alert" ADR-0001 §15.6 requires to prove the alerting path is
+            exercised, not merely configured.
+
+  - name: btcbot-trend
+    rules:
+      - alert: BtcBotCoverageDegradedTrend
+        expr: avg_over_time(btcbot_coverage_ratio[15m]) < 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BTC bot coverage sustained below 80% for 15+ minutes"
+          description: >-
+            avg coverage over the last 15m is {{ $value | printf "%.2f" }}.
+            The heartbeat already reports point-in-time coverage every
+            cycle -- this fires only on a sustained trend.
+
+      - alert: BtcBotWsReconnectStormTrend
+        expr: increase(btcbot_ws_reconnects_total[30m]) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "WS reconnected more than 5 times in the last 30 minutes"
+          description: >-
+            {{ $value }} reconnects in the last 30m -- a reconnect-storm
+            rate, distinct from the heartbeat's per-cycle cumulative count.
+
+      - alert: BtcBotForwardEvidenceStaleTrend
+        expr: btcbot_forward_days_behind > 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Forward-evidence cycle has been behind schedule for 2+ hours"
+          description: >-
+            days_behind={{ $value }}. The heartbeat already surfaces this
+            every cycle; this confirms persistence rather than a single
+            delayed run crossing a cadence boundary.
+
+      - alert: BtcBotForwardEvidenceTamperCritical
+        expr: btcbot_forward_fn_hash_violations > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "fn_hash_violation detected in the forward-evidence cycle"
+          description: >-
+            {{ $value }} signal(s) reporting fn_hash_violation -- possible
+            decision-function tampering. Intentionally instant (see file
+            header) -- an independent second detection path (M1), not a
+            duplicate of the heartbeat's own CRITICAL for the same event.
+
+      - alert: BtcBotHeartbeatSilentTrend
+        expr: btcbot_heartbeat_last_send_age_seconds > 5400
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful heartbeat send in over 90 minutes"
+          description: >-
+            last_send_age={{ $value | printf "%.0f" }}s (normal interval is
+            1800s). Not a heartbeat trend confirmation like the others --
+            this is the one case where the heartbeat itself is the thing
+            that may have failed, so it cannot report on its own silence.
+
+      - alert: BtcBotSchedulerJobStalledTrend
+        expr: btcbot_scheduler_job_last_success_age_seconds > 10800
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Scheduler job {{ $labels.job }} has not succeeded in over 3 hours"
+          description: "last_success_age={{ $value | printf \"%.0f\" }}s for job={{ $labels.job }}."
+
+      - alert: BtcBotProcessMemoryGrowthTrend
+        expr: deriv(process_resident_memory_bytes{job="btcbot"}[2h]) > 1048576
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "btcbot RSS growing by over 1 MiB/s, sustained over 2h"
+          description: >-
+            Sustained RSS growth trend -- CLAUDE.md §15 stabilization
+            observation 3. Neither the heartbeat nor healthcheck.py measures
+            this at all; it exists only at this layer.
+
+      - alert: BtcBotExporterTargetDown
+        expr: up{job="btcbot"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "btcbot metrics exporter has been unscrapable for 5+ minutes"
+          description: >-
+            Prometheus cannot reach 127.0.0.1:9108. Complementary to
+            healthcheck.py's process/service dead-man (a different
+            detection path per M1), not a replacement for it.

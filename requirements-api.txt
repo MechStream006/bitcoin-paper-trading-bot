@@ -1,0 +1,31 @@
+# Read-only operational API (ADR-0001 Phase 4, §15.3).
+#
+# DELIBERATELY SEPARATE from requirements.txt, and installed into its OWN venv
+# (/opt/btcbot/venv-api), not the runtime venv. The requirement that "API
+# failure must never affect btcbot.service" is not satisfied by process
+# separation alone: if both units shared a venv, a FastAPI/Starlette/pydantic
+# upgrade for the API would silently change the dependency set underneath the
+# live trading runtime. Separate venvs make that impossible rather than
+# unlikely.
+#
+# Install:
+#   python3.11 -m venv /opt/btcbot/venv-api
+#   /opt/btcbot/venv-api/bin/pip install -r requirements-api.txt
+#
+# The API also imports src/alerts/forward_status.py, scripts/healthcheck.py,
+# and research/evidence_library/*, so this venv additionally needs the small
+# subset of runtime deps those modules import at module scope.
+
+fastapi==0.121.2
+uvicorn==0.41.0
+
+# Transitive, pinned explicitly for reproducible rebuilds.
+annotated-doc==0.0.4
+starlette==0.49.3
+pydantic==2.12.4
+
+# Needed by the reused modules, not by FastAPI itself:
+#   python-dotenv -> src/api/config.py, config/settings.py
+#   PyYAML        -> research/evidence_library/report.py (registry/thresholds)
+python-dotenv==1.2.2
+PyYAML==6.0.3
