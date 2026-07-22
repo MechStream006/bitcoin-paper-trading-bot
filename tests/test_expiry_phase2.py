@@ -503,8 +503,14 @@ class TestHeartbeatExpiryBlock:
     def test_healthy_expiry_context_not_in_degraded_block(self):
         ctx = self._real_expiry_context(_TODAY - timedelta(hours=20))
         hb, sent = _make_hb(expiry_context=ctx)
-        # Force stale_threshold large so health() is healthy
-        ctx._stale_sec = 999_999.0
+        # health() measures staleness against real wall-clock time by design
+        # (expiry_context.py's health() calls datetime.now(), not the injected
+        # now_fn), while _TODAY is a fixed historical fixture date. A fixed
+        # finite threshold (e.g. a hardcoded 999_999.0) is eventually exceeded
+        # as real time drifts away from _TODAY, so size it to the actual
+        # elapsed gap instead of a magic constant. Margin covers the 20h
+        # offset baked into the constructor call above plus headroom.
+        ctx._stale_sec = (datetime.now(_UTC) - _TODAY).total_seconds() + 86_400
         hb.send_heartbeat()
         msg = sent[0]
         assert "[DEGRADED]" not in msg

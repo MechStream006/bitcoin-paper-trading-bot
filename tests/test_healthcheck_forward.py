@@ -236,7 +236,17 @@ class TestForwardStatusReadOnlyDirectory:
             os.chmod(tmp_path, mode)
 
         assert result.state == "error", result
-        assert "unable to open database file" in result.detail
+        # SQLite's exact wording for "can't recreate -wal in a read-only
+        # directory" differs by platform/version: "unable to open database
+        # file" (observed on this dev machine) vs. "attempt to write a
+        # readonly database" (observed on Ubuntu's SQLite in CI). Both are
+        # the same underlying failure; the behavioural guarantee under test
+        # is result.state == "error" above -- this only accepts either known
+        # equivalent wording for the free-form diagnostic text.
+        assert (
+            "unable to open database file" in result.detail
+            or "attempt to write a readonly database" in result.detail
+        ), result.detail
 
     def test_readwrite_directory_is_the_fix(self, tmp_path):
         """Same DB, directory left writable (what ReadWritePaths= grants) -> ok.

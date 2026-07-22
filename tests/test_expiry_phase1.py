@@ -540,13 +540,19 @@ class TestExpiryContext:
     def test_health_after_successful_observe(self):
         now = SETTLE_MONDAY - timedelta(hours=3)
         universe = self._universe_around(SETTLE_MONDAY)
-        # Use a large stale_threshold so the snapshot (captured at a past fixture
-        # time, checked against real UTC now) is not considered stale in tests.
+        # health() measures staleness against real wall-clock time by design
+        # (expiry_context.py's health() calls datetime.now(), not the injected
+        # now_fn), while SETTLE_MONDAY is a fixed historical fixture date. A
+        # fixed finite threshold (e.g. a hardcoded 999_999.0) is eventually
+        # exceeded as real time drifts away from SETTLE_MONDAY, so size it to
+        # the actual elapsed gap instead of a magic constant. Margin covers
+        # the 3h offset baked into `now` above plus headroom.
+        stale_threshold_sec = (datetime.now(_UTC) - SETTLE_MONDAY).total_seconds() + 86_400
         ctx = ExpiryContext(
             _MockRefresher(universe, 95000.0),
             config=self.cfg,
             now_fn=_at(now),
-            stale_threshold_sec=999_999.0,
+            stale_threshold_sec=stale_threshold_sec,
         )
         ctx.observe()
         h = ctx.health()

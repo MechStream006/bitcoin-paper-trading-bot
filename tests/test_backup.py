@@ -450,8 +450,10 @@ def test_retention_globs_do_not_cross_directories(tmp_path):
     old_fwd = fwd_dir / "fwd_hg_20200101_000000.db"
     old_fwd.touch()
 
-    # Plant a current ledger file (should be kept) in ledger_dir.
-    cur_ledger = ledger_dir / "ledger_20260621_040000.db"
+    # Plant a current ledger file (should be kept) in ledger_dir. Built from
+    # `now` rather than a hardcoded date, so it always falls inside the daily
+    # retention window (KEEP_DAILY_DAYS) no matter when the test runs.
+    cur_ledger = ledger_dir / f"ledger_{now.strftime('%Y%m%d_%H%M%S')}.db"
     cur_ledger.touch()
 
     # Run retention for fwd_hg in fwd_dir — should NOT touch ledger_dir.
