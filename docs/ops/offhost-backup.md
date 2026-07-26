@@ -103,6 +103,50 @@ enough to know what it is, when it was taken, and what it should contain.
 avoids repeating the ATR ordering hazard, where a repo change silently
 activated behaviour on deploy.
 
+### 2.1 P1 Increment 6 additions (2026-07-26) — monitoring the transfer leg
+
+The design above (encrypt/verify/decrypt, key custody, integrity model) is
+unchanged. This increment closes a gap discovered during Program P1's review
+of it: `backup.py`'s off-host transfer failure is deliberately non-fatal (see
+§4), and until now that failure had **no persisted signal at all** — only a
+stderr line inside a `oneshot` unit's journal, easy to miss for months.
+
+| File | Change |
+|---|---|
+| `scripts/backup.py` | **Additive** — writes a `.offhost-status.json` sidecar into each backup directory after every off-host transfer attempt (success, failure, or not-configured). Retention (`_apply_retention()`) now also prunes `.age` / `.age-manifest.json` alongside their expired plaintext — closing the accumulation gap in §7 below. |
+| `scripts/healthcheck.py` | **Additive** — new `check_offhost_freshness()`, wired into `main()` for both the trading and ledger backup directories. |
+| `src/api/services.py` | **Additive** — `runtime_health()` runs the same two checks, preserving CLI/API parity. |
+| `tests/test_offhost_backup.py`, `tests/test_backup.py`, `tests/test_healthcheck.py` | Extended with sidecar, retention, and severity-matrix coverage. |
+
+**Not changed in this increment:** `deploy/btcbot-backup.service` (still
+gated behind §8's host-side sequence), `scripts/offhost_backup.py` itself
+(its encrypt/verify/decrypt contract needed no change), and no new
+`ApiSettings` field — the sidecar path is derived from the existing
+`backup_dir` / `ledger_backup_dir`, so `tests/test_api.py` required no edit
+this time (unlike P1 Increment 1).
+
+**Severity model** (`check_offhost_freshness`, mirrors `check_backup_freshness`'s
+existing OK/WARNING pattern but adds a CRITICAL tier — the first on any
+backup-family check):
+
+| Condition | Severity |
+|---|---|
+| No sidecar (off-host never enabled) | INFO |
+| Sidecar present, `configured: false` | INFO |
+| Configured, but no successful transfer has ever been recorded | **CRITICAL** |
+| Last success < 48h ago, latest attempt ok | OK |
+| Last success ≥ 48h ago | WARNING |
+| Last success ≥ 7 days ago | **CRITICAL** |
+| Configured, last success recent, but the *latest* attempt failed | WARNING |
+
+`last_success_at` is carried forward in the sidecar across runs (not
+overwritten by a failed attempt), so a host that attempts and fails every
+day still shows growing staleness rather than a perpetually-fresh timestamp.
+This is Tier 1 of the three-tier model in §7 — it proves the transfer
+*command* succeeded, not that the bytes at the target are intact. Tiers 2
+(remote `verify`) and 3 (decrypt drill) remain manual/deferred; see §7 and
+§9.
+
 ---
 
 ## 3. Key management
@@ -277,6 +321,46 @@ chain before anything else. Per **BK1** it is the only irreplaceable
 artifact; the other three are re-collectable or re-ingestable. If the ledger
 cannot be recovered, that is the incident — the rest is cleanup.
 
+### 6.1 `.env` disaster recovery (ADR-0001 §20.3 — Program P1 Increment 7)
+
+`.env` holds Delta API keys and Telegram tokens. It is **not** covered by
+the automated backup mechanism above — `scripts/backup.py` never reads or
+copies it, deliberately, since it is a secrets file rather than a database.
+Recovering it after host loss is a separate, manual, low-frequency
+procedure:
+
+```bash
+# --- On the current host, whenever .env changes (not on a schedule) -----
+age -r "$BACKUP_AGE_RECIPIENT" -o env.age .env
+# Copy env.age off-host by hand (same target as the ledger backups, or
+# elsewhere — it is small and rare enough not to need automation).
+# NEVER commit env.age to git; it is ciphertext but the recipient is
+# already public in .env.example, so treat it with the same care as .env.
+
+# --- On a recovery host, with the identity in hand -----------------------
+age --decrypt --identity identity.txt --output .env env.age
+chmod 600 .env
+chown btcbot:btcbot .env
+```
+
+**Why this stays manual, not folded into `scripts/backup.py --all`:**
+
+1. `.env` changes rarely (a key rotation, a new integration) — a daily
+   automated encryption of a file that changes maybe once a quarter adds a
+   scheduled write of secret-derived ciphertext for no operational benefit.
+2. Automating it would mean `backup.py` reads a secrets file on every run.
+   The script's entire threat model today is that it only ever touches
+   SQLite databases; keeping `.env` out of its reach is a smaller attack
+   surface than adding a "backs up secrets too" code path.
+3. The same `age` recipient and identity used for database backups can be
+   reused here safely — encrypting `.env` reveals nothing about it beyond
+   what encrypting a database backup already reveals (the fact that
+   *something* was encrypted to that recipient).
+
+This procedure uses the same key custody rules as §3: the identity that
+decrypts `env.age` is the same one that decrypts ledger/database backups,
+and is never present on the production host.
+
 ---
 
 ## 7. Operational impact
@@ -291,12 +375,12 @@ cannot be recovered, that is the incident — the rest is cleanup.
 | New failure mode | Backup exits 1 if encryption fails (**intended** — fail-closed) |
 | Recurring obligation | **Quarterly decrypt drill** (§3.4) |
 
-**Retention asymmetry to be aware of:** `_apply_retention()` prunes
-`{label}_*.db` and its `.manifest.json`, but **not** `.age`/`.age-manifest.json`
-files. On-host ciphertext copies therefore accumulate. This is deliberate for
-now — it is one line to change and the wrong default is unclear until the
-off-host target's own retention policy is chosen (§9). Track on-host disk if
-`--encrypt` is enabled before that decision.
+**Retention asymmetry — resolved (P1 Increment 6, 2026-07-26):**
+`_apply_retention()` now prunes `.age`/`.age-manifest.json` alongside their
+expired `.db`/`.manifest.json`. On-host ciphertext no longer accumulates
+unbounded once `--encrypt` is enabled. The fix landed in the same commit as
+the monitoring signal below and must be deployed **before** `--encrypt` is
+ever added to `deploy/btcbot-backup.service`'s `ExecStart` — see §8.
 
 ---
 
@@ -332,12 +416,20 @@ Enabling is a deliberate host-side sequence, **in this order**:
 
 1. **Off-host target not yet provisioned** — ADR §20.1. This implementation
    is target-agnostic (`BACKUP_OFFHOST_CMD` is any shell command: rsync, S3
-   CLI, rclone), so the choice does not block the code.
-2. **`.env` disaster recovery** — ADR §20.3, still manual. `.env` holds
-   Delta API keys and Telegram tokens; it is **not** covered by this
-   mechanism. It can be encrypted with the same recipient
-   (`age -r $RECIPIENT -o env.age .env`) but that is a separate,
-   manually-triggered procedure, out of scope here.
-3. **Retention for `.age` artifacts** — §7.
+   CLI, rclone), so the choice does not block the code. **Still open** —
+   this is Rohith's host-side decision (Program P1 Increment 6 recommends
+   append-only-key object storage; see the Increment 6 plan/report).
+2. **`.env` disaster recovery** — ADR §20.3. **Resolved (Program P1
+   Increment 7, 2026-07-26)**: documented at §6.1 above. Deliberately
+   remains a manual, low-frequency procedure — not folded into
+   `scripts/backup.py`'s automated path; see §6.1 for why.
+3. **Retention for `.age` artifacts** — resolved, §7 (P1 Increment 6).
 4. **Drill cadence** — quarterly proposed (ADR §20.4, still unconfirmed);
    fold the decrypt drill into the same session as the BK2 restore drill.
+5. **Remote `verify` on a schedule (Tier 2 of the monitoring model, §7)** —
+   the `verify` subcommand needs no private key and could run weekly against
+   the off-host target with no code change, but no timer invokes it yet.
+   Deliberately deferred out of P1 Increment 6 to keep its deployment
+   footprint at zero new systemd units; the Tier 1 sidecar (§2.1) closes the
+   more urgent "silent forever" gap. Revisit once a target is provisioned
+   (item 1).

@@ -174,6 +174,31 @@ python scripts/backup.py --all --encrypt
 - Encryption is **fail-closed**: if it fails, the off-host transfer is
   skipped rather than shipping plaintext.
 
+**Monitoring the transfer leg (P1 Increment 6):** `scripts/healthcheck.py`
+now reports `offhost_backup` / `ledger_offhost_backup` checks, read from a
+`.offhost-status.json` sidecar `backup.py` writes after every off-host
+attempt. These are **silent (INFO)** until off-host backup is actually
+configured — no alert noise pre-activation. Once configured:
+
+| `healthcheck.py` output | Meaning |
+|---|---|
+| `OK` | Last successful transfer < 48h ago |
+| `WARNING` | Last success ≥ 48h ago, **or** the latest attempt failed |
+| `CRITICAL` | Last success ≥ 7 days ago, or off-host is configured but has **never** succeeded even once |
+
+This proves the transfer *command* ran and exited 0 — it does **not** prove
+the bytes at the target are intact. That is what `offhost_backup.py verify`
+(no key needed) and the quarterly decrypt drill are for; run them, don't
+rely on a green healthcheck alone.
+
+**Governance store durability (Program P1).** For a plain-language,
+per-claim statement of what has and has not been established about ledger
+schema integrity, backup, and off-host durability, see
+`docs/governance/p1_assurance_declaration.md`. Decision record:
+`docs/adr/0002-p1-governance-store-consolidation.md`. Full engineering
+history: `CLAUDE.md` §18. Migration script inventory:
+`research/evidence_library/MIGRATIONS.md`.
+
 ---
 
 ## Restore drill (quarterly — ADR-0001 §12 BK2)

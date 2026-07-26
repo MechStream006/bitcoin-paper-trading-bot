@@ -5,6 +5,7 @@
 | Status | **Accepted** — implementation contract |
 | Date | 2026-07-18 |
 | Supersedes | — |
+| Extended by | `docs/adr/0002-p1-governance-store-consolidation.md` (Program P1 — schema-integrity, restore-path, and off-host-backup decisions made while implementing §12/§17 below) |
 | Depends on | Approved infrastructure roadmap (Phases 0–6) |
 | Governs | All subsequent infrastructure work |
 | Owner | Rohith |
@@ -416,6 +417,14 @@ transfer). **This ADR extends its operational envelope; it does not redesign it.
   backup that has never been restored is an untested assumption.
 - **BK3.** `BACKUP_OFFHOST_CMD` must be configured. Local-only backups do not
   survive VPS loss, which is the scenario backups exist for.
+  **Status (Program P1 Increment 6, 2026-07-26):** repository-side
+  monitoring for the off-host transfer leg is implemented and tested
+  (`scripts/healthcheck.py::check_offhost_freshness()`) — a broken transfer
+  is no longer silent. **BK3 itself remains open**: no off-host target is
+  provisioned, no key exists, `--encrypt` is not in the deployed unit, and
+  no decrypt drill has run against a production artifact. See
+  `docs/governance/p1_assurance_declaration.md` claim 8 and
+  `docs/ops/offhost-backup.md` §8 for the gated activation sequence.
 - **BK4.** Backup integrity is verified via the existing SHA-256 manifest, not
   assumed from exit code 0.
 - **BK5.** 02:00 UTC scheduling is preserved — clear of the 11:58–12:06 UTC
@@ -657,6 +666,11 @@ Any future work that violates one of these requires a superseding ADR.
    Prometheus.
 8. **Frozen governance thresholds are untouched**: `n_trials = 34`,
    `min_dsr_prob = 0.50`, `max_bh_p = 0.10`, `max_pairwise_r = 0.70`.
+9. **Governance schema validation asserts, never repairs** (ADR-P1-1,
+   `docs/adr/0002-p1-governance-store-consolidation.md`): a schema-integrity
+   check reports a gap by name and fails; it never mutates the ledger, runs
+   a migration, or otherwise "fixes" what it finds as a side effect of a
+   diagnostic call.
 
 ---
 
@@ -695,10 +709,20 @@ an explicit gate from Rohith before implementation begins.**
 ## 20. Open Questions
 
 1. Off-host backup target — not yet provisioned. **Blocks BK3**, and BK3 is
-   what makes backups survive the scenario they exist for.
+   what makes backups survive the scenario they exist for. **Still open**
+   as of Program P1 Increment 7 (2026-07-26) — target selection and key
+   generation are host-side operator steps; see
+   `docs/ops/offhost-backup.md` §8 and
+   `docs/governance/p1_assurance_declaration.md` claim 8.
 2. Alert routing: single Telegram channel for both heartbeat and Prometheus
    alerts, or a second channel to separate trend from state? Recommend a
    second channel.
 3. `.env` disaster-recovery: currently manual. Needs a documented encrypted
-   off-host copy procedure.
-4. Restore-drill cadence: quarterly proposed, unconfirmed.
+   off-host copy procedure. **Addressed** by
+   `docs/ops/offhost-backup.md` §6.1 (Program P1 Increment 7) — the
+   procedure is documented and deliberately remains manual; not automated
+   into the backup path.
+4. Restore-drill cadence: quarterly proposed, unconfirmed. **Still
+   unconfirmed** as of Increment 7 — this is a scheduling decision, not a
+   tooling gap; the drill procedure itself exists
+   (`docs/ops/restore-drill-2026-07-19.md`, `offhost-backup.md` §6).
