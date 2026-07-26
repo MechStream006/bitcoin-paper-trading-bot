@@ -101,6 +101,11 @@ def runtime_health(settings) -> dict:
     adjacent HTTP request is precisely the "synchronous long-running
     transaction" this phase forbids. Integrity remains available where it
     already lives: the CLI, on demand.
+
+    Includes the ledger backup freshness check (P1 Increment 1) alongside the
+    trading-DB one, matching `healthcheck.main()`'s addition of the same check
+    -- the CLI and this API surface must not silently diverge on what "backup
+    health" means.
     """
     hc = _import_healthcheck()
 
@@ -111,6 +116,13 @@ def runtime_health(settings) -> dict:
         hc.check_db_liveness(db_path),
         hc.check_wal(db_path),
         hc.check_backup_freshness(settings.backup_dir),
+        hc.check_backup_freshness(
+            settings.ledger_backup_dir, label="ledger", check_name="ledger_backup"
+        ),
+        hc.check_offhost_freshness(settings.backup_dir, check_name="offhost_backup"),
+        hc.check_offhost_freshness(
+            settings.ledger_backup_dir, check_name="ledger_offhost_backup"
+        ),
         hc.check_forward_cycle(settings.forward_db_path),
     ]
 

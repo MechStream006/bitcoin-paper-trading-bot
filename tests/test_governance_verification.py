@@ -8,11 +8,13 @@ deferred PR-8 enhancement), and that the engine writes NOTHING.
 """
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "research" / "evidence_library"))
@@ -23,6 +25,7 @@ import governance_verification as gv
 import lifecycle
 import receipt_ledger as rl
 import record
+import report
 import transition_governance as tg
 
 THRESHOLDS = {
@@ -404,3 +407,204 @@ class TestRealLedger:
         diags = gv.diagnose_state_machine_evolution(REAL_LEDGER)
         assert diags
         assert all(not d.separable for d in diags)
+
+
+# ---------------------------------------------------------------------------
+# Schema fingerprint (Increment 3, Program P1) — WBS 3.1-3.3
+# ---------------------------------------------------------------------------
+
+def _ledger_missing_run_kind_column(tmp_path) -> Path:
+    """A pre-PR-5 ledger shape: runs exists but without run_kind, alongside
+    every other required table. Reproduces the exact confirmed crash trigger
+    (lifecycle.py C1's `r["run_kind"]`) in isolation from every other gap."""
+    p = tmp_path / "ledger.db"
+    con = sqlite3.connect(p)
+    con.executescript("""
+        CREATE TABLE runs (
+            run_id TEXT PRIMARY KEY, family_id TEXT NOT NULL, run_ts TEXT NOT NULL,
+            provenance TEXT NOT NULL, metrics_json TEXT NOT NULL
+        );
+        CREATE TABLE gate_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+            gate_code TEXT NOT NULL, role TEXT, passed INTEGER NOT NULL,
+            observed TEXT, threshold TEXT
+        );
+        CREATE TABLE state_transitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, family_id TEXT NOT NULL,
+            from_state TEXT NOT NULL, to_state TEXT NOT NULL, ts TEXT NOT NULL,
+            reason TEXT, justifying_run_id TEXT, actor TEXT DEFAULT 'operator'
+        );
+        CREATE TABLE governance_receipts (
+            receipt_id TEXT PRIMARY KEY, seq INTEGER NOT NULL UNIQUE
+        );
+    """)
+    con.commit()
+    con.close()
+    return p
+
+
+def _ledger_missing_governance_receipts(tmp_path) -> Path:
+    """record.init_db() alone -- runs/gate_results/state_transitions/pairwise_r
+    exist (with run_kind), governance_receipts does not."""
+    p = tmp_path / "ledger.db"
+    record.init_db(p)
+    return p
+
+
+def _ledger_missing_pairwise_r(tmp_path) -> Path:
+    """A fully valid ledger with pairwise_r removed afterward -- isolates the
+    one soft/warning-severity element from every hard/error one."""
+    p = tmp_path / "ledger.db"
+    eg.init_db(p)
+    con = sqlite3.connect(p)
+    con.execute("DROP TABLE pairwise_r")
+    con.commit()
+    con.close()
+    return p
+
+
+def _ledger_with_extra_unknown_structure(tmp_path) -> Path:
+    """A fully valid ledger PLUS an unrelated extra table and an extra column
+    on an existing table -- neither is named anywhere in SCHEMA_FINGERPRINT."""
+    p = tmp_path / "ledger.db"
+    eg.init_db(p)
+    con = sqlite3.connect(p)
+    con.executescript("""
+        CREATE TABLE unexpected_future_table (id INTEGER PRIMARY KEY, note TEXT);
+        ALTER TABLE runs ADD COLUMN unexpected_future_column TEXT;
+    """)
+    con.commit()
+    con.close()
+    return p
+
+
+def _schema_snapshot(db) -> tuple:
+    """Full DDL of every table/index/trigger/view -- a byte-identical-schema
+    proof, not just a row-count or table-existence spot check."""
+    con = sqlite3.connect(db)
+    try:
+        rows = con.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+    finally:
+        con.close()
+    return tuple(rows)
+
+
+def _minimal_registry_and_thresholds(tmp_path) -> tuple[Path, Path]:
+    reg_path = tmp_path / "registry.yaml"
+    reg_path.write_text(yaml.safe_dump({}), encoding="utf-8")
+    thr_path = tmp_path / "thresholds.yaml"
+    shutil.copy(ROOT / "research" / "evidence_library" / "thresholds.yaml", thr_path)
+    return reg_path, thr_path
+
+
+class TestSchemaFingerprint:
+
+    def test_valid_ledger_has_no_findings(self, db):
+        assert gv.check_schema_fingerprint(db) == []
+
+    def test_missing_run_kind_column_is_error(self, tmp_path):
+        p = _ledger_missing_run_kind_column(tmp_path)
+        findings = gv.check_schema_fingerprint(p)
+        assert any(
+            f.code == "GV-SCHEMA" and f.severity == "error" and "runs.run_kind" in f.message
+            for f in findings
+        )
+
+    def test_missing_governance_receipts_is_error(self, tmp_path):
+        p = _ledger_missing_governance_receipts(tmp_path)
+        findings = gv.check_schema_fingerprint(p)
+        assert any(
+            f.code == "GV-SCHEMA" and f.severity == "error" and "governance_receipts" in f.message
+            for f in findings
+        )
+
+    def test_missing_pairwise_r_is_warning_not_error(self, tmp_path):
+        p = _ledger_missing_pairwise_r(tmp_path)
+        findings = gv.check_schema_fingerprint(p)
+        pairwise_findings = [f for f in findings if "pairwise_r" in f.message]
+        assert pairwise_findings, "expected a finding naming pairwise_r"
+        assert all(f.severity == "warning" for f in pairwise_findings)
+        assert not any(f.severity == "error" for f in findings)
+
+    def test_ignores_unknown_extra_structure(self, tmp_path):
+        """Additional, unknown tables or columns must never trigger a
+        GV-SCHEMA finding -- the manifest is a floor, not a mirror."""
+        p = _ledger_with_extra_unknown_structure(tmp_path)
+        assert gv.check_schema_fingerprint(p) == []
+
+    def test_verify_governance_short_circuits_on_hard_gap(self, tmp_path):
+        p = _ledger_missing_run_kind_column(tmp_path)
+        rep = gv.verify_governance(p)
+        assert rep.ok is False
+        assert any(f.code == "GV-SCHEMA" for f in rep.findings)
+        assert any(f.code == "GV-SKIP" and f.subsystem == "schema_fingerprint" for f in rep.findings)
+        assert "registry_c1_c9" not in rep.subsystems_run
+        assert "receipt_chain" not in rep.subsystems_run
+
+    def test_verify_governance_never_raises_on_hard_gap(self, tmp_path):
+        """The exact crash class this increment exists to prevent."""
+        p = _ledger_missing_run_kind_column(tmp_path)
+        rep = gv.verify_governance(p)  # must not raise
+        assert isinstance(rep, gv.VerificationReport)
+
+    def test_real_ledger_has_no_schema_fingerprint_findings(self):
+        if not REAL_LEDGER.exists():
+            pytest.skip("real ledger not present")
+        assert gv.check_schema_fingerprint(REAL_LEDGER) == []
+
+    def test_governance_receipts_not_required_when_as_of_given(self, tmp_path):
+        """governance_receipts is only ever touched by the receipt-consuming
+        subsystems (EG/TG), which both entry points already skip for a
+        historical `--as-of` sweep -- so its absence must not be a hard
+        error in that mode. Regression test for a real bug this increment
+        introduced and fixed before merge (caught by the full suite, not by
+        a test written up front)."""
+        p = _ledger_missing_governance_receipts(tmp_path)
+        assert gv.check_schema_fingerprint(p, as_of="2026-06-13") == []
+        # But it's still required for a "now" (as_of=None) check.
+        findings = gv.check_schema_fingerprint(p, as_of=None)
+        assert any("governance_receipts" in f.message for f in findings)
+
+
+class TestReportRunCheckSchemaGuard:
+    """WBS 3.3 -- report.py::run_check()'s early, read-only schema guard."""
+
+    def test_hard_gap_returns_nonzero_with_named_error(self, tmp_path, capsys):
+        p = _ledger_missing_run_kind_column(tmp_path)
+        reg_path, thr_path = _minimal_registry_and_thresholds(tmp_path)
+        rc = report.run_check(reg_path, p, thr_path)
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "SCHEMA CHECK FAILED" in out
+        assert "runs.run_kind" in out
+
+    def test_hard_gap_performs_no_schema_mutation(self, tmp_path):
+        """The core acceptance criterion: --check asserts, it never repairs."""
+        p = _ledger_missing_run_kind_column(tmp_path)
+        reg_path, thr_path = _minimal_registry_and_thresholds(tmp_path)
+        before = _schema_snapshot(p)
+        report.run_check(reg_path, p, thr_path)
+        after = _schema_snapshot(p)
+        assert before == after
+
+    def test_valid_ledger_still_passes_and_schema_is_unchanged(self, db):
+        reg_path = db.parent / "registry.yaml"
+        reg_path.write_text(yaml.safe_dump({}), encoding="utf-8")
+        thr_path = db.parent / "thresholds.yaml"
+        shutil.copy(ROOT / "research" / "evidence_library" / "thresholds.yaml", thr_path)
+
+        before = _schema_snapshot(db)
+        rc = report.run_check(reg_path, db, thr_path)
+        after = _schema_snapshot(db)
+        assert rc == 0
+        assert before == after
+
+    def test_real_ledger_check_performs_no_schema_mutation(self):
+        if not (REAL_LEDGER.exists() and REAL_REGISTRY.exists() and REAL_THRESHOLDS.exists()):
+            pytest.skip("real ledger/registry/thresholds not present")
+        before = _schema_snapshot(REAL_LEDGER)
+        report.run_check(REAL_REGISTRY, REAL_LEDGER, REAL_THRESHOLDS)
+        after = _schema_snapshot(REAL_LEDGER)
+        assert before == after

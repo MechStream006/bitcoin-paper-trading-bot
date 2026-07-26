@@ -462,3 +462,66 @@ def test_retention_globs_do_not_cross_directories(tmp_path):
 
     assert not old_fwd.exists()     # correctly deleted by fwd_hg retention
     assert cur_ledger.exists()      # untouched by fwd_hg retention
+
+
+# ---------------------------------------------------------------------------
+# Retention: .age / .age-manifest.json pruned alongside their plaintext
+# (P1 Increment 6 -- closes the on-host ciphertext accumulation gap)
+# ---------------------------------------------------------------------------
+
+def test_retention_prunes_age_artifacts_with_expired_plaintext(tmp_path):
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    bdir = tmp_path / "ledger-backups"
+    bdir.mkdir()
+
+    old = bdir / "ledger_20200101_000000.db"
+    old.touch()
+    (bdir / "ledger_20200101_000000.manifest.json").write_text("{}")
+    ciphertext   = bdir / "ledger_20200101_000000.db.age"
+    age_manifest = bdir / "ledger_20200101_000000.db.age-manifest.json"
+    ciphertext.write_bytes(b"age-encryption.org/v1\n...")
+    age_manifest.write_text("{}")
+
+    backup._apply_retention(bdir, now, dry_run=False, db_label="ledger")
+
+    assert not old.exists()
+    assert not ciphertext.exists()
+    assert not age_manifest.exists()
+
+
+def test_retention_keeps_age_artifacts_for_in_window_plaintext(tmp_path):
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    bdir = tmp_path / "ledger-backups"
+    bdir.mkdir()
+
+    cur = bdir / f"ledger_{now.strftime('%Y%m%d_%H%M%S')}.db"
+    cur.touch()
+    ciphertext   = bdir / (cur.name + ".age")
+    age_manifest = bdir / (cur.name + ".age-manifest.json")
+    ciphertext.write_bytes(b"age-encryption.org/v1\n...")
+    age_manifest.write_text("{}")
+
+    backup._apply_retention(bdir, now, dry_run=False, db_label="ledger")
+
+    assert cur.exists()
+    assert ciphertext.exists()
+    assert age_manifest.exists()
+
+
+def test_retention_dry_run_does_not_delete_age_artifacts(tmp_path):
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    bdir = tmp_path / "ledger-backups"
+    bdir.mkdir()
+
+    old = bdir / "ledger_20200101_000000.db"
+    old.touch()
+    ciphertext = bdir / "ledger_20200101_000000.db.age"
+    ciphertext.write_bytes(b"age-encryption.org/v1\n...")
+
+    backup._apply_retention(bdir, now, dry_run=True, db_label="ledger")
+
+    assert old.exists()
+    assert ciphertext.exists()

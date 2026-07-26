@@ -54,6 +54,7 @@ def settings(tmp_path: Path) -> ApiSettings:
         registry_path=tmp_path / "registry.yaml",
         thresholds_path=tmp_path / "thresholds.yaml",
         backup_dir=tmp_path / "backups",
+        ledger_backup_dir=tmp_path / "ledger-backups",
         service_name="btcbot.service",
         log_level="INFO",
         cache_ttl_seconds=0.0,  # disable caching so tests see every call
@@ -716,6 +717,7 @@ class TestAgainstRealLedger:
             registry_path=_REAL_REGISTRY,
             thresholds_path=ROOT / "research" / "evidence_library" / "thresholds.yaml",
             backup_dir=ROOT / "data" / "backups",
+            ledger_backup_dir=ROOT / "data" / "ledger-backups",
             service_name="btcbot.service", log_level="INFO", cache_ttl_seconds=0.0,
         )
         return TestClient(create_app(s))

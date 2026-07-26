@@ -45,6 +45,14 @@ KEEP_DAILY_DAYS   = 7    # all backups within the last 7 days
 KEEP_WEEKLY_DAYS  = 28   # Sunday backups within the last 28 days (4 weeks)
 KEEP_MONTHLY_DAYS = 365  # 1st-of-month backups within the last 365 days (12 months)
 
+# Kept in sync with offhost_backup.py's own constants -- duplicated rather than
+# imported so retention (which runs on every backup, encrypted or not) never
+# forces an unconditional import of the encryption module.
+CIPHERTEXT_SUFFIX   = ".age"
+AGE_MANIFEST_SUFFIX = ".age-manifest.json"
+
+OFFHOST_STATUS_FILENAME = ".offhost-status.json"
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -130,15 +138,66 @@ def _apply_retention(backup_dir: Path, now: datetime, dry_run: bool,
             deleted.append(f)
 
     for f in deleted:
-        manifest = f.parent / (f.stem + ".manifest.json")
+        manifest   = f.parent / (f.stem + ".manifest.json")
+        ciphertext = f.parent / (f.name + CIPHERTEXT_SUFFIX)
+        age_manifest = f.parent / (f.name + AGE_MANIFEST_SUFFIX)
         if dry_run:
             print(f"[DRY RUN] would delete {f.name}")
         else:
             f.unlink(missing_ok=True)
             manifest.unlink(missing_ok=True)
+            ciphertext.unlink(missing_ok=True)
+            age_manifest.unlink(missing_ok=True)
             print(f"[retention] deleted {f.name}")
 
     print(f"[retention] kept={len(kept)}  deleted={len(deleted)}")
+
+
+def _write_offhost_status(
+    backup_dir: Path,
+    db_label: str,
+    now: datetime,
+    configured: bool,
+    encrypted: bool,
+    status: str,
+    exit_code: int | None,
+    artifact: Path | None,
+) -> None:
+    """Record the outcome of the off-host transfer leg (P1 Increment 6 / BK3).
+
+    `backup.py`'s off-host transfer failure is deliberately non-fatal (the
+    local backup is intact and is the fast restore path), which means a
+    broken off-host leg previously had no persisted signal at all -- only a
+    stderr line inside a oneshot unit's journal. This sidecar is that signal.
+
+    `last_success_at` is carried forward from the prior sidecar and only
+    updated on a genuine success, so a staleness check can detect "off-host
+    has been failing every day" even though `attempted_at` refreshes daily.
+    """
+    status_file = backup_dir / OFFHOST_STATUS_FILENAME
+    last_success_at = None
+    if status_file.exists():
+        try:
+            prior = json.loads(status_file.read_text(encoding="utf-8"))
+            last_success_at = prior.get("last_success_at")
+        except Exception:
+            last_success_at = None
+    if status == "ok":
+        last_success_at = now.isoformat()
+
+    payload = {
+        "schema":          "btcbot-offhost-status/1",
+        "attempted_at":    now.isoformat(),
+        "last_success_at": last_success_at,
+        "db_label":        db_label,
+        "configured":      configured,
+        "encrypted":       encrypted,
+        "status":          status,       # "ok" | "failed" | "not_configured"
+        "exit_code":       exit_code,
+        "artifact":        artifact.name if artifact else None,
+        "artifact_sha256": _sha256(artifact) if artifact and artifact.exists() else None,
+    }
+    status_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
@@ -240,6 +299,21 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
                 f"[warning] off-host command exited {result.returncode} — local backup is intact",
                 file=sys.stderr,
             )
+        _write_offhost_status(
+            backup_dir, db_label, now,
+            configured=True, encrypted=encrypt,
+            status="ok" if result.returncode == 0 else "failed",
+            exit_code=result.returncode,
+            artifact=xfer_file,
+        )
+    else:
+        _write_offhost_status(
+            backup_dir, db_label, now,
+            configured=False, encrypted=encrypt,
+            status="not_configured",
+            exit_code=None,
+            artifact=None,
+        )
 
     _apply_retention(backup_dir, now, dry_run=False, db_label=db_label)
     print("[backup] done")

@@ -32,6 +32,7 @@ sys.path.insert(0, str(_THIS_DIR))
 
 import record
 import lifecycle
+import governance_verification
 
 # ---------------------------------------------------------------------------
 # Constants (evidence_reporting_architecture.md §5.4)
@@ -718,6 +719,23 @@ def run_check(
     check_evidence_governance: bool = True,
     check_transition_governance: bool = True,
 ) -> int:
+    # Schema fingerprint (Increment 3, Program P1): a read-only structural
+    # pre-check, run BEFORE validate_registry() ever touches the ledger. A
+    # hard gap here (e.g. a pre-migration ledger missing runs.run_kind) is
+    # exactly the crash class Step 0d hit in production
+    # (lifecycle.py C1's `r["run_kind"]` raising IndexError on a sqlite3.Row).
+    # Reported by name and returned immediately -- no call to
+    # validate_registry(), no schema mutation of any kind. "Assert, never
+    # repair" (ADR-P1-1): the fix is migrate_run_kind.py, run deliberately
+    # under its own authorization, never triggered from --check.
+    schema_findings = governance_verification.check_schema_fingerprint(ledger_path, as_of=as_of)
+    hard_schema_errors = [f for f in schema_findings if f.severity == "error"]
+    if hard_schema_errors:
+        print(f"SCHEMA CHECK FAILED — {len(hard_schema_errors)} error(s):")
+        for f in hard_schema_errors:
+            print(f"  X {f.message}")
+        return 1
+
     registry = _load_registry(registry_path)
     thresholds = _load_thresholds(thresholds_path)
     as_of_norm = normalize_as_of(as_of)

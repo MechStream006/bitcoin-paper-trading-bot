@@ -61,6 +61,9 @@ WAL_WARN_BYTES        = 200 * 1024 ** 2   # 200 MB
 MEM_WARN_BYTES        = 512 * 1024 ** 2   # 512 MB
 MEM_CRIT_BYTES        = 1024 * 1024 ** 2  # 1 GB
 BACKUP_WARN_HOURS     = 48
+OFFHOST_WARN_HOURS    = 48
+OFFHOST_CRIT_HOURS    = 24 * 7
+OFFHOST_STATUS_FILENAME = ".offhost-status.json"
 
 # Forward-cycle dead-man (D3a): days behind expected run_date -> severity.
 FORWARD_WARN_DAYS     = 1   # 1 day stale  -> WARNING
@@ -239,15 +242,26 @@ def check_wal(db_path: Path) -> CheckResult:
     return CheckResult("wal", OK, f"WAL OK: {size_mb} MB", detail)
 
 
-def check_backup_freshness(backup_dir: Path) -> CheckResult:
+def check_backup_freshness(
+    backup_dir: Path, label: str = "btc_trading", check_name: str = "backup"
+) -> CheckResult:
+    """Freshness of the most recent `{label}_*.db` backup in `backup_dir`.
+
+    `label`/`check_name` default to the original trading-DB behavior so every
+    existing caller is unaffected. Pass `label="ledger"`,
+    `check_name="ledger_backup"` to check the governance ledger's backup
+    (written by `scripts/backup.py --ledger` to `data/ledger-backups/`)
+    instead -- same glob convention, same staleness threshold, since both are
+    produced by the same daily `--all` cadence.
+    """
     if not backup_dir.exists():
         return CheckResult(
-            "backup", WARNING, "backup directory does not exist", {}
+            check_name, WARNING, "backup directory does not exist", {}
         )
-    backups = sorted(backup_dir.glob("btc_trading_*.db"), reverse=True)
+    backups = sorted(backup_dir.glob(f"{label}_*.db"), reverse=True)
     if not backups:
         return CheckResult(
-            "backup", WARNING, "no backups found in backup directory", {}
+            check_name, WARNING, "no backups found in backup directory", {}
         )
     newest    = backups[0]
     mtime     = datetime.fromtimestamp(newest.stat().st_mtime, tz=timezone.utc)
@@ -256,15 +270,98 @@ def check_backup_freshness(backup_dir: Path) -> CheckResult:
 
     if age_hours >= BACKUP_WARN_HOURS:
         return CheckResult(
-            "backup", WARNING,
+            check_name, WARNING,
             f"backup stale: {newest.name} ({age_hours:.1f}h ago, "
             f">= {BACKUP_WARN_HOURS}h)",
             detail,
         )
     return CheckResult(
-        "backup", OK,
+        check_name, OK,
         f"backup OK: {newest.name} ({age_hours:.1f}h ago)",
         detail,
+    )
+
+
+def check_offhost_freshness(
+    backup_dir: Path, check_name: str = "offhost_backup"
+) -> CheckResult:
+    """Freshness of the off-host transfer leg (P1 Increment 6 / BK3).
+
+    Reads the `.offhost-status.json` sidecar `scripts/backup.py` writes after
+    every off-host transfer attempt. Deliberately silent (INFO) whenever
+    off-host backup is not configured -- this must never generate alert noise
+    on a host or database that has not opted in, or the check would be
+    ignored before it ever matters.
+
+    `last_success_at` (carried forward across runs by `_write_offhost_status`)
+    is what staleness is measured against, not `attempted_at` -- a host that
+    attempts a transfer every day and fails every day must still show growing
+    staleness, not a perpetually "just attempted" timestamp.
+    """
+    status_file = backup_dir / OFFHOST_STATUS_FILENAME
+    if not status_file.exists():
+        return CheckResult(
+            check_name, INFO,
+            "off-host backup not configured or not yet run", {},
+        )
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return CheckResult(
+            check_name, WARNING, f"off-host status file unreadable: {exc}", {}
+        )
+
+    if not payload.get("configured"):
+        return CheckResult(check_name, INFO, "off-host backup not configured", {})
+
+    status          = payload.get("status")
+    last_success_at = payload.get("last_success_at")
+    detail = {
+        "status": status,
+        "last_success_at": last_success_at,
+        "attempted_at": payload.get("attempted_at"),
+    }
+
+    if not last_success_at:
+        return CheckResult(
+            check_name, CRITICAL,
+            "off-host backup configured but has never succeeded", detail,
+        )
+
+    try:
+        success_ts = datetime.fromisoformat(last_success_at)
+    except Exception:
+        return CheckResult(
+            check_name, WARNING, "off-host status last_success_at unparsable", detail,
+        )
+
+    age_hours = (datetime.now(timezone.utc) - success_ts).total_seconds() / 3600
+    detail["age_hours"] = round(age_hours, 1)
+
+    if age_hours >= OFFHOST_CRIT_HOURS:
+        return CheckResult(
+            check_name, CRITICAL,
+            f"off-host backup stale: last success {age_hours:.0f}h ago "
+            f"(>= {OFFHOST_CRIT_HOURS}h)",
+            detail,
+        )
+    if age_hours >= OFFHOST_WARN_HOURS:
+        return CheckResult(
+            check_name, WARNING,
+            f"off-host backup stale: last success {age_hours:.0f}h ago "
+            f"(>= {OFFHOST_WARN_HOURS}h)",
+            detail,
+        )
+    if status == "failed":
+        return CheckResult(
+            check_name, WARNING,
+            f"off-host backup: latest attempt failed (last success "
+            f"{age_hours:.0f}h ago)",
+            detail,
+        )
+    return CheckResult(
+        check_name, OK,
+        f"off-host backup OK: last success {age_hours:.0f}h ago", detail,
     )
 
 
@@ -443,6 +540,11 @@ def main() -> int:
         "--db-path", type=Path, default=ROOT / "data" / "btc_trading.db",
     )
     parser.add_argument(
+        "--ledger-backup-dir", type=Path,
+        default=ROOT / "data" / "ledger-backups",
+        help="Directory holding ledger_*.db backups (scripts/backup.py --ledger)",
+    )
+    parser.add_argument(
         "--forward-db-path", type=Path,
         default=ROOT / "research" / "data" / "evidence_forward.db",
         help="Path to evidence_forward.db for the D3a forward-cycle dead-man",
@@ -463,6 +565,13 @@ def main() -> int:
         check_db_liveness(db_path),
         check_wal(db_path),
         check_backup_freshness(backup_dir),
+        check_backup_freshness(
+            args.ledger_backup_dir, label="ledger", check_name="ledger_backup"
+        ),
+        check_offhost_freshness(backup_dir, check_name="offhost_backup"),
+        check_offhost_freshness(
+            args.ledger_backup_dir, check_name="ledger_offhost_backup"
+        ),
     ]
     if not args.no_forward_check:
         results.append(check_forward_cycle(args.forward_db_path))

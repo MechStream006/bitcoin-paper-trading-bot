@@ -332,3 +332,112 @@ class TestBackupIntegration:
         assert shipped, "off-host command did not run"
         assert ".age" in shipped[0]
         assert ".age-manifest.json" in shipped[0]
+
+
+# ---------------------------------------------------------------------------
+# Off-host status sidecar (P1 Increment 6 / BK3 monitoring gap)
+# ---------------------------------------------------------------------------
+
+class TestOffhostStatusSidecar:
+    def test_not_configured_writes_sidecar_with_info_state(self, tmp_path, monkeypatch):
+        """BACKUP_OFFHOST_CMD unset must be distinguishable from a failure."""
+        _make_db(tmp_path / "src.db")
+        bdir = tmp_path / "b"
+        monkeypatch.setattr(backup, "_load_env_var", lambda k: "")
+        rc = backup.run_backup(tmp_path / "src.db", bdir, dry_run=False, db_label="ledger")
+        assert rc == 0
+        payload = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
+        assert payload["configured"] is False
+        assert payload["status"] == "not_configured"
+        assert payload["last_success_at"] is None
+
+    def test_successful_transfer_writes_ok_status_and_hash(self, tmp_path, monkeypatch):
+        _make_db(tmp_path / "src.db")
+        bdir = tmp_path / "b"
+        monkeypatch.setattr(
+            backup, "_load_env_var",
+            lambda k: "echo OK {file}" if k == "BACKUP_OFFHOST_CMD" else "",
+        )
+        rc = backup.run_backup(tmp_path / "src.db", bdir, dry_run=False, db_label="ledger")
+        assert rc == 0
+        payload = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
+        assert payload["configured"] is True
+        assert payload["status"] == "ok"
+        assert payload["exit_code"] == 0
+        assert payload["last_success_at"] == payload["attempted_at"]
+        assert payload["artifact_sha256"] is not None
+
+    def test_failed_transfer_writes_failed_status_but_run_backup_still_returns_0(
+        self, tmp_path, monkeypatch,
+    ):
+        """Non-fatal off-host failure (existing behaviour) must now be
+        visible via the sidecar instead of only a stderr line."""
+        _make_db(tmp_path / "src.db")
+        bdir = tmp_path / "b"
+        monkeypatch.setattr(
+            backup, "_load_env_var",
+            lambda k: "exit 1" if k == "BACKUP_OFFHOST_CMD" else "",
+        )
+        rc = backup.run_backup(tmp_path / "src.db", bdir, dry_run=False, db_label="ledger")
+        assert rc == 0  # existing non-fatal behaviour preserved
+        payload = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
+        assert payload["status"] == "failed"
+        assert payload["exit_code"] != 0
+        assert payload["last_success_at"] is None
+
+    def test_last_success_at_carried_forward_across_a_later_failure(self, tmp_path):
+        """A transfer that fails today must not erase yesterday's last known
+        good transfer -- that timestamp is what staleness is measured from.
+
+        Exercises `_write_offhost_status()` directly (rather than two full
+        `run_backup()` calls) to avoid the unrelated `VACUUM INTO` same-second
+        filename collision that two rapid real backups would hit -- that
+        collision is a test-construction artifact of second-resolution backup
+        filenames, not a sidecar defect.
+        """
+        from datetime import datetime, timedelta, timezone
+        bdir = tmp_path / "b"
+        bdir.mkdir()
+
+        t1 = datetime(2026, 7, 24, 2, 0, 0, tzinfo=timezone.utc)
+        backup._write_offhost_status(
+            bdir, "ledger", t1, configured=True, encrypted=True,
+            status="ok", exit_code=0, artifact=None,
+        )
+        first = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
+        assert first["status"] == "ok"
+        good_ts = first["last_success_at"]
+        assert good_ts == t1.isoformat()
+
+        t2 = t1 + timedelta(days=1)
+        backup._write_offhost_status(
+            bdir, "ledger", t2, configured=True, encrypted=True,
+            status="failed", exit_code=1, artifact=None,
+        )
+        second = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
+        assert second["status"] == "failed"
+        assert second["last_success_at"] == good_ts   # preserved, not cleared
+
+    @requires_age
+    def test_sidecar_artifact_is_ciphertext_when_encrypted(self, tmp_path, monkeypatch):
+        _make_db(tmp_path / "src.db")
+        bdir = tmp_path / "b"
+        recipient, _ = _keypair(tmp_path)
+        env = {"BACKUP_AGE_RECIPIENT": recipient,
+               "BACKUP_OFFHOST_CMD": "echo OK {file}"}
+        monkeypatch.setattr(backup, "_load_env_var", lambda k: env.get(k, ""))
+        backup.run_backup(tmp_path / "src.db", bdir, dry_run=False,
+                          db_label="ledger", encrypt=True)
+        payload = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
+        assert payload["artifact"].endswith(".db.age")
+        assert payload["encrypted"] is True
+
+    def test_dry_run_never_writes_sidecar(self, tmp_path, monkeypatch):
+        _make_db(tmp_path / "src.db")
+        bdir = tmp_path / "b"
+        monkeypatch.setattr(
+            backup, "_load_env_var",
+            lambda k: "echo OK {file}" if k == "BACKUP_OFFHOST_CMD" else "",
+        )
+        backup.run_backup(tmp_path / "src.db", bdir, dry_run=True, db_label="ledger")
+        assert not (bdir / backup.OFFHOST_STATUS_FILENAME).exists()

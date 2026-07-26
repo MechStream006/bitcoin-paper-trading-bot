@@ -116,6 +116,107 @@ class VerificationReport:
 
 
 # ---------------------------------------------------------------------------
+# Schema fingerprint (Increment 3, Program P1) — DECLARATIVE, not a mirror of
+# any module's _SCHEMA_SQL. Each entry names exactly a table (and, where it
+# matters, a column) whose ABSENCE is a confirmed crash trigger for a
+# downstream subsystem, or an already-gracefully-degraded gap worth surfacing
+# anyway. Scope is evidence-derived, not aspirational:
+#
+#   runs.run_kind        -- lifecycle.py C1's `r["run_kind"]` on a sqlite3.Row
+#                            raises IndexError if absent (the confirmed Step
+#                            0d production crash trigger).
+#   state_transitions,
+#   gate_results         -- read directly by C2-C9 / derive_state_at().
+#   governance_receipts  -- required by receipt_ledger.verify_chain(); absence
+#                            raises sqlite3.OperationalError (the second
+#                            confirmed symptom from the original diagnosis).
+#                            Marked `as_of_none_only`: both entry points
+#                            already skip every receipt-consuming subsystem
+#                            (EG/TG) for a historical `--as-of` sweep, so this
+#                            table is only ever actually needed when
+#                            as_of is None -- requiring it unconditionally
+#                            regressed a real, already-passing `--as-of`
+#                            code path (test_report_check_as_of_skips_
+#                            evidence_governance) and was corrected here.
+#   pairwise_r           -- NOT a hard requirement: record.get_pairwise_r()
+#                            already tolerates its absence (except
+#                            OperationalError: return {}). Listed at
+#                            "warning" severity only, so the gap is visible
+#                            without blocking anything it doesn't already
+#                            block.
+#
+# check_schema_fingerprint() below inspects ONLY what this tuple names. It
+# never enumerates the ledger's actual table/column set to look for extras --
+# additional, unknown structure is never a finding here (see
+# test_schema_fingerprint_ignores_unknown_extra_structure in
+# test_governance_verification.py). This is a floor, not a mirror; do not
+# expand it to track every column ever added to _SCHEMA_SQL.
+# ---------------------------------------------------------------------------
+
+SCHEMA_FINGERPRINT: tuple[dict, ...] = (
+    {"table": "runs", "columns": ("run_kind",), "severity": "error", "as_of_none_only": False},
+    {"table": "state_transitions", "columns": (), "severity": "error", "as_of_none_only": False},
+    {"table": "gate_results", "columns": (), "severity": "error", "as_of_none_only": False},
+    {"table": "governance_receipts", "columns": (), "severity": "error", "as_of_none_only": True},
+    {"table": "pairwise_r", "columns": (), "severity": "warning", "as_of_none_only": False},
+)
+
+
+def check_schema_fingerprint(db_path: Path | str, as_of: str | None = None) -> list[Finding]:
+    """Read-only structural check against SCHEMA_FINGERPRINT.
+
+    Purely `sqlite_master` / `PRAGMA table_info` introspection -- no CREATE,
+    ALTER, INSERT, UPDATE, or DELETE anywhere in this function, preserving
+    this module's asserted "writes nothing" property (source-scanned by an
+    existing test). Asserts; never repairs (ADR-P1-1) -- a gap is reported by
+    name, never fixed here or anywhere this function is called from.
+
+    `as_of`: pass the caller's as_of verbatim (bare date or full datetime --
+    only None-vs-not-None matters here). An element marked `as_of_none_only`
+    is skipped entirely (no finding, not even a warning) when as_of is not
+    None, matching the exact condition report.py/verify_governance() already
+    use to skip the receipt-consuming subsystems for a historical sweep.
+    """
+    findings: list[Finding] = []
+    con = sqlite3.connect(str(db_path))
+    try:
+        existing_tables = {
+            row[0] for row in
+            con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for entry in SCHEMA_FINGERPRINT:
+            if entry.get("as_of_none_only") and as_of is not None:
+                continue
+            table, columns, severity = entry["table"], entry["columns"], entry["severity"]
+            if table not in existing_tables:
+                findings.append(Finding(
+                    "GV-SCHEMA", severity,
+                    f"required table '{table}' is absent from the ledger",
+                    "schema_fingerprint",
+                ))
+                continue
+            existing_columns = {
+                row[1] for row in con.execute(f'PRAGMA table_info("{table}")')
+            }
+            for col in columns:
+                if col not in existing_columns:
+                    findings.append(Finding(
+                        "GV-SCHEMA", severity,
+                        f"required column '{table}.{col}' is absent from the ledger",
+                        "schema_fingerprint",
+                    ))
+    except Exception as exc:  # noqa: BLE001 -- fail closed, never propagate
+        findings.append(Finding(
+            "GV-SCHEMA", "error",
+            f"schema fingerprint check could not run: {type(exc).__name__}: {exc}",
+            "schema_fingerprint",
+        ))
+    finally:
+        con.close()
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Subsystem adapters — each returns (findings, ran). `ran` is False only if the
 # subsystem could not be invoked at all; a subsystem that RAN and found errors
 # still counts as run (that is the point).
@@ -197,6 +298,25 @@ def verify_governance(
     """
     findings: list[Finding] = []
     ran: list[str] = []
+
+    # 0. Schema fingerprint (Increment 3) -- must run before anything else
+    # touches the ledger. A hard-severity gap here means every downstream
+    # subsystem is unsafe to run at all (this is the exact crash class Step
+    # 0d hit in production). Short-circuit rather than let C1-C9/EG/TG run
+    # against a structurally unsound ledger and produce a confusing
+    # secondary failure.
+    schema_findings = check_schema_fingerprint(db_path, as_of=as_of)
+    findings += schema_findings
+    if any(f.severity == "error" for f in schema_findings):
+        findings.append(Finding(
+            "GV-SKIP", "info",
+            "schema fingerprint reported a hard gap; all downstream subsystem "
+            "checks skipped rather than run against a structurally unsound ledger",
+            "schema_fingerprint",
+        ))
+        counts = _counts(db_path)
+        findings.sort(key=lambda f: (-SEVERITY_ORDER[f.severity], f.subsystem, f.code))
+        return VerificationReport(False, as_of, tuple(findings), counts, tuple(ran))
 
     # 1. Hash chain (PR-1) -- the foundation everything else rests on.
     f, ok = _run("receipt_chain", "GV-CHAIN", lambda: rl.verify_chain(db_path).errors)
