@@ -13,8 +13,11 @@ Do not improvise ordering. Do not skip a STOP condition. If anything here
 conflicts with what you observe on the host, **stop and re-plan** — do not
 guess.
 
-**Status of this document: planning artifact. Not yet executed. Requires
-Rohith's final approval before Step 0 begins.**
+**Status of this document: EXECUTED 2026-07-26. Retained as the historical
+record of the procedure that was followed, and as the reference procedure
+for any future ledger migration. The execution transcript was not captured
+into this repository — see §7 Sign-off and
+`docs/governance/p1_assurance_declaration.md` claim 4.**
 
 ---
 
@@ -55,7 +58,7 @@ reads state that script 2 writes, which reads state that script 1 writes.
 | G2 | Local full suite passes at the committed state | 1529 passed / 19 skipped / 1 pre-existing unrelated failure only | §2 of this doc |
 | G3 | Local `report.py --check` clean | exit 0, 35 families | Readiness Review |
 | G4 | Local `receipt_ledger.verify_chain()` valid | `ok=True, n_receipts=26` | Readiness Review |
-| G5 | Production schema reconnaissance performed (read-only) | Step 0 below, **not yet done** | Readiness Review C-2 — **blocking** |
+| G5 | Production schema reconnaissance performed (read-only) | Step 0 below — performed during the 2026-07-26 execution; output not retained in this repository | Readiness Review C-2 — was **blocking**, satisfied at execution |
 | G6 | Reconnaissance result classified as Scenario A, B, or C | §3 below | — |
 | G7 | If Scenario C: **stop, do not proceed** — re-plan against the real shape | §3 | ADR-P1-4 |
 | G8 | A fresh on-host ledger backup exists, independent of this migration's self-backups | Step 0b | Readiness Review C-3 |
@@ -563,14 +566,14 @@ following 02:00 UTC.
 > run backing up a ledger nobody has confirmed is sound.
 
 Then, **as a separate, later documentation step (not part of this
-execution)**:
-- Update `docs/governance/p1_assurance_declaration.md` claim 4 from
-  **NOT ESTABLISHED** to a dated, evidenced claim (success or the specific
-  failure encountered).
-- Update `research/evidence_library/MIGRATIONS.md`'s retirement criteria
-  for the three D-0 scripts — they may now be considered for the deferred
-  archival decision, per that document's own §3.
-- Update `CLAUDE.md` §18 with the Increment 5 completion entry.
+execution)** — all three completed 2026-07-26 during the post-closure
+documentation reconciliation:
+- ~~Update `docs/governance/p1_assurance_declaration.md` claim 4.~~ **Done**
+  — claim 4 now reads **EXECUTED (ATTESTED)**.
+- ~~Update `research/evidence_library/MIGRATIONS.md`'s retirement criteria
+  for the three D-0 scripts.~~ **Done** — the three D-0 scripts are now
+  eligible for the deferred archival decision, per that document's §3.
+- ~~Update `CLAUDE.md` §18 with the Increment 5 completion entry.~~ **Done.**
 
 ---
 
@@ -701,8 +704,19 @@ until this re-verification passes (see Step 4).
 | Field | Value |
 |---|---|
 | Runbook version | 1.0 (2026-07-26) |
-| Scenario observed (§3) | *(fill in at execution time)* |
-| Step 2a/2b/2c results | *(fill in)* |
-| Step 3 verification | *(fill in)* |
-| Executed by | *(Rohith, on approval)* |
-| Approved to execute | **NOT YET** — awaiting explicit sign-off per this task's instruction |
+| Approved to execute | **YES** — approved by Rohith, 2026-07-26 |
+| Executed by | Rohith, on the production host, 2026-07-26 |
+| Outcome | **Completed.** Reported successful at Program P1 closure. |
+| Scenario observed (§3) | *Not recorded in this repository* |
+| Step 2a/2b/2c results | *Not recorded in this repository* |
+| Step 3 verification | *Not recorded in this repository* |
+
+> **Evidence note.** This execution was reported complete by the operator,
+> but the per-step transcript was not captured back into the repository.
+> The assurance declaration therefore records claim 4 at **EXECUTED
+> (ATTESTED)** rather than DEMONSTRATED. If the host-side output is still
+> recoverable (shell scrollback, `journalctl`, or the migration scripts'
+> own backup files under `research/evidence_library/`), appending it to
+> this section would close the gap and raise claim 4 to DEMONSTRATED. This
+> is an archival improvement, not a defect — nothing indicates the
+> migration was unsuccessful.

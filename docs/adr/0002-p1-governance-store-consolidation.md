@@ -1,8 +1,10 @@
 # ADR-0002: Program P1 — Governance Store Consolidation
 
-**Status:** Accepted (Increments 1–4, 6 implemented; Increment 5 unstarted;
-Increment 6 host-side activation unstarted; Increment 7 — this document —
-closes program documentation).
+**Status:** Accepted. Program P1 is **CLOSED** (2026-07-26): Increments 1–7
+complete, including Increment 5 (production migration, executed — recorded
+at EXECUTED (ATTESTED), see the Assurance Declaration claim 4). Increment
+6's host-side off-host activation remains unstarted and is tracked as
+operator work, not as an open increment.
 
 **Relationship to ADR-0001:** Extends, does not supersede. ADR-0001 §12
 (Backup Strategy) and §17 (Preserved Invariants) remain authoritative;
@@ -33,7 +35,8 @@ Four workstreams were scoped (see the approved Gap Analysis for the full
 restore-path assurance, off-host durability, and program-level assurance
 reporting. Increments 1–7 implement workstreams A–C plus this closing
 documentation increment; workstream D (production migration, Increment 5)
-remains gated behind Rohith's explicit authorization.
+was gated behind Rohith's explicit authorization and executed on
+2026-07-26 following that authorization.
 
 ---
 
@@ -152,13 +155,15 @@ Declaration.
 - Any new durability control (a fourth backup target, a new replication
   leg) inherits ADR-P1-5's requirement for an independent failure signal as
   a condition of being considered complete, not an optional enhancement.
-- Increment 5 (production migration) is bound by ADR-P1-3 and ADR-P1-4: it
-  may not skip local pre-validation, and it may not run outside the
-  explicit dry-run/`--commit` discipline, regardless of time pressure.
-- This ADR does not, by itself, authorize Increment 5. Authorization remains
-  a separate, explicit act by Rohith (ADR-0001 §17.3: promotion/production
-  action is a judgment, not a computation the platform performs on itself —
-  the same principle applied here to migration execution).
+- **Any** production ledger migration — Increment 5 was the first, not the
+  last — is bound by ADR-P1-3 and ADR-P1-4: it may not skip local
+  pre-validation, and it may not run outside the explicit
+  dry-run/`--commit` discipline, regardless of time pressure.
+- This ADR does not, by itself, authorize any production migration.
+  Authorization remains a separate, explicit act by Rohith (ADR-0001 §17.3:
+  promotion/production action is a judgment, not a computation the platform
+  performs on itself — the same principle applied here to migration
+  execution). Increment 5 received that authorization on 2026-07-26.
 
 ---
 

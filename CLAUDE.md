@@ -1290,19 +1290,45 @@ edits to existing documents — no code, no test, no systemd unit touched.
   This was named as risk R6 at planning and remains true after
   implementation — committing it is Rohith's call.
 
-### Remaining open items (Program P1, as of Increment 7)
+### Increment 5 Complete (2026-07-26): Production Migration
 
-Program P1's documentation scope (Increments 1–4, 6, 7) is complete.
-**Increment 5 (production migration) remains unstarted and is the only
-remaining item** — still blocked pending Rohith's explicit authorization,
-de-risked by Increment 3 (named schema diagnostics) and Increment 4 (the
-migration sequence proven clean and idempotent against a local, disposable
-copy). Increment 6's host-side off-host-backup activation (target
-provisioning, key generation/custody, `--encrypt` deployment, decrypt
-drill) is separately unstarted and is host-side operator work, not a
-queued engineering increment. See
-`docs/governance/p1_assurance_declaration.md` for the bounded statement of
-what is and is not established as of this entry.
+Executed on the production host following Rohith's explicit authorization,
+using `docs/ops/production-migration-runbook-increment5.md` unmodified. The
+D-0 sequence (`migrate_run_kind.py` →
+`migrate_bootstrap_evidence_admission.py` →
+`migrate_bootstrap_transition_receipts.py`) was applied to the canonical
+`research/evidence_library/ledger.db`, closing the schema drift that
+chartered Program P1.
+
+- **Reported outcome:** completed successfully.
+- **Evidence status — read this before citing Increment 5 as proven.** The
+  per-step execution transcript (scenario classification per runbook §3,
+  Step 2a/2b/2c results, Step 3 post-migration verification output) was
+  **not captured back into this repository**. Increment 5 is therefore
+  recorded at **EXECUTED (ATTESTED)** in
+  `docs/governance/p1_assurance_declaration.md` claim 4 — weaker than the
+  DEMONSTRATED level used for Increments 1–4 and 6, all of which rest on
+  committed, re-runnable evidence. This is an evidence-archival gap, not a
+  known defect; nothing indicates the migration was unsuccessful.
+- **To close the gap** (optional, non-blocking): recover the host-side
+  output if still available (shell scrollback, `journalctl`, or the
+  migration scripts' own `ledger.pre-*.db` backup files) and append it to
+  the runbook's §7 Sign-off. Claim 4 then rises to DEMONSTRATED.
+
+### Program P1 — CLOSED (2026-07-26)
+
+All seven increments are complete. The program's output was committed as
+`62cabdc` (code + tests) and `c14ba38` (documentation + governance) and
+pushed to `origin/main`, closing the last durability gap in the durability
+program itself — its own output no longer exists only on one machine.
+
+**Not part of Program P1, and still open:** Increment 6's host-side
+off-host-backup activation (target provisioning, key generation/custody,
+`--encrypt` deployment, decrypt drill) is host-side operator work, not a
+queued engineering increment — BK3 remains **NOT ESTABLISHED**. A BK2
+production restore drill has still never been run. Ongoing technical debt
+is tracked in §19. See `docs/governance/p1_assurance_declaration.md` for
+the bounded, per-claim statement of what is and is not established.
 
 ---
 
@@ -1358,3 +1384,30 @@ this properly (schema-ensure interaction, `tests/test_restore.py`
 coverage for a live-WAL scenario, `docs/ops/offhost-backup.md`'s decrypt
 path which also produces a plain `.db` file that could exhibit the same
 gap on its own eventual restore) before implementing.
+
+---
+
+## Code Generation Standards
+
+These rules apply to all code generated or modified in this repository unless explicitly overridden by the user.
+
+### Comments
+- Do not add comments that simply restate what the code is doing.
+- Prefer self-documenting code through clear naming and small, cohesive functions.
+- Add comments only when they explain:
+  - complex algorithms
+  - non-obvious business logic
+  - mathematical reasoning
+  - architectural constraints
+  - security-sensitive behavior
+- Do not add decorative banner comments or section separators.
+- Do not add TODO/FIXME comments unless explicitly requested.
+
+### Code Style
+- Produce production-quality implementations only.
+- Follow the existing project architecture and conventions.
+- Avoid placeholder implementations unless explicitly requested.
+- Preserve existing code style within the file being modified.
+- Use descriptive names instead of explanatory comments.
+- Keep changes focused on the requested scope; avoid unrelated refactoring.
+

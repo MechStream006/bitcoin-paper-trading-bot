@@ -92,5 +92,6 @@ The D-0-determined minimal migration set — `migrate_run_kind.py` →
 `migrate_bootstrap_evidence_admission.py` → `migrate_bootstrap_transition_receipts.py`
 — closes the historically-documented drift cleanly, verifiably, and
 idempotently, using the scripts' real, unmodified CLI. This is local
-evidence only; it does not itself authorize the production migration
-(Increment 5, still gated on Rohith's explicit authorization).
+evidence only; it did not itself authorize the production migration.
+Increment 5 was separately authorized by Rohith and executed on the
+production host on 2026-07-26.

@@ -206,6 +206,13 @@ history: `CLAUDE.md` §18. Migration script inventory:
 BK2: *"Backups are worthless until a restore drill proves them."* Full
 write-up of the first drill: `docs/ops/restore-drill-2026-07-19.md`.
 
+**Label Store** (Phase 3 WBS 3.10, repository-side only — not yet on any
+production host): `docs/ops/label-store-restore-drill-2026-08-06.md`. Not
+folded into the quarterly production script below yet, since
+`label_store.db` has no production deployment to drill against until WBS
+3.4/host-side activation; add a third `restore.py` invocation there
+(mirroring the `btc_trading`/`ledger` pair) once it does.
+
 Repeat quarterly, **on the production host**, against a real backup
 artifact, restoring into an isolated scratch path (never the live DB path):
 

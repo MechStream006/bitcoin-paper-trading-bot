@@ -351,7 +351,31 @@ class TestDecisionFnAtr:
         import sys
         research_evidence = pathlib.Path(__file__).resolve().parents[2] / "evidence"
         sys.path.insert(0, str(research_evidence))
-        from signals import sig_atr_expansion  # noqa: PLC0415
+
+        # signals.py does `from engine import SignalSpec` at module level. sys.modules
+        # is process-global and research/dq/engine.py (an unrelated subsystem) also
+        # registers under the bare name "engine" when it happens to import first
+        # (e.g. tests/test_dq_engine.py, elsewhere in a full-suite run) -- whichever
+        # wins shadows the other for every later bare "import engine" in the process,
+        # which is exactly what made this test intermittent in full-suite runs
+        # (see docs/engineering/incidents/INC-0003-engine-module-name-collision.md,
+        # EH-002). Scoping sys.modules['engine'] to the correct module only for the
+        # duration of this import -- and restoring whatever was there before --
+        # fixes this test without touching signals.py or research/dq/engine.py.
+        research_feature_store = pathlib.Path(__file__).resolve().parents[2] / "feature_store"
+        sys.path.insert(0, str(research_feature_store))
+        import evidence_engine_bindings as _beb  # noqa: PLC0415
+
+        _had_prior_engine = "engine" in sys.modules
+        _prior_engine = sys.modules.get("engine")
+        sys.modules["engine"] = _beb.engine
+        try:
+            from signals import sig_atr_expansion  # noqa: PLC0415
+        finally:
+            if _had_prior_engine:
+                sys.modules["engine"] = _prior_engine
+            else:
+                del sys.modules["engine"]
 
         rng   = np.random.default_rng(7)
         n     = 200
