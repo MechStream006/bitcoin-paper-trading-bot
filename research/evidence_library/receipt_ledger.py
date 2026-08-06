@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS governance_receipts (
     engine_version    TEXT,
     body_json         TEXT NOT NULL,
     signature_json    TEXT NOT NULL DEFAULT '[]',
+    attestation_basis TEXT,
+    contract_version  TEXT,
     CHECK (decision_class IN ('derived','discretionary'))
 );
 CREATE INDEX IF NOT EXISTS ix_receipt_subject
@@ -93,6 +95,25 @@ class ChainVerificationResult:
 
 
 def init_db(path: Path | str) -> None:
+    """
+    Idempotent CREATE-only schema-ensure: `CREATE TABLE/INDEX/TRIGGER IF NOT
+    EXISTS` against `_SCHEMA_SQL`, nothing else. A brand-new database gets
+    `attestation_basis`/`contract_version` immediately (they are columns in
+    `_SCHEMA_SQL`'s CREATE TABLE). A pre-existing database that predates
+    those two columns is NOT altered here.
+
+    Deliberately NOT an "ALTER TABLE ADD COLUMN IF MISSING" step (unlike
+    record.py's `run_kind` precedent) -- found during this milestone's own
+    verification pass to be reachable from `governance_verification.
+    verify_governance()` / `report.py --check`'s "read-only" sweep (both
+    call `evidence_governance.init_db()`, which cascades here), which would
+    make a documented read-only verification path silently mutate the real
+    ledger's schema the first time a new column is introduced, before any
+    migration has been authorised. Column-ensure for a pre-existing table
+    lives ONLY in migrate_receipt_attestation_basis.py's own explicit,
+    human-invoked `main()` -- never behind a call that verification code
+    reaches implicitly.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
@@ -152,8 +173,9 @@ def append_receipt_on_connection(con: sqlite3.Connection, body: ReceiptBody) -> 
                 subject_kind, subject_id, subject_version,
                 from_state, to_state, as_of, decided_at,
                 actor_type, actor_id, authority_hash, rule_hash,
-                engine_version, body_json, signature_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                engine_version, body_json, signature_json,
+                attestation_basis, contract_version
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 receipt_id, next_seq, prev_hash, body_dict["schema_version"],
@@ -164,6 +186,7 @@ def append_receipt_on_connection(con: sqlite3.Connection, body: ReceiptBody) -> 
                 body_dict["actor"]["type"], body_dict["actor"]["id"],
                 authority_hash, rule_hash, engine_version,
                 json.dumps(body_dict, sort_keys=True), "[]",
+                body_dict.get("attestation_basis"), body_dict.get("contract_version"),
             ),
         )
     except sqlite3.IntegrityError as exc:

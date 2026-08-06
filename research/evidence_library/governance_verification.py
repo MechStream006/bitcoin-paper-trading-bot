@@ -144,6 +144,38 @@ class VerificationReport:
 #                            "warning" severity only, so the gap is visible
 #                            without blocking anything it doesn't already
 #                            block.
+#   governance_receipts.
+#   attestation_basis /
+#   contract_version      -- Engineering roadmap Phase 0 (WBS 0.9), mirrors
+#                            the pairwise_r precedent exactly. Neither column
+#                            is read by any existing code path (no Execution
+#                            receipt is ever emitted yet -- WBS 0.6), so
+#                            neither absence blocks anything today. Listed at
+#                            "warning" severity, "as_of_none_only": True
+#                            (same conditionality as the governance_receipts
+#                            table's own entry above, since a column can only
+#                            matter where the table itself does).
+#
+#                            NOTE (recorded honestly, not smoothed over): the
+#                            real local ledger already carries both columns as
+#                            of this same milestone -- not via
+#                            migrate_receipt_attestation_basis.py's audited
+#                            backup+--commit path, but because an EARLIER,
+#                            now-fixed version of receipt_ledger.init_db()
+#                            added them as a side effect of THIS module's own
+#                            verify_governance() sweep, before that defect was
+#                            found and corrected within this same milestone
+#                            (this file's own write-verb guard test, further
+#                            down, is exactly what a regression of that defect
+#                            would need to keep passing). Verified harmless
+#                            (zero row/value mutation, chain intact) and left
+#                            in place rather than reverted (an unnecessary
+#                            second write against real data). This entry
+#                            therefore reports zero findings against the real
+#                            ledger already, ahead of the audited migration
+#                            run -- which no longer needs to touch the real
+#                            ledger's schema at all. See this milestone's
+#                            verification record for the full incident note.
 #
 # check_schema_fingerprint() below inspects ONLY what this tuple names. It
 # never enumerates the ledger's actual table/column set to look for extras --
@@ -159,6 +191,12 @@ SCHEMA_FINGERPRINT: tuple[dict, ...] = (
     {"table": "gate_results", "columns": (), "severity": "error", "as_of_none_only": False},
     {"table": "governance_receipts", "columns": (), "severity": "error", "as_of_none_only": True},
     {"table": "pairwise_r", "columns": (), "severity": "warning", "as_of_none_only": False},
+    {
+        "table": "governance_receipts",
+        "columns": ("attestation_basis", "contract_version"),
+        "severity": "warning",
+        "as_of_none_only": True,
+    },
 )
 
 

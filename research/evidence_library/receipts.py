@@ -44,10 +44,20 @@ ACTIONS = frozenset({
     # economically synthetic. Overloading the admission verbs here would
     # encode exactly the conflation the spec warns against.
     "evaluate",
+    # Phase 3 Label Store roadmap v1.1.0 (WBS 3.8a). Purely additive, same
+    # discipline as "evaluate" above.
+    "register", "adjudicate",
 })
 
 SUBJECT_KINDS = frozenset({
     "contract", "family", "evidence_run", "feature", "dataset", "model",
+    # Phase 3 Label Store roadmap v1.1.0, WBS 3.8a. One "label" kind
+    # covers both Specification-registration and Value-adjudication
+    # events -- generic over subject kind (the roadmap's own phrase),
+    # mirroring how "feature" above already covers every feature-related
+    # event without a separate feature_specification/feature_value split.
+    # Purely additive: no existing member is touched.
+    "label",
 })
 
 ACTOR_TYPES = frozenset({"human", "service"})
@@ -71,9 +81,62 @@ DECISION_TAXONOMY: dict[str, str] = {
     "model.promote": "discretionary",
     "model.retire": "discretionary",
     "reversal": "discretionary",
+    # Engineering roadmap Phase 0 (WBS 0.6) / ADR-I015 §12.1: RESERVED, NOT YET
+    # EMITTED. No call site constructs a body with any of these three decision
+    # types -- the Trading Platform series that would (ADR-I018) does not exist.
+    # Reserving before emission is ADR-I015 RG1 ("A decision type is reserved by
+    # constitutional act, then emitted later when the corresponding capability
+    # exists") and RG3 ("Reserved-but-unemitted types are normal, not defects").
+    # All three are "discretionary" per ADR-I015 §12.1's own table: a venue fill
+    # is an external fact the platform records, not a computation it can
+    # re-derive, so it is envelope-verified rather than replayed.
+    "execution.order": "discretionary",
+    "execution.fill": "discretionary",
+    "execution.reconcile": "discretionary",
+    # -----------------------------------------------------------------
+    # Phase 3 Label Store roadmap v1.1.0 (WBS 3.8a) / ADR-I011 LG1, §9
+    # ("registration receipt"), IQROS-P8, IQROS-P10. Purely additive, same
+    # discipline as "evaluate" above: no existing receipt uses either of
+    # these two types, no existing validation is loosened, and a type's
+    # class never changes once added.
+    #
+    # `label.register` is DERIVED: ADR-I011 §12 Tier A completeness is a
+    # deterministic rule over a Specification's own declared fields,
+    # replayable exactly like `evidence.admit`/`.reject`.
+    #
+    # `label.adjudicate` is DISCRETIONARY: adjudicating a Flagged label is
+    # a human act (LG1, IQROS-P8) -- replay verifies the envelope, never
+    # re-derives the human's judgment, exactly like
+    # `family.promote`/`.demote`.
+    "label.register": "derived",
+    "label.adjudicate": "discretionary",
+    # Phase 3 Label Store roadmap v1.1.0 (WBS 3.8b) / ADR-I010 FG1
+    # (`FS-GAP-004` closure). Purely additive -- "feature" (SUBJECT_KINDS)
+    # and "register" (ACTIONS) already existed (the former since PR-1, the
+    # latter added at WBS 3.8a), so this is the one remaining taxonomy row
+    # needed to receipt Phase 2's 17 pre-existing Feature Specifications.
+    # DERIVED for the same reason `label.register` is: ADR-I010 §13 Tier A
+    # completeness is a deterministic rule over a Specification's own
+    # declared fields. Every receipt this migration writes is
+    # `attestation='bootstrap'`, so `replay()`'s bootstrap check refuses
+    # before decision_class is ever consulted (receipts.py's own,
+    # unmodified control flow) -- no live `feature.register` emitter
+    # exists or is implied by this addition.
+    "feature.register": "derived",
 }
 
 ATTESTATION_BOOTSTRAP = "bootstrap"
+
+# ADR-I015 §5.3 -- attestation BASIS, orthogonal to decision_class's derived/
+# discretionary VERIFICATION split (§5.2, preserved exactly, unchanged by this
+# addition). Attestation concerns *where the recorded fact came from*;
+# decision_class concerns *how it is verified*. Distinct from the pre-existing
+# `attestation`/`attestation_note` pair below, which predates ADR-I015 and
+# marks only ONE thing -- "this receipt is a migration backfill" -- and is left
+# completely unchanged by this addition (see ReceiptBody.attestation_basis).
+ATTESTATION_BASES = frozenset({
+    "platform-observed", "operator-attested", "external-venue", ATTESTATION_BOOTSTRAP,
+})
 
 
 class ReceiptError(ValueError):
@@ -283,6 +346,28 @@ class ReceiptBody:
     prev_receipt_hash: str | None = None
     attestation: str | None = None
     attestation_note: str | None = None
+    # --- Engineering roadmap Phase 0 (WBS 0.5) / ADR-I015 §5.3, §6, RVX1 ---
+    # Both nullable and additive: every existing caller (contract_receipts.py,
+    # evidence_governance.py, transition_governance.py, and the three
+    # migrate_bootstrap_*.py scripts) constructs a ReceiptBody without these
+    # two keywords and is completely unaffected -- they default to None,
+    # participate in hashing like any other field (a receipt differing only in
+    # one of these has a different receipt_id, per IQROS-P5), and are validated
+    # only when set.
+    #
+    # attestation_basis: "where the recorded fact came from" (ADR-I015 §5.3),
+    # distinct from `attestation` above ("is this receipt a migration
+    # backfill"). The two are NOT cross-validated against each other in this
+    # milestone -- see the technical-debt note in this milestone's verification
+    # record.
+    #
+    # contract_version: the receipt CONTRACT version (ADR-I015 RVX1), distinct
+    # from `schema_version` above (this module's pre-existing, narrower body-
+    # shape counter, unchanged and untouched). No historical receipt can be
+    # retroactively assigned a contract_version it was never written against
+    # (Ph6) -- it is populated only by future emissions.
+    attestation_basis: str | None = None
+    contract_version: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -305,6 +390,8 @@ class ReceiptBody:
             "prev_receipt_hash": self.prev_receipt_hash,
             "attestation": self.attestation,
             "attestation_note": self.attestation_note,
+            "attestation_basis": self.attestation_basis,
+            "contract_version": self.contract_version,
         }
 
 
@@ -379,6 +466,12 @@ def validate_body(body: ReceiptBody) -> list[str]:
         errors.append(f"attestation, if set, must be '{ATTESTATION_BOOTSTRAP}', got '{body.attestation}'")
     if body.attestation == ATTESTATION_BOOTSTRAP and not (body.attestation_note or "").strip():
         errors.append("attestation_note is required and must be non-empty when attestation='bootstrap'")
+
+    if body.attestation_basis is not None and body.attestation_basis not in ATTESTATION_BASES:
+        errors.append(
+            f"attestation_basis, if set, must be one of {sorted(ATTESTATION_BASES)}, "
+            f"got '{body.attestation_basis}' (ADR-I015 §5.3)"
+        )
 
     # Rule 3 defense-in-depth: confirm the body is hashable before it is ever
     # handed to a ledger. This also catches accidental raw floats early with

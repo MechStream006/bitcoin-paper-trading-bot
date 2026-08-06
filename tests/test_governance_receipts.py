@@ -164,6 +164,19 @@ class TestHashStability:
         ids = {r.compute_receipt_id(body.to_dict()) for _ in range(10)}
         assert len(ids) == 1
 
+    def test_receipt_id_changes_with_attestation_basis_alone(self):
+        # IQROS-P5: identity is a content hash. attestation_basis must
+        # participate in it like any other field, or two receipts that
+        # differ only in "where the fact came from" would be indistinguishable.
+        plain = make_body()
+        with_basis = make_body(attestation_basis="platform-observed")
+        assert r.compute_receipt_id(plain.to_dict()) != r.compute_receipt_id(with_basis.to_dict())
+
+    def test_receipt_id_changes_with_contract_version_alone(self):
+        plain = make_body()
+        versioned = make_body(contract_version="1.0.0")
+        assert r.compute_receipt_id(plain.to_dict()) != r.compute_receipt_id(versioned.to_dict())
+
 
 # ---------------------------------------------------------------------------
 # Validation / malformed receipts
@@ -236,12 +249,77 @@ class TestValidation:
         errors = r.validate_body(body)
         assert any("attestation, if set" in e for e in errors)
 
+    def test_attestation_basis_defaults_to_none_and_is_valid(self):
+        body = make_body()
+        assert body.attestation_basis is None
+        assert body.contract_version is None
+        assert r.validate_body(body) == []
+
+    def test_each_attestation_basis_value_accepted(self):
+        for basis in sorted(r.ATTESTATION_BASES):
+            body = make_body(attestation_basis=basis)
+            assert r.validate_body(body) == [], f"{basis!r} should be a valid attestation_basis"
+
+    def test_invalid_attestation_basis_value_rejected(self):
+        body = make_body(attestation_basis="carrier-pigeon")
+        errors = r.validate_body(body)
+        assert any("attestation_basis, if set" in e for e in errors)
+
+    def test_contract_version_accepts_any_non_validated_string(self):
+        # ADR-I015 does not constrain contract_version's format beyond "the
+        # receipt contract version this receipt conforms to" -- no enum, no
+        # regex. This test documents that absence of a format check is
+        # deliberate, not an oversight.
+        body = make_body(contract_version="1.0.0")
+        assert r.validate_body(body) == []
+
     def test_validate_body_or_raise_raises_on_error(self):
         with pytest.raises(r.BodyValidationError):
             r.validate_body_or_raise(make_body(action="teleport"))
 
     def test_validate_body_or_raise_silent_on_valid(self):
         r.validate_body_or_raise(make_body())  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Execution decision type -- reserved (WBS 0.6), NOT yet emitted (RG3)
+# ---------------------------------------------------------------------------
+
+class TestExecutionDecisionTypeReserved:
+    def test_all_three_execution_types_are_reserved_as_discretionary(self):
+        for decision_type in ("execution.order", "execution.fill", "execution.reconcile"):
+            assert r.DECISION_TAXONOMY[decision_type] == "discretionary"
+
+    def test_a_reserved_execution_body_validates_structurally(self):
+        # Reserved does not mean unusable -- RG1/RG3 distinguish "reserved,
+        # not yet emitted" from "unreserved, refused". A structurally valid
+        # body of this type must pass validation today, even though nothing
+        # in the platform constructs one yet.
+        body = make_body(
+            decision_type="execution.order",
+            action="transition",
+            subject=r.Subject(kind="contract", id="placeholder-not-a-real-order"),
+        )
+        assert r.validate_body(body) == []
+
+    def test_no_existing_module_constructs_an_execution_receipt(self):
+        # RG3: "Reserved-but-unemitted types are normal." Confirmed
+        # structurally, not merely asserted -- a repo-wide search for the
+        # three literal decision-type strings outside this test file and the
+        # taxonomy declaration itself must find nothing.
+        research_dir = ROOT / "research"
+        needles = ("execution.order", "execution.fill", "execution.reconcile")
+        hits: list[str] = []
+        for path in research_dir.rglob("*.py"):
+            if path.name in ("receipts.py", "test_governance_receipts.py"):
+                continue
+            if "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for needle in needles:
+                if needle in text:
+                    hits.append(f"{path.relative_to(ROOT)}: {needle!r}")
+        assert hits == [], f"Execution decision type(s) already emitted somewhere: {hits}"
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +360,22 @@ class TestReplayFoundation:
 
     def test_replay_derived_without_rule_fn_raises_not_implemented(self):
         body = make_derived_body().to_dict()
+        with pytest.raises(NotImplementedError):
+            r.replay(body)
+
+    def test_rm3_new_fields_do_not_create_a_rule_substitution_path(self):
+        # ADR-I015 RM3: "Substituting a current rule for an unresolvable
+        # historical one is prohibited." Engineering roadmap WBS 0.7 --
+        # confirms the additive attestation_basis/contract_version fields
+        # give replay() no new way to satisfy a derived receipt without an
+        # explicit rule_fn. The concrete historical-rule-resolution guard
+        # (get_rule() raising UnknownRuleError) lives in evidence_governance.py
+        # and is unaffected by this milestone -- verified unchanged by the
+        # full regression suite; this test covers the generic foundation
+        # replay() itself, which is what this module owns.
+        body = make_derived_body(
+            attestation_basis="platform-observed", contract_version="1.0.0"
+        ).to_dict()
         with pytest.raises(NotImplementedError):
             r.replay(body)
 
@@ -382,6 +476,80 @@ class TestRegistryPersistence:
         rows = rl.get_receipts_by_type(db_path, "readiness.verdict")
         assert len(rows) == 1
         assert rows[0]["decision_type"] == "readiness.verdict"
+
+    def test_attestation_basis_and_contract_version_round_trip(self, db_path):
+        row = rl.append_receipt(
+            db_path,
+            make_body(attestation_basis="platform-observed", contract_version="1.0.0"),
+        )
+        assert row["attestation_basis"] == "platform-observed"
+        assert row["contract_version"] == "1.0.0"
+        assert row["body"]["attestation_basis"] == "platform-observed"
+        assert row["body"]["contract_version"] == "1.0.0"
+
+        fetched = rl.get_receipt(db_path, row["receipt_id"])
+        assert fetched["attestation_basis"] == "platform-observed"
+        assert fetched["contract_version"] == "1.0.0"
+
+    def test_attestation_basis_and_contract_version_default_to_null_column(self, db_path):
+        row = rl.append_receipt(db_path, make_body())
+        assert row["attestation_basis"] is None
+        assert row["contract_version"] is None
+
+    def test_init_db_on_pre_existing_table_without_new_columns_does_not_alter_it(self, tmp_path):
+        # Reproduces a ledger created before this milestone: governance_receipts
+        # exists but lacks attestation_basis/contract_version. Mirrors
+        # test_migration_harness.py's reproduction style for runs.run_kind.
+        #
+        # init_db() must NOT add the columns here -- that ALTER is deliberately
+        # NOT performed by init_db() (see its docstring): init_db() is reachable
+        # from governance_verification.verify_governance()'s documented
+        # "read-only" sweep via evidence_governance.init_db()'s cascade, and an
+        # ALTER there would make read-only verification silently mutate a real
+        # ledger's schema. Column-ensure lives only in
+        # migrate_receipt_attestation_basis.ensure_columns(), covered in
+        # tests/test_migrate_receipt_attestation_basis.py.
+        p = tmp_path / "pre_existing.db"
+        con = sqlite3.connect(p)
+        con.executescript("""
+            CREATE TABLE governance_receipts (
+                receipt_id        TEXT PRIMARY KEY,
+                seq               INTEGER NOT NULL UNIQUE,
+                prev_receipt_hash TEXT,
+                schema_version    INTEGER NOT NULL,
+                decision_type     TEXT NOT NULL,
+                decision_class    TEXT NOT NULL,
+                action            TEXT NOT NULL,
+                subject_kind      TEXT NOT NULL,
+                subject_id        TEXT NOT NULL,
+                subject_version   TEXT,
+                from_state        TEXT,
+                to_state          TEXT,
+                as_of             TEXT NOT NULL,
+                decided_at        TEXT NOT NULL,
+                actor_type        TEXT NOT NULL,
+                actor_id          TEXT NOT NULL,
+                authority_hash    TEXT NOT NULL,
+                rule_hash         TEXT,
+                engine_version    TEXT,
+                body_json         TEXT NOT NULL,
+                signature_json    TEXT NOT NULL DEFAULT '[]'
+            );
+        """)
+        con.commit()
+        con.close()
+
+        columns_before = {row[1] for row in sqlite3.connect(p).execute(
+            "PRAGMA table_info(governance_receipts)")}
+        assert "attestation_basis" not in columns_before
+        assert "contract_version" not in columns_before
+
+        rl.init_db(p)  # must not raise; must NOT add either column
+
+        columns_after = {row[1] for row in sqlite3.connect(p).execute(
+            "PRAGMA table_info(governance_receipts)")}
+        assert "attestation_basis" not in columns_after
+        assert "contract_version" not in columns_after
 
 
 # ---------------------------------------------------------------------------

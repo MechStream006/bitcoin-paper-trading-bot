@@ -463,6 +463,53 @@ def _ledger_missing_pairwise_r(tmp_path) -> Path:
     return p
 
 
+def _ledger_missing_receipt_attestation_columns(tmp_path) -> Path:
+    """A fully valid ledger with attestation_basis/contract_version removed
+    afterward -- SQLite cannot DROP a single column pre-3.35 style ALTER, so
+    the table is rebuilt without them (isolates this warning-severity
+    element from every hard/error one, mirroring
+    _ledger_missing_pairwise_r's isolation style exactly)."""
+    p = tmp_path / "ledger.db"
+    eg.init_db(p)
+    con = sqlite3.connect(p)
+    con.executescript("""
+        CREATE TABLE governance_receipts_new (
+            receipt_id        TEXT PRIMARY KEY,
+            seq               INTEGER NOT NULL UNIQUE,
+            prev_receipt_hash TEXT,
+            schema_version    INTEGER NOT NULL,
+            decision_type     TEXT NOT NULL,
+            decision_class    TEXT NOT NULL,
+            action            TEXT NOT NULL,
+            subject_kind      TEXT NOT NULL,
+            subject_id        TEXT NOT NULL,
+            subject_version   TEXT,
+            from_state        TEXT,
+            to_state          TEXT,
+            as_of             TEXT NOT NULL,
+            decided_at        TEXT NOT NULL,
+            actor_type        TEXT NOT NULL,
+            actor_id          TEXT NOT NULL,
+            authority_hash    TEXT NOT NULL,
+            rule_hash         TEXT,
+            engine_version    TEXT,
+            body_json         TEXT NOT NULL,
+            signature_json    TEXT NOT NULL DEFAULT '[]'
+        );
+        INSERT INTO governance_receipts_new SELECT
+            receipt_id, seq, prev_receipt_hash, schema_version, decision_type,
+            decision_class, action, subject_kind, subject_id, subject_version,
+            from_state, to_state, as_of, decided_at, actor_type, actor_id,
+            authority_hash, rule_hash, engine_version, body_json, signature_json
+        FROM governance_receipts;
+        DROP TABLE governance_receipts;
+        ALTER TABLE governance_receipts_new RENAME TO governance_receipts;
+    """)
+    con.commit()
+    con.close()
+    return p
+
+
 def _ledger_with_extra_unknown_structure(tmp_path) -> Path:
     """A fully valid ledger PLUS an unrelated extra table and an extra column
     on an existing table -- neither is named anywhere in SCHEMA_FINGERPRINT."""
@@ -526,6 +573,16 @@ class TestSchemaFingerprint:
         pairwise_findings = [f for f in findings if "pairwise_r" in f.message]
         assert pairwise_findings, "expected a finding naming pairwise_r"
         assert all(f.severity == "warning" for f in pairwise_findings)
+        assert not any(f.severity == "error" for f in findings)
+
+    def test_missing_receipt_attestation_columns_is_warning_not_error(self, tmp_path):
+        # Engineering roadmap Phase 0 WBS 0.9 -- mirrors
+        # test_missing_pairwise_r_is_warning_not_error exactly.
+        p = _ledger_missing_receipt_attestation_columns(tmp_path)
+        findings = gv.check_schema_fingerprint(p)
+        attestation_findings = [f for f in findings if "attestation_basis" in f.message or "contract_version" in f.message]
+        assert attestation_findings, "expected findings naming attestation_basis/contract_version"
+        assert all(f.severity == "warning" for f in attestation_findings)
         assert not any(f.severity == "error" for f in findings)
 
     def test_ignores_unknown_extra_structure(self, tmp_path):
