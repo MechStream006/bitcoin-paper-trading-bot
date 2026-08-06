@@ -127,7 +127,7 @@ missing_fields = [f for f in required_fields if f not in manifest_dict]
 check("all required fields present in dict",  len(missing_fields) == 0,
       f"missing: {missing_fields}")
 
-check("schema_version == 1",  manifest_dict.get("schema_version") == SCHEMA_VERSION)
+check(f"schema_version == {SCHEMA_VERSION}",  manifest_dict.get("schema_version") == SCHEMA_VERSION)
 check("parquet_file == 'data.parquet'",
       manifest_dict.get("parquet_file") == "data.parquet")
 

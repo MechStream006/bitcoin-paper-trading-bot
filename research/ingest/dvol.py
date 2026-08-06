@@ -40,6 +40,9 @@ if str(_RESEARCH_ROOT) not in sys.path:
 
 from storage.lake import partition_path, write_partition          # noqa: E402
 from storage.manifest import write_manifest                       # noqa: E402
+from storage.raw_lake import land_raw                              # noqa: E402
+from quality.gauntlet import run_gauntlet                          # noqa: E402
+from quality.admissibility import partition_ceiling                # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +54,30 @@ RESOLUTION   = "1D"
 DAY_MS       = 86_400_000
 WINDOW_DAYS  = 900           # < 1000-row cap, safe per-request window
 INCEPTION_MS = int(datetime(2021, 3, 24, tzinfo=timezone.utc).timestamp() * 1000)
+
+# ADR-I009 §13.3 normalisation contract version for THIS source's
+# _normalize(). Bump only when _normalize()'s own logic changes (dtype
+# coercion, ordering, dedup rule, boundary handling) -- not for changes
+# elsewhere in this file.
+NORMALIZATION_CONTRACT_VERSION = 1
+
+# ADR-I009 §13.2 -- the population statement every observation in this
+# dataset exists under (WBS 1.5). Mandatory on every raw-lake landing
+# (storage.raw_lake.land_raw() refuses a blank value); always passed on
+# every canonical write below, making it mandatory IN PRACTICE for this
+# path even though storage.manifest.write_manifest()'s own parameter stays
+# optional for backward compatibility with other callers.
+CONDITIONING = (
+    "Deribit DVOL: the exchange's own published 30-day forward-looking "
+    "BTC implied-volatility index, one observation per UTC calendar day at "
+    "the 00:00 boundary. Complete for the queried range subject to (a) "
+    "Deribit's DVOL inception at 2021-03-24 -- no observations exist "
+    "before it by construction, not by omission -- and (b) the public "
+    "endpoint's availability at ingest time. Unlike the audited option "
+    "corpus, this is not an ATM/near-expiry sliding-window sample: DVOL is "
+    "a single published index value per day, not a derived aggregate over "
+    "a filtered instrument universe."
+)
 
 
 def _month_bounds_ms(year: int, month: int) -> tuple[int, int]:
@@ -146,7 +173,8 @@ def ingest_range(
 
     span_start = _month_bounds_ms(*todo[0])[0]
     span_end   = _month_bounds_ms(*todo[-1])[1]
-    full = _normalize(_fetch_range(span_start, span_end))
+    fetched = _fetch_range(span_start, span_end)   # as-received (Z2) -- pre-normalisation
+    full    = _normalize(fetched)                   # canonical (Z3)
 
     results: list[dict] = []
     for (yy, mm) in months:
@@ -156,8 +184,29 @@ def ingest_range(
                             "year": yy, "month": mm})
             continue
         lo, hi = _month_bounds_ms(yy, mm)
+        fetched_at = datetime.now(timezone.utc).isoformat()
+
+        # Z2 -- land as-received, content-hash-addressed, revisioned
+        # (WBS 1.2/1.3; ADR-I009 §9, §13.1, §16.1).
+        raw_slice = fetched[fetched["open_time"].between(lo, hi)].copy().reset_index(drop=True)
+        raw_receipt = land_raw(
+            raw_slice, base_dir, dataset=DATASET, symbol=symbol, year=yy, month=mm,
+            source="deribit", source_url=BASE_URL, conditioning=CONDITIONING,
+            fetched_at=fetched_at,
+        )
+
+        # Z3 -- canonical, unchanged in shape/path from before this milestone.
         part = full[full["open_time"].between(lo, hi)].copy().reset_index(drop=True)
         out_file = write_partition(part, base_dir, DATASET, symbol, yy, mm)
+
+        # Assessed -> Certified (WBS 1.4; ADR-I009 §10, §18; ADR-I014).
+        # A low ceiling is a label, not a failure (ADR-I012 DA3) -- this
+        # never blocks the write above, it only records what was found.
+        gauntlet_report = run_gauntlet(
+            part, dataset=DATASET, symbol=symbol, year=yy, month=mm, ts_column="open_time",
+        )
+        ceiling = partition_ceiling(gauntlet_report)
+
         write_manifest(
             out_file, dataset=DATASET, symbol=symbol, year=yy, month=mm,
             source="deribit", source_url=BASE_URL,
@@ -165,12 +214,29 @@ def ingest_range(
             min_ts=int(part["open_time"].min()) if len(part) else 0,
             max_ts=int(part["open_time"].max()) if len(part) else 0,
             ts_column="open_time",
-            ingest_ts=datetime.now(timezone.utc).isoformat(),
+            ingest_ts=fetched_at,
             config_version=1,
+            normalization_contract_version=NORMALIZATION_CONTRACT_VERSION,
+            conditioning=CONDITIONING,
+            raw_content_hash=raw_receipt["hash"],
+            admissibility={
+                "certification": ceiling.certification.name,
+                "readiness": ceiling.readiness.name,
+                "lattice_version": ceiling.lattice_version,
+            },
         )
-        results.append({"skipped": False, "dataset": DATASET, "symbol": symbol,
-                        "year": yy, "month": mm, "rows": len(part)})
-        log.info("Ingested dvol/%s %d-%02d -> %d rows", symbol, yy, mm, len(part))
+        results.append({
+            "skipped": False, "dataset": DATASET, "symbol": symbol,
+            "year": yy, "month": mm, "rows": len(part),
+            "raw_hash": raw_receipt["hash"],
+            "raw_is_new_revision": raw_receipt["is_new_revision"],
+            "certification": ceiling.certification.name,
+            "readiness": ceiling.readiness.name,
+        })
+        log.info(
+            "Ingested dvol/%s %d-%02d -> %d rows (certification=%s, raw_revision=%d)",
+            symbol, yy, mm, len(part), ceiling.certification.name, raw_receipt["revision_ordinal"],
+        )
     return results
 
 

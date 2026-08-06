@@ -47,6 +47,9 @@ if str(_RESEARCH_ROOT) not in sys.path:
     sys.path.insert(0, str(_RESEARCH_ROOT))
 
 from storage.lake import partition_path, write_partition  # noqa: E402
+from storage.raw_lake import land_raw                       # noqa: E402
+from quality.gauntlet import run_gauntlet                    # noqa: E402
+from quality.admissibility import partition_ceiling          # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +66,35 @@ _BULK_ROOT = {
 
 # ── Minute-candle rows expected per day (1 row / minute) ─────────────────────
 _ROWS_PER_DAY = 1440
+
+# ADR-I009 §13.3 normalisation contract version for THIS source's
+# _normalize(). Bump only when _normalize()'s own logic changes (dtype
+# coercion, ordering, dedup rule, boundary handling -- e.g. the
+# microsecond-vs-millisecond timestamp detection below) -- not for changes
+# elsewhere in this file.
+NORMALIZATION_CONTRACT_VERSION = 1
+
+
+def _conditioning(dataset: str) -> str:
+    """ADR-I009 §13.2 -- the population statement every observation exists
+    under (WBS 1.6, reusing the WBS 1.5 pattern verified on
+    research/ingest/dvol.py and research/ingest/funding.py). A function, not
+    a module constant, because `dataset` ('spot'/'perp') is a per-call
+    parameter here, unlike DATASET in the other two ingest writers.
+    Mandatory on every raw-lake landing (storage.raw_lake.land_raw() refuses
+    a blank value); always passed on every canonical write below.
+    """
+    label = "Binance spot BTCUSDT" if dataset == "spot" else "Binance USDT-M perpetual BTCUSDT"
+    return (
+        f"{label} 1-minute OHLCV candles, primarily from Binance Vision's "
+        f"public monthly bulk archive (no auth), falling back to CCXT's "
+        f"public REST API for months not yet archived (typically the "
+        f"current calendar month). Complete for the queried range subject "
+        f"to (a) Binance Vision's archive publication lag and (b) bulk-"
+        f"archive/CCXT availability at ingest time. Every 1-minute candle "
+        f"in the queried window is included; this is not an ATM/near-"
+        f"expiry-conditioned sliding-window sample."
+    )
 
 
 def bulk_url(dataset: str, symbol: str, year: int, month: int, interval: str = "1m") -> str:
@@ -231,7 +263,18 @@ def ingest_month(
         df     = _fetch_ccxt(dataset, ccxt_symbol, year, month)
         source = "ccxt"
 
-    df = _normalize(df)
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    conditioning = _conditioning(dataset)
+
+    # Z2 -- land as-received, content-hash-addressed, revisioned
+    # (WBS 1.6, reusing WBS 1.2/1.3; ADR-I009 §9, §13.1, §16.1).
+    raw_receipt = land_raw(
+        df, base_dir, dataset=dataset, symbol=symbol, year=year, month=month,
+        source=source, source_url=url if source == "bulk" else None,
+        conditioning=conditioning, fetched_at=fetched_at,
+    )
+
+    df = _normalize(df)   # canonical (Z3)
 
     # Trim any rows that leaked outside the requested month boundary.
     start_ms, end_ms = _month_bounds_ms(year, month)
@@ -242,6 +285,14 @@ def ingest_month(
 
     write_partition(df, base_dir, dataset, symbol, year, month)
 
+    # Assessed -> Certified (WBS 1.6, reusing WBS 1.4; ADR-I009 §10, §18;
+    # ADR-I014). Never blocks the write above -- a low ceiling is a label,
+    # not a failure (ADR-I012 DA3).
+    gauntlet_report = run_gauntlet(
+        df, dataset=dataset, symbol=symbol, year=year, month=month, ts_column="open_time",
+    )
+    ceiling = partition_ceiling(gauntlet_report)
+
     meta = {
         "dataset":    dataset,
         "symbol":     symbol,
@@ -251,16 +302,31 @@ def ingest_month(
         "source":     source,
         "source_url": url if source == "bulk" else None,
         "rows":       len(df),
-        "ingest_ts":  datetime.now(timezone.utc).isoformat(),
+        "ingest_ts":  fetched_at,
         "skipped":    False,
+        "normalization_contract_version": NORMALIZATION_CONTRACT_VERSION,
+        "conditioning": conditioning,
+        "raw_content_hash": raw_receipt["hash"],
+        "admissibility": {
+            "certification": ceiling.certification.name,
+            "readiness": ceiling.readiness.name,
+            "lattice_version": ceiling.lattice_version,
+        },
     }
     _write_manifest(part_dir, meta)
 
     log.info(
-        "Ingested %s/%s %d-%02d via %s → %d rows",
+        "Ingested %s/%s %d-%02d via %s → %d rows (certification=%s, raw_revision=%d)",
         dataset, symbol, year, month, source, len(df),
+        ceiling.certification.name, raw_receipt["revision_ordinal"],
     )
-    return meta
+    return {
+        **meta,
+        "raw_hash": raw_receipt["hash"],
+        "raw_is_new_revision": raw_receipt["is_new_revision"],
+        "certification": ceiling.certification.name,
+        "readiness": ceiling.readiness.name,
+    }
 
 
 def ingest_range(

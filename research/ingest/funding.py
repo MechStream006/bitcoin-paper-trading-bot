@@ -35,6 +35,9 @@ if str(_RESEARCH_ROOT) not in sys.path:
     sys.path.insert(0, str(_RESEARCH_ROOT))
 
 from storage.lake import partition_path, write_partition  # noqa: E402
+from storage.raw_lake import land_raw                       # noqa: E402
+from quality.gauntlet import run_gauntlet                    # noqa: E402
+from quality.admissibility import partition_ceiling          # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +47,28 @@ CCXT_SYMBOL   = "BTC/USDT:USDT" # binanceusdm market identifier
 CCXT_EXCHANGE = "binanceusdm"
 CADENCE_MS    = 8 * 3_600 * 1_000   # 28,800,000 ms — funding period
 CCXT_LIMIT    = 1_000               # Binance max records per request
+
+# ADR-I009 §13.3 normalisation contract version for THIS source's
+# _normalize(). Bump only when _normalize()'s own logic changes (dtype
+# coercion, ordering, dedup rule, boundary handling) -- not for changes
+# elsewhere in this file.
+NORMALIZATION_CONTRACT_VERSION = 1
+
+# ADR-I009 §13.2 -- the population statement every observation in this
+# dataset exists under (WBS 1.6, reusing the WBS 1.5 pattern verified on
+# research/ingest/dvol.py). Mandatory on every raw-lake landing
+# (storage.raw_lake.land_raw() refuses a blank value); always passed on
+# every canonical write below.
+CONDITIONING = (
+    "Binance USDT-M perpetual (BTC/USDT:USDT) funding-rate payments, "
+    "fetched via CCXT's public binanceusdm endpoint (no API key). Complete "
+    "for the queried range subject to (a) Binance's own funding cadence -- "
+    "nominally 3 payments/day at 00:00/08:00/16:00 UTC, with up to ±1 ms "
+    "grid noise observed and tolerated (CLAUDE.md §11) -- and (b) CCXT/API "
+    "availability at ingest time. Every funding payment in the queried "
+    "window is included; this is not an ATM/near-expiry-conditioned "
+    "sliding-window sample."
+)
 
 
 def _month_bounds_ms(year: int, month: int) -> tuple[int, int]:
@@ -138,8 +163,18 @@ def ingest_month(
                 "year": year, "month": month}
 
     since_ms, until_ms = _month_bounds_ms(year, month)
-    df = _fetch_ccxt(since_ms, until_ms)
-    df = _normalize(df)
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    df = _fetch_ccxt(since_ms, until_ms)   # as-received (Z2) -- pre-normalisation
+
+    # Z2 -- land as-received, content-hash-addressed, revisioned
+    # (WBS 1.6, reusing WBS 1.2/1.3; ADR-I009 §9, §13.1, §16.1).
+    raw_receipt = land_raw(
+        df, base_dir, dataset=DATASET, symbol=symbol, year=year, month=month,
+        source="ccxt", source_url=None, conditioning=CONDITIONING,
+        fetched_at=fetched_at,
+    )
+
+    df = _normalize(df)   # canonical (Z3)
 
     # Trim any records that leaked outside the requested month.
     outside = (~df["timestamp_ms"].between(since_ms, until_ms)).sum()
@@ -148,6 +183,14 @@ def ingest_month(
         df = df[df["timestamp_ms"].between(since_ms, until_ms)].copy()
 
     write_partition(df, base_dir, DATASET, symbol, year, month)
+
+    # Assessed -> Certified (WBS 1.6, reusing WBS 1.4; ADR-I009 §10, §18;
+    # ADR-I014). Never blocks the write above -- a low ceiling is a label,
+    # not a failure (ADR-I012 DA3).
+    gauntlet_report = run_gauntlet(
+        df, dataset=DATASET, symbol=symbol, year=year, month=month, ts_column="timestamp_ms",
+    )
+    ceiling = partition_ceiling(gauntlet_report)
 
     meta = {
         "dataset":      DATASET,
@@ -159,13 +202,30 @@ def ingest_month(
         "ccxt_exchange": CCXT_EXCHANGE,
         "ccxt_symbol":  CCXT_SYMBOL,
         "rows":         len(df),
-        "ingest_ts":    datetime.now(timezone.utc).isoformat(),
+        "ingest_ts":    fetched_at,
         "skipped":      False,
+        "normalization_contract_version": NORMALIZATION_CONTRACT_VERSION,
+        "conditioning": CONDITIONING,
+        "raw_content_hash": raw_receipt["hash"],
+        "admissibility": {
+            "certification": ceiling.certification.name,
+            "readiness": ceiling.readiness.name,
+            "lattice_version": ceiling.lattice_version,
+        },
     }
     _write_manifest(part_dir, meta)
 
-    log.info("Ingested funding/%s %d-%02d → %d rows", symbol, year, month, len(df))
-    return meta
+    log.info(
+        "Ingested funding/%s %d-%02d → %d rows (certification=%s, raw_revision=%d)",
+        symbol, year, month, len(df), ceiling.certification.name, raw_receipt["revision_ordinal"],
+    )
+    return {
+        **meta,
+        "raw_hash": raw_receipt["hash"],
+        "raw_is_new_revision": raw_receipt["is_new_revision"],
+        "certification": ceiling.certification.name,
+        "readiness": ceiling.readiness.name,
+    }
 
 
 def ingest_range(
