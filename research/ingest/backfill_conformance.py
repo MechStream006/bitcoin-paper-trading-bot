@@ -104,21 +104,84 @@ def _dvol_source() -> dict:
     """dvol's own constants, read from the module that owns them rather
     than restated here -- so a change there cannot silently diverge."""
     from ingest import dvol  # noqa: PLC0415
+
+    def refetch(year: int, month: int):
+        lo, hi = dvol._month_bounds_ms(year, month)
+        df = dvol._normalize(dvol._fetch_range(lo, hi))
+        return df[df["open_time"].between(lo, hi)].reset_index(drop=True)
+
     return {
         "dataset": dvol.DATASET,
         "symbol": dvol.SYMBOL_LAKE,
-        "ts_column": "open_time",
         "conditioning": dvol.CONDITIONING,
         "normalization_contract_version": dvol.NORMALIZATION_CONTRACT_VERSION,
+        "refetch": refetch,
     }
 
 
+def _funding_source() -> dict:
+    """funding.py's own constants (D0b)."""
+    from ingest import funding  # noqa: PLC0415
+
+    def refetch(year: int, month: int):
+        lo, hi = funding._month_bounds_ms(year, month)
+        df = funding._normalize(funding._fetch_ccxt(lo, hi))
+        return df[df["timestamp_ms"].between(lo, hi)].reset_index(drop=True)
+
+    return {
+        "dataset": funding.DATASET,
+        "symbol": funding.SYMBOL_LAKE,
+        "conditioning": funding.CONDITIONING,
+        "normalization_contract_version": funding.NORMALIZATION_CONTRACT_VERSION,
+        "refetch": refetch,
+    }
+
+
+def _binance_source(dataset: str, symbol: str) -> dict:
+    """spot and perp both come from binance_ohlcv.py, which is
+    dataset-parameterised -- its conditioning is a FUNCTION of dataset, and
+    spot's and perp's texts genuinely differ (verified), so they must never
+    be conflated. Symbol is read from the corpus builder that owns each
+    dataset rather than restated here (D0b)."""
+    from ingest import binance_ohlcv  # noqa: PLC0415
+
+    def refetch(year: int, month: int):
+        raw = binance_ohlcv._fetch_bulk(binance_ohlcv.bulk_url(dataset, symbol, year, month))
+        if raw is None:
+            raise ValueError(f"bulk archive unavailable for {dataset} {year}-{month:02d}")
+        lo, hi = binance_ohlcv._month_bounds_ms(year, month)
+        df = binance_ohlcv._normalize(raw)
+        return df[df["open_time"].between(lo, hi)].reset_index(drop=True)
+
+    return {
+        "dataset": dataset,
+        "symbol": symbol,
+        "conditioning": binance_ohlcv._conditioning(dataset),
+        "normalization_contract_version": binance_ohlcv.NORMALIZATION_CONTRACT_VERSION,
+        "refetch": refetch,
+    }
+
+
+def _spot_source() -> dict:
+    import build_corpus  # noqa: PLC0415  -- owns spot's lake symbol
+    return _binance_source("spot", build_corpus.SYMBOL)
+
+
+def _perp_source() -> dict:
+    import build_perp_corpus  # noqa: PLC0415  -- owns perp's dataset + symbol
+    return _binance_source(build_perp_corpus.DATASET, build_perp_corpus.SYMBOL)
+
+
 # Only sources whose conformance has actually been exercised are registered.
-# D0a is the dvol pilot; funding/perp/spot are added at D0b, additively.
-# Mirrors standing.py's own "only populate what's real" precedent (WBS 3.5):
-# an unregistered dataset refuses cleanly rather than being guessed at.
+# D0a registered dvol (the pilot); D0b adds funding/perp/spot additively, on
+# the pilot-proven mechanism. Mirrors standing.py's "only populate what's
+# real" precedent (WBS 3.5): an unregistered dataset refuses cleanly rather
+# than being guessed at.
 _SOURCES = {
     "dvol": _dvol_source,
+    "funding": _funding_source,
+    "spot": _spot_source,
+    "perp": _perp_source,
 }
 
 
@@ -208,9 +271,13 @@ def conform_partition(part: dict, base_dir: pathlib.Path, spec: dict) -> dict:
         fetched_at=man["ingest_ts"],
     )
 
+    # ts_column is read from the partition's OWN manifest, not from the
+    # source spec: every one of the 274 real manifests carries it (verified),
+    # it is per-partition accurate, and sourcing it here removes the only
+    # value that would otherwise have to be transcribed per dataset (D0b).
     report = run_gauntlet(
         df, dataset=spec["dataset"], symbol=spec["symbol"],
-        year=man["year"], month=man["month"], ts_column=spec["ts_column"],
+        year=man["year"], month=man["month"], ts_column=man["ts_column"],
     )
     ceiling = partition_ceiling(report)
 
@@ -249,9 +316,8 @@ def verify_sample(base_dir: pathlib.Path, dataset: str, symbol: str, n: int) -> 
     never mutates anything -- the same "flag, never silently reconcile"
     discipline `ADR-I012` §8.2 requires of the materialiser.
     """
-    if dataset != "dvol":
-        raise ConformanceError(f"no sampled re-fetch is wired for dataset {dataset!r}")
-    from ingest import dvol  # noqa: PLC0415
+    spec = source_spec(dataset)          # refuses an unregistered dataset by name
+    refetch = spec["refetch"]
 
     parts = list_partitions(base_dir, dataset, symbol)
     if not parts:
@@ -262,12 +328,8 @@ def verify_sample(base_dir: pathlib.Path, dataset: str, symbol: str, n: int) -> 
     findings = []
     for part in sampled:
         man = part["manifest"]
-        lo, hi = dvol._month_bounds_ms(man["year"], man["month"])
         try:
-            fetched = dvol._fetch_range(lo, hi)
-            fresh = dvol._normalize(fetched)
-            fresh = fresh[fresh["open_time"].between(lo, hi)].copy().reset_index(drop=True)
-            upstream = content_hash(fresh)
+            upstream = content_hash(refetch(man["year"], man["month"]))
             findings.append({
                 "year": man["year"], "month": man["month"],
                 "on_disk": man["parquet_sha256"], "upstream": upstream,

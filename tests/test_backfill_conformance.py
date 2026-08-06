@@ -89,13 +89,13 @@ class TestSourceRegistry:
     def test_dvol_is_registered(self):
         s = bc.source_spec("dvol")
         assert s["dataset"] == "dvol" and s["symbol"] == "BTC"
-        assert s["ts_column"] == "open_time"
         assert s["conditioning"].strip()
         assert isinstance(s["normalization_contract_version"], int)
+        assert callable(s["refetch"])
 
     def test_unregistered_dataset_refuses_by_name(self):
-        """D0a is dvol only; funding/perp/spot are D0b's, added additively."""
-        for ds in ("funding", "perp", "spot", "nonsense"):
+        """D0b registered funding/perp/spot; anything else still refuses."""
+        for ds in ("nonsense", "options", ""):
             with pytest.raises(bc.ConformanceError, match="no conformance source registered"):
                 bc.source_spec(ds)
 
@@ -359,9 +359,11 @@ class TestVerifySample:
         assert findings[0]["error"].startswith("ConnectionError")
         assert findings[0]["agrees"] is None
 
-    def test_verify_sample_refuses_an_unwired_dataset(self, base_dir):
-        with pytest.raises(bc.ConformanceError, match="no sampled re-fetch"):
-            bc.verify_sample(base_dir, "funding", "BTCUSDT", 1)
+    def test_verify_sample_refuses_an_unregistered_dataset(self, base_dir):
+        """D0b registered funding/spot/perp, so the drift check now covers
+        all four; an unregistered dataset still refuses by name."""
+        with pytest.raises(bc.ConformanceError, match="no conformance source registered"):
+            bc.verify_sample(base_dir, "nonsense", "BTCUSDT", 1)
 
 
 # ---------------------------------------------------------------------------
@@ -401,3 +403,102 @@ class TestRealDvolCorpus:
 
     def test_a_pre_conformance_backup_exists(self):
         assert list((_RESEARCH / "data" / "raw").glob("_backup_dvol_BTC_*"))
+
+
+# ---------------------------------------------------------------------------
+# Sprint D0b -- funding / spot / perp registered on the pilot-proven mechanism
+# ---------------------------------------------------------------------------
+
+D0B_DATASETS = ("funding", "spot", "perp")
+
+
+class TestD0bSourceRegistry:
+    def test_all_four_datasets_are_registered(self):
+        assert sorted(bc._SOURCES) == ["dvol", "funding", "perp", "spot"]
+
+    @pytest.mark.parametrize("ds", D0B_DATASETS)
+    def test_each_source_reads_its_owning_module(self, ds):
+        s = bc.source_spec(ds)
+        assert s["dataset"] == ds
+        assert s["symbol"] == "BTCUSDT"
+        assert s["conditioning"].strip()
+        assert isinstance(s["normalization_contract_version"], int)
+        assert callable(s["refetch"])
+
+    def test_spot_and_perp_conditioning_are_not_conflated(self):
+        """binance_ohlcv._conditioning() is a FUNCTION of dataset; the two
+        texts genuinely differ and must never be shared."""
+        assert bc.source_spec("spot")["conditioning"] != bc.source_spec("perp")["conditioning"]
+
+    def test_every_source_has_a_distinct_conditioning_statement(self):
+        texts = {d: bc.source_spec(d)["conditioning"] for d in bc._SOURCES}
+        assert len(set(texts.values())) == len(texts)
+
+    def test_constants_come_from_the_owning_modules(self):
+        from ingest import binance_ohlcv, funding
+        assert bc.source_spec("funding")["conditioning"] == funding.CONDITIONING
+        assert bc.source_spec("spot")["conditioning"] == binance_ohlcv._conditioning("spot")
+        assert bc.source_spec("perp")["conditioning"] == binance_ohlcv._conditioning("perp")
+
+
+class TestTsColumnFromManifest:
+    def test_ts_column_is_read_from_the_partition_not_the_spec(self):
+        """D0b removed ts_column from the source spec: it is per-partition
+        and every real manifest carries it, so nothing is transcribed."""
+        for ds in bc._SOURCES:
+            assert "ts_column" not in bc.source_spec(ds)
+
+    def test_conform_uses_the_manifest_ts_column(self):
+        import inspect
+        src = inspect.getsource(bc.conform_partition)
+        assert 'ts_column=man["ts_column"]' in src
+        assert 'ts_column=spec[' not in src
+
+
+@pytest.mark.skipif(not REAL_DVOL.exists(), reason="real corpus not present")
+class TestRealCorpusFullyConformed:
+    def test_all_274_partitions_are_conformed(self):
+        base = _RESEARCH / "data" / "raw"
+        total = unconformed = 0
+        for ds in ("dvol", "funding", "perp", "spot"):
+            sym = "BTC" if ds == "dvol" else "BTCUSDT"
+            for part in bc.list_partitions(base, ds, sym):
+                total += 1
+                if not bc.is_conformed(part["manifest"]):
+                    unconformed += 1
+        assert total == 274
+        assert unconformed == 0
+
+    @pytest.mark.parametrize("ds,sym,n", [
+        ("dvol", "BTC", 64), ("funding", "BTCUSDT", 78),
+        ("perp", "BTCUSDT", 66), ("spot", "BTCUSDT", 66),
+    ])
+    def test_each_dataset_is_fully_conformed(self, ds, sym, n):
+        parts = bc.list_partitions(_RESEARCH / "data" / "raw", ds, sym)
+        assert len(parts) == n
+        assert all(bc.is_conformed(p["manifest"]) for p in parts)
+
+    def test_raw_content_hash_equals_parquet_sha256_corpus_wide(self):
+        """Condition C4, asserted across the whole conformed corpus."""
+        base = _RESEARCH / "data" / "raw"
+        for ds in ("dvol", "funding", "perp", "spot"):
+            sym = "BTC" if ds == "dvol" else "BTCUSDT"
+            for p in bc.list_partitions(base, ds, sym):
+                m = p["manifest"]
+                assert m["raw_content_hash"] == m["parquet_sha256"], f"{ds} {m['year']}-{m['month']:02d}"
+
+    def test_each_dataset_carries_its_own_conditioning(self):
+        base = _RESEARCH / "data" / "raw"
+        seen = {}
+        for ds in ("dvol", "funding", "perp", "spot"):
+            sym = "BTC" if ds == "dvol" else "BTCUSDT"
+            texts = {p["manifest"]["conditioning"] for p in bc.list_partitions(base, ds, sym)}
+            assert len(texts) == 1, f"{ds} has {len(texts)} conditioning strings"
+            seen[ds] = texts.pop()
+        assert len(set(seen.values())) == 4, "conditioning was conflated across datasets"
+
+    def test_plan_is_empty_for_every_dataset(self):
+        base = _RESEARCH / "data" / "raw"
+        for ds in ("dvol", "funding", "perp", "spot"):
+            sym = "BTC" if ds == "dvol" else "BTCUSDT"
+            assert bc.plan(base, ds, sym) == [], ds
