@@ -32,7 +32,7 @@ import pandas as pd
 from quality.gauntlet import run_gauntlet
 from storage.duck import open_db, query, register_view
 from storage.lake import list_partitions, read_partition
-from storage.manifest import read_manifest, verify_hash
+from storage.manifest import SCHEMA_VERSION, read_manifest, verify_hash
 
 RESEARCH_ROOT = pathlib.Path(__file__).parent
 BASE_DIR      = RESEARCH_ROOT / "data" / "raw"
@@ -175,7 +175,7 @@ for dataset in ["spot", "funding"]:
         check(f"{dataset} {year}-{month:02d}: manifest readable", True)
 
         # Classify format
-        is_wi6 = "parquet_sha256" in m and m.get("schema_version") == 1
+        is_wi6 = "parquet_sha256" in m and m.get("schema_version") == SCHEMA_VERSION
         if is_wi6:
             wi6_count += 1
             info(f"  format: WI-6 (schema_version=1, has SHA-256)")
@@ -482,7 +482,7 @@ check("A1: read_partition returns DataFrame", df_integ is not None and len(df_in
 # Step 2: Manifest read (WI-6 format for Jan)
 m_integ = _manifest_cache.get(("spot", 2024, 1))
 check("A2: manifest loaded and has WI-6 schema_version",
-      m_integ is not None and m_integ.get("schema_version") == 1)
+      m_integ is not None and m_integ.get("schema_version") == SCHEMA_VERSION)
 
 # Step 3: Gauntlet result (already computed in section 3)
 r_integ = next((r for r in _gauntlet_results if r["dataset"] == "spot" and r["year"] == 2024 and r["month"] == 1), None)
@@ -514,7 +514,7 @@ check("B1: funding Jan 2024 read_partition returns DataFrame",
 
 m_fund_integ = _manifest_cache.get(("funding", 2024, 1))
 check("B2: funding manifest loaded and has WI-6 schema_version",
-      m_fund_integ is not None and m_fund_integ.get("schema_version") == 1)
+      m_fund_integ is not None and m_fund_integ.get("schema_version") == SCHEMA_VERSION)
 
 r_fund_integ = next((r for r in _gauntlet_results if r["dataset"] == "funding" and r["year"] == 2024 and r["month"] == 1), None)
 check("B3: funding gauntlet ran and passed", r_fund_integ is not None and r_fund_integ["passed"])

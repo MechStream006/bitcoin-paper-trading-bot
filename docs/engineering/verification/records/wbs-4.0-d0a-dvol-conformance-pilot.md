@@ -10,6 +10,7 @@
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Opus 5 |
 | **Reviewer** | *(pending — Rohith)* |
+| **Corrections** | ⚠️ Two factual errors in this record were found and corrected during the D0b pre-flight review (2026-08-06): §6 `BC3`'s `schema_version` claim, and §8 defect 2's severity, which the first error caused. Both are corrected in place with the original text quoted. The milestone's *outcome* is unaffected — all six `G-CORPUS` conditions still verified. |
 | **Baseline** | `069a24efca12f9d33e01987e84e570e65753f4dc` |
 
 **D0b and WBS 4.1 are explicitly not begun.** `_SOURCES` registers dvol only; `funding`/`perp`/`spot` refuse by name. No `research/dataset_builder/` directory exists.
@@ -96,7 +97,7 @@ Every manifest field comes from one of exactly two places: the partition's **own
 
 - [x] **BC1** — No existing function signature, table, or column changed. `write_manifest`'s optional parameters are used exactly as designed.
 - [x] **BC2** — **No existing file modified.** Two new files only.
-- [x] **BC3** — Manifests remain `schema_version: 1`; the four conformance fields were already part of that schema as optional keys (WBS 1.1–1.5), previously `null`.
+- [x] **BC3** — ⚠️ **CORRECTED 2026-08-06 (D0b pre-flight review).** This originally read *"Manifests remain `schema_version: 1`"*. **That is wrong.** `storage.manifest.SCHEMA_VERSION` is **3**, so `write_manifest()` stamped the conformed sidecars `schema_version: 3` (15 keys → 19). The four conformance fields were already optional keys of that schema (WBS 1.1–1.5), previously `null`, and **every pre-existing key retained its exact value** (`parquet_sha256` verified identical against the D0a backup) — so BC4 and the substance of backward compatibility hold. Only the version claim was incorrect. The error was consequential: it is what made the §8 defect-2 severity assessment wrong (see the correction there).
 - [x] **BC4** — Legacy readers unaffected: every previously-present key retains its exact prior value (asserted key-by-key).
 - [x] **BC5** — Repo-wide grep: `backfill_conformance` is referenced only by its own test file and this record.
 
@@ -114,7 +115,7 @@ Every manifest field comes from one of exactly two places: the partition's **own
 | What | Assessment | Owner |
 |---|---|---|
 | **Defect 1 — every module inside `research/ingest/` is unrunnable as a path-form script.** Running `python ingest/<x>.py` puts `research/ingest/` at `sys.path[0]`, where the real `calendar.py` (WI-5 macro events) shadows the stdlib `calendar` that pandas imports transitively via `_strptime`, failing with `AttributeError: module 'calendar' has no attribute 'day_abbr'`. **Verified the pre-existing `ingest/dvol.py` fails identically** | `INC-0004`'s mechanism reaching a second class of victim. That incident fixed `conditioning.py`, which inserted `research/ingest/` *explicitly*; it did not address modules that live *inside* that directory and get it at `sys.path[0]` automatically. `-m` form works for both. **Medium** — confusing failure with no obvious link to its cause | Not scheduled. Worth an `INC-0004` addendum |
-| **Defect 2 — `build_corpus.py::stage_manifest_upgrade()` would strip conformance fields.** It calls `write_manifest()` without `admissibility`/`conditioning`/`raw_content_hash`/`normalization_contract_version`, which default to `None` and overwrite the sidecar | **Narrower than it first appears, and dvol is entirely unaffected**: `build_corpus.py` handles only `spot` and `funding` (0 references to dvol), and it *skips* any manifest already at `schema_version 1` with a passing `verify_hash`. A conformed manifest satisfies both, so it is skipped. The stripping path fires only for a partition whose hash fails verification. **Low now; a real D0b consideration** | D0b — must be confirmed before conforming spot/funding |
+| **Defect 2 — `build_corpus.py` and `build_perp_corpus.py` strip conformance fields from any manifest they re-upgrade.** Both call `write_manifest()` without `admissibility`/`conditioning`/`raw_content_hash`/`normalization_contract_version`, which default to `None` and overwrite the sidecar | ⚠️ **SEVERITY CORRECTED 2026-08-06 — this entry was WRONG and is inverted.** It claimed conformed manifests are protected because the builders skip anything *"already at `schema_version 1` with a passing hash"*. But conformance stamps `schema_version: 3` (see the BC3 correction), so the gate `old_m.get("schema_version") == 1` evaluates **False** for exactly the manifests it was thought to protect, and they **fall through to the stripping re-upgrade**. Proven empirically against a real conformed manifest: gate fires = `False`; all four fields would be lost. **Conformance makes a partition MORE exposed to the builders, not less.** dvol remains unaffected (neither builder references it), but `spot`, `funding` and `perp` — the entire D0b population — are directly exposed. **High for D0b** | ⛔ **Blocks D0b — governance decision required.** Fixing it means modifying `build_corpus.py` and `build_perp_corpus.py`, outside WBS 4.0's deliverable |
 
 | Deferred by design | Why |
 |---|---|

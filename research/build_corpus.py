@@ -43,7 +43,9 @@ from ingest.binance_ohlcv import ingest_range as spot_ingest_range
 from ingest.funding import ingest_range as fund_ingest_range
 from quality.gauntlet import run_gauntlet
 from storage.lake import list_partitions, partition_path, read_partition
-from storage.manifest import SIDECAR_NAME, read_manifest, verify_hash, write_manifest
+from storage.manifest import (
+    SCHEMA_VERSION, SIDECAR_NAME, read_manifest, verify_hash, write_manifest,
+)
 
 logging.basicConfig(
     level=logging.WARNING,           # suppress per-record CCXT noise
@@ -213,8 +215,13 @@ def stage_manifest_upgrade() -> dict:
                 except Exception:
                     pass
 
-            # Skip if already WI-6 with valid hash
-            if old_m.get("schema_version") == 1 and "parquet_sha256" in old_m:
+            # Skip if already at the CURRENT manifest schema with a valid hash.
+            # Compared against the imported constant, never a literal: this
+            # gate previously hardcoded `== 1`, which silently inverted its
+            # polarity when Phase 1 bumped SCHEMA_VERSION 1 -> 3 (WBS 4.0.1,
+            # INC-0005). Reading the constant makes it self-maintaining across
+            # any future bump -- validate_wi6.py's already-correct pattern.
+            if old_m.get("schema_version") == SCHEMA_VERSION and "parquet_sha256" in old_m:
                 try:
                     if verify_hash(parquet_path):
                         already_wi6 += 1
@@ -239,6 +246,12 @@ def stage_manifest_upgrade() -> dict:
                     bulk_url(dataset, SYMBOL, year, month) if source == "bulk" else None
                 )
 
+                # Carry conformance metadata forward. write_manifest()
+                # OVERWRITES the sidecar and defaults these four to None, so
+                # omitting them destroys whatever the ingest writer (stage 1)
+                # or backfill_conformance.py recorded. Same recovery pattern
+                # as source/source_url above, extended to the fields Phase 1
+                # added (WBS 4.0.1).
                 write_manifest(
                     parquet_path,
                     dataset=dataset,
@@ -253,6 +266,10 @@ def stage_manifest_upgrade() -> dict:
                     ts_column=ts_col,
                     ingest_ts=old_m.get("ingest_ts", datetime.now(timezone.utc).isoformat()),
                     config_version=1,
+                    normalization_contract_version=old_m.get("normalization_contract_version"),
+                    conditioning=old_m.get("conditioning"),
+                    admissibility=old_m.get("admissibility"),
+                    raw_content_hash=old_m.get("raw_content_hash"),
                 )
                 upgraded += 1
                 print(f"  {_ts()} {dataset.upper()} {year}-{month:02d}  upgraded to WI-6  rows={rows:,}", flush=True)
@@ -375,7 +392,7 @@ def stage_summary(gauntlet_data: dict) -> dict:
                 r      = m.get("rows", 0)
                 lo     = m.get("min_ts")
                 hi     = m.get("max_ts")
-                is_wi6 = m.get("schema_version") == 1
+                is_wi6 = m.get("schema_version") == SCHEMA_VERSION
             except FileNotFoundError:
                 df     = pq.read_table(parquet).to_pandas()
                 r      = len(df)

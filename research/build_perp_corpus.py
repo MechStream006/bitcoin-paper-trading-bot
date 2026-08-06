@@ -38,7 +38,9 @@ from ingest.binance_ohlcv import bulk_url
 from ingest.binance_ohlcv import ingest_range as perp_ingest_range
 from quality.gauntlet import run_gauntlet
 from storage.lake import list_partitions, partition_path, read_partition
-from storage.manifest import SIDECAR_NAME, read_manifest, verify_hash, write_manifest
+from storage.manifest import (
+    SCHEMA_VERSION, SIDECAR_NAME, read_manifest, verify_hash, write_manifest,
+)
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
 
@@ -160,7 +162,9 @@ def stage_manifest_upgrade() -> dict:
             except Exception:
                 pass
 
-        if old_m.get("schema_version") == 1 and "parquet_sha256" in old_m:
+        # Compared against the imported constant, never a literal -- see
+        # build_corpus.py's identical gate and WBS 4.0.1 / INC-0005.
+        if old_m.get("schema_version") == SCHEMA_VERSION and "parquet_sha256" in old_m:
             try:
                 if verify_hash(parquet_path):
                     already_wi6 += 1
@@ -192,6 +196,13 @@ def stage_manifest_upgrade() -> dict:
                 ts_column=TS_COL,
                 ingest_ts=old_m.get("ingest_ts", datetime.now(timezone.utc).isoformat()),
                 config_version=1,
+                # Carry conformance metadata forward -- write_manifest()
+                # overwrites the sidecar and defaults these to None, so
+                # omitting them destroys what stage 1 recorded (WBS 4.0.1).
+                normalization_contract_version=old_m.get("normalization_contract_version"),
+                conditioning=old_m.get("conditioning"),
+                admissibility=old_m.get("admissibility"),
+                raw_content_hash=old_m.get("raw_content_hash"),
             )
             upgraded += 1
             print(f"  {_ts()} PERP {year}-{month:02d}  upgraded  rows={rows:,}", flush=True)
@@ -442,7 +453,7 @@ def stage_delta_and_summary(gauntlet_data: dict, basis_data: dict) -> dict:
             r      = m.get("rows", 0)
             lo     = m.get("min_ts")
             hi     = m.get("max_ts")
-            is_wi6 = m.get("schema_version") == 1
+            is_wi6 = m.get("schema_version") == SCHEMA_VERSION
         except FileNotFoundError:
             df  = pq.read_table(parquet).to_pandas()
             r   = len(df)
