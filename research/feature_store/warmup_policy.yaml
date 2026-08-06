@@ -1,0 +1,18 @@
+# Warm-up enforcement policy (ADR-I010 §8.4; engineering roadmap WBS 2.6).
+# See research/feature_store/warmup.py and
+# docs/engineering/warmup_contract.md for the full contract this governs.
+#
+# mode:
+#   disabled -- warm-up is never checked (pre-WBS-2.6 behaviour: an
+#               under-warmed resolution proceeds, caller's problem)
+#   warn     -- insufficient history is reported (never raises), resolution
+#               proceeds -- THE ROLLOUT DEFAULT (roadmap §16 R5: run in
+#               warn mode for one full increment before any hard refusal)
+#   refuse   -- insufficient history raises WarmupRefusal (ADR-I010 §8.4's
+#               fully resolved behaviour: "refused, not silently truncated")
+#
+# Rollback lever (roadmap §14): set mode back to "disabled", or delete this
+# file entirely -- both fully restore pre-WBS-2.6 behaviour, no code change.
+
+version: "1.0"
+mode: warn
