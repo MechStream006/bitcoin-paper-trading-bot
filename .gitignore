@@ -38,6 +38,19 @@ research/evidence_library/ledger.db-wal
 research/evidence_library/ledger.db-shm
 research/evidence_library/ledger.pre-*.db
 
+# Feature Store registry/value-store DB — data populated by
+# migrate_evidence_engine_features.py, not code
+research/feature_store/feature_store.db
+research/feature_store/feature_store.db-wal
+research/feature_store/feature_store.db-shm
+research/feature_store/feature_store.pre-*.db
+
+# Label Store registry/value-store DB — data, not code (Phase 3 WBS 3.1/3.2)
+research/label_store/label_store.db
+research/label_store/label_store.db-wal
+research/label_store/label_store.db-shm
+research/label_store/label_store.pre-*.db
+
 # Build/run launchers and logs at repo root
 run_*.bat
 corpus_build*.log
