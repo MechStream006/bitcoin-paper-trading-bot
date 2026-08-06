@@ -158,12 +158,24 @@ def test_run_backup_dry_run_no_files(tmp_path):
     assert list(bdir.glob("fwd_hg_*.db")) == []
 
 
-def test_run_backup_missing_db_returns_1(tmp_path):
+def test_run_backup_missing_required_db_returns_1(tmp_path):
+    """A missing REQUIRED database is still a hard failure (Option A)."""
     missing = tmp_path / "does_not_exist.db"
     bdir = tmp_path / "backups"
-    rc = backup.run_backup(missing, bdir, dry_run=False, db_label="test")
+    rc = backup.run_backup(missing, bdir, dry_run=False, db_label="btc_trading")
     assert rc == 1
-    assert list(bdir.glob("test_*.db")) == []
+    assert list(bdir.glob("btc_trading_*.db")) == []
+
+
+def test_run_backup_missing_optional_db_returns_0(tmp_path):
+    """A missing OPTIONAL database is SKIPPED, not failed (PROD-1 fix).
+    This test previously asserted rc == 1 for db_label="test"; that label is
+    not in REQUIRED_DB_LABELS, so under Option A it is optional."""
+    missing = tmp_path / "does_not_exist.db"
+    bdir = tmp_path / "backups"
+    rc = backup.run_backup(missing, bdir, dry_run=False, db_label="label_store")
+    assert rc == 0
+    assert list(bdir.glob("label_store_*.db")) == []
 
 
 def test_run_backup_manifest_db_label_matches(tmp_path):
@@ -441,18 +453,35 @@ def test_all_flag_covers_all_five_dbs(tmp_path, monkeypatch):
     assert _latest_backup(tmp_path / "data" / "label-store-backups", "label_store") is not None
 
 
-def test_all_flag_return_code_is_max_of_four(tmp_path, monkeypatch):
-    """--all exit code is the max of all four individual backup return codes."""
+def test_all_flag_return_code_is_max_of_all(tmp_path, monkeypatch):
+    """--all exit code is still the max of the individual return codes; what
+    changed under Option A (2026-08-06, PROD-1) is that a missing OPTIONAL
+    database contributes 0 rather than 1.
+
+    This test previously provided 3 of 4 DBs and asserted rc == 1. The
+    missing one (evidence_forward.db) is optional, so it is now SKIPPED and
+    the max is 0. The max semantics themselves are unchanged -- proven by
+    the required-database case below."""
     _setup_root(tmp_path)
-    # Provide only 3 of the 4 DBs; the missing one causes rc=1 for that backup.
     _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
     _make_db(tmp_path / "research" / "data" / "forward_evidence.db", _H6_TABLES)
     _make_db(tmp_path / "research" / "evidence_library" / "ledger.db", _LEDGER_TABLES)
-    # evidence_forward.db intentionally missing → rc_fwd_hg = 1
+    # evidence_forward.db intentionally missing -> optional -> rc_fwd_hg = 0
     monkeypatch.setattr(backup, "ROOT", tmp_path)
     monkeypatch.setattr(sys, "argv", ["backup.py", "--all"])
     rc = backup.main()
-    assert rc == 1  # max(0, 0, 1, 0)
+    assert rc == 0  # max(0, 0, 0, 0, 0)
+
+
+def test_all_flag_still_propagates_a_required_failure(tmp_path, monkeypatch):
+    """The max must still surface a REQUIRED database's absence."""
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "research" / "data" / "forward_evidence.db", _H6_TABLES)
+    _make_db(tmp_path / "research" / "evidence_library" / "ledger.db", _LEDGER_TABLES)
+    # btc_trading.db intentionally missing -> required -> rc_trading = 1
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--all"])
+    assert backup.main() == 1
 
 
 def test_all_failure_in_one_does_not_abort_others(tmp_path, monkeypatch):

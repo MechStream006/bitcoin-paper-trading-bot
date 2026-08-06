@@ -243,7 +243,8 @@ def check_wal(db_path: Path) -> CheckResult:
 
 
 def check_backup_freshness(
-    backup_dir: Path, label: str = "btc_trading", check_name: str = "backup"
+    backup_dir: Path, label: str = "btc_trading", check_name: str = "backup",
+    required: bool = True,
 ) -> CheckResult:
     """Freshness of the most recent `{label}_*.db` backup in `backup_dir`.
 
@@ -254,14 +255,28 @@ def check_backup_freshness(
     instead -- same glob convention, same staleness threshold, since both are
     produced by the same daily `--all` cadence.
     """
+    # `required` (Option A, ruled 2026-08-06 -- PROD-2). An OPTIONAL database
+    # that has never been backed up on this host is not a fault: its research
+    # process may legitimately never have run here. Reporting INFO keeps the
+    # check visible in the JSON summary while ensuring it can never escalate
+    # `overall` (INFO ranks below WARNING) and therefore never sends Telegram.
+    #
+    # Freshness is still enforced for optional databases once backups DO
+    # exist -- only the never-configured case is downgraded. A stale optional
+    # backup is a real signal and stays a WARNING below.
+    absent_severity = WARNING if required else INFO
+    absent_suffix = "" if required else " (optional database, not configured on this host)"
+
     if not backup_dir.exists():
         return CheckResult(
-            check_name, WARNING, "backup directory does not exist", {}
+            check_name, absent_severity,
+            f"backup directory does not exist{absent_suffix}", {}
         )
     backups = sorted(backup_dir.glob(f"{label}_*.db"), reverse=True)
     if not backups:
         return CheckResult(
-            check_name, WARNING, "no backups found in backup directory", {}
+            check_name, absent_severity,
+            f"no backups found in backup directory{absent_suffix}", {}
         )
     newest    = backups[0]
     mtime     = datetime.fromtimestamp(newest.stat().st_mtime, tz=timezone.utc)
@@ -571,10 +586,12 @@ def main() -> int:
         check_wal(db_path),
         check_backup_freshness(backup_dir),
         check_backup_freshness(
-            args.ledger_backup_dir, label="ledger", check_name="ledger_backup"
+            args.ledger_backup_dir, label="ledger", check_name="ledger_backup",
+            required=False,
         ),
         check_backup_freshness(
-            args.label_store_backup_dir, label="label_store", check_name="label_store_backup"
+            args.label_store_backup_dir, label="label_store",
+            check_name="label_store_backup", required=False,
         ),
         check_offhost_freshness(backup_dir, check_name="offhost_backup"),
         check_offhost_freshness(

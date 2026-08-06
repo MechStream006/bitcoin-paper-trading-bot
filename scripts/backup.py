@@ -211,11 +211,40 @@ def _write_offhost_status(
     status_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# Database classification (Option A, ruled 2026-08-06 -- PROD-1).
+#
+# REQUIRED: the operational trading database. Its absence is a real failure --
+#   the bot cannot be running without it -- so a missing file is an ERROR and
+#   the run exits non-zero.
+#
+# OPTIONAL: the four research databases. Each is created by a research process
+#   that may legitimately never have run on a given host. On EC2 today,
+#   label_store.db and feature_store.db do not exist at all, and never will
+#   until their phases are deployed. Treating their absence as failure made
+#   `--all` exit 1 every day while all four real backups succeeded (PROD-1),
+#   destroying the trustworthiness of the backup signal itself.
+#
+# A missing OPTIONAL database is logged as SKIPPED and does not affect the
+# exit code. A missing REQUIRED database still fails, loudly -- which is the
+# case that actually matters.
+# ---------------------------------------------------------------------------
+REQUIRED_DB_LABELS = frozenset({"btc_trading"})
+
+
+def is_required(db_label: str) -> bool:
+    """True when this database's absence is a failure rather than a skip."""
+    return db_label in REQUIRED_DB_LABELS
+
+
 def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
                db_label: str = "btc_trading", encrypt: bool = False) -> int:
     if not db_path.exists():
-        print(f"[error] DB not found: {db_path}", file=sys.stderr)
-        return 1
+        if is_required(db_label):
+            print(f"[error] required DB not found: {db_path}", file=sys.stderr)
+            return 1
+        print(f"[skip] optional DB not present, nothing to back up: {db_path}")
+        return 0
 
     # VACUUM INTO requires SQLite >= 3.27.0
     sqlite_ver = tuple(int(x) for x in sqlite3.sqlite_version.split("."))

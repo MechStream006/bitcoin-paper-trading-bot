@@ -116,11 +116,15 @@ def runtime_health(settings) -> dict:
         hc.check_db_liveness(db_path),
         hc.check_wal(db_path),
         hc.check_backup_freshness(settings.backup_dir),
+        # required=False mirrors scripts/healthcheck.py exactly -- CLI and
+        # read-only API must never disagree about health (P1 Increment 1).
         hc.check_backup_freshness(
-            settings.ledger_backup_dir, label="ledger", check_name="ledger_backup"
+            settings.ledger_backup_dir, label="ledger", check_name="ledger_backup",
+            required=False,
         ),
         hc.check_backup_freshness(
-            settings.label_store_backup_dir, label="label_store", check_name="label_store_backup"
+            settings.label_store_backup_dir, label="label_store",
+            check_name="label_store_backup", required=False,
         ),
         hc.check_offhost_freshness(settings.backup_dir, check_name="offhost_backup"),
         hc.check_offhost_freshness(
