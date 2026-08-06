@@ -465,8 +465,17 @@ class TestRealLabelStore:
         assert _sha256(copy) == before
 
     def test_real_specification_phases_are_untouched_by_this_milestone(self):
-        """WBS 3.8c must not activate anything (WBS 3.11's separate scope)."""
+        """WBS 3.8c must not activate anything, and must never Reject.
+
+        The four `Active` Specifications on the real database were set by
+        WBS 3.11 (activation via behavioural equivalence), not by this
+        milestone. That 3.8c itself changes no phase is proven directly by
+        `test_no_specification_phase_is_changed` and by the AST guard
+        `test_module_never_references_activation`; what is asserted here,
+        on real data, is the invariant 3.8c genuinely preserves -- no
+        Specification is ever driven to the permanent `Rejected` state."""
         con = sqlite3.connect(REAL_LABEL_STORE_DB)
         phases = {r[0] for r in con.execute("SELECT DISTINCT phase FROM label_specifications")}
         con.close()
-        assert phases == {"Registered"}
+        assert "Rejected" not in phases
+        assert phases <= {"Registered", "Active"}
