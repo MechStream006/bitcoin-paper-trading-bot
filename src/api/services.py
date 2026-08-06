@@ -119,6 +119,9 @@ def runtime_health(settings) -> dict:
         hc.check_backup_freshness(
             settings.ledger_backup_dir, label="ledger", check_name="ledger_backup"
         ),
+        hc.check_backup_freshness(
+            settings.label_store_backup_dir, label="label_store", check_name="label_store_backup"
+        ),
         hc.check_offhost_freshness(settings.backup_dir, check_name="offhost_backup"),
         hc.check_offhost_freshness(
             settings.ledger_backup_dir, check_name="ledger_offhost_backup"

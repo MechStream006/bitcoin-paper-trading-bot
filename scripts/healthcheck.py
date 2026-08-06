@@ -545,6 +545,11 @@ def main() -> int:
         help="Directory holding ledger_*.db backups (scripts/backup.py --ledger)",
     )
     parser.add_argument(
+        "--label-store-backup-dir", type=Path,
+        default=ROOT / "data" / "label-store-backups",
+        help="Directory holding label_store_*.db backups (scripts/backup.py --label-store)",
+    )
+    parser.add_argument(
         "--forward-db-path", type=Path,
         default=ROOT / "research" / "data" / "evidence_forward.db",
         help="Path to evidence_forward.db for the D3a forward-cycle dead-man",
@@ -567,6 +572,9 @@ def main() -> int:
         check_backup_freshness(backup_dir),
         check_backup_freshness(
             args.ledger_backup_dir, label="ledger", check_name="ledger_backup"
+        ),
+        check_backup_freshness(
+            args.label_store_backup_dir, label="label_store", check_name="label_store_backup"
         ),
         check_offhost_freshness(backup_dir, check_name="offhost_backup"),
         check_offhost_freshness(

@@ -51,6 +51,9 @@ _LEDGER_TABLES = {
 }
 _TRADING_TABLES = {"option_quotes": 10}
 _H6_TABLES = {"corpus_daily": 8}
+_LABEL_STORE_TABLES = {
+    "label_definitions": 2, "label_specifications": 4,
+}
 
 
 def _make_db(path: Path, tables: dict[str, int] | None = None) -> Path:
@@ -86,8 +89,10 @@ def _setup_root(tmp: Path) -> None:
     (tmp / "data" / "evidence-backups").mkdir(parents=True, exist_ok=True)
     (tmp / "data" / "evidence-fwd-backups").mkdir(parents=True, exist_ok=True)
     (tmp / "data" / "ledger-backups").mkdir(parents=True, exist_ok=True)
+    (tmp / "data" / "label-store-backups").mkdir(parents=True, exist_ok=True)
     (tmp / "research" / "data").mkdir(parents=True, exist_ok=True)
     (tmp / "research" / "evidence_library").mkdir(parents=True, exist_ok=True)
+    (tmp / "research" / "label_store").mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -342,15 +347,89 @@ def test_ledger_dry_run_no_files(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# New --label-store flag tests (Phase 3 WBS 3.10, LS-DEC-001)
+# ---------------------------------------------------------------------------
+
+def test_label_store_flag_backs_up_label_store_db(tmp_path, monkeypatch):
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--label-store"])
+    rc = backup.main()
+    assert rc == 0
+    bfile = _latest_backup(tmp_path / "data" / "label-store-backups", "label_store")
+    assert bfile is not None
+    assert _integrity_ok(bfile)
+
+
+def test_label_store_correct_label_in_filename(tmp_path, monkeypatch):
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--label-store"])
+    backup.main()
+    bfile = _latest_backup(tmp_path / "data" / "label-store-backups", "label_store")
+    assert bfile.name.startswith("label_store_")
+
+
+def test_label_store_correct_backup_dir(tmp_path, monkeypatch):
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--label-store"])
+    backup.main()
+    assert _latest_backup(tmp_path / "data" / "label-store-backups", "label_store") is not None
+    assert _latest_backup(tmp_path / "data" / "backups", "label_store") is None
+
+
+def test_label_store_early_return_no_other_backups(tmp_path, monkeypatch):
+    """--label-store alone must not create ledger, fwd_hg, or trading backups."""
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--label-store"])
+    backup.main()
+    assert _latest_backup(tmp_path / "data" / "ledger-backups", "ledger") is None
+    assert _latest_backup(tmp_path / "data" / "evidence-fwd-backups", "fwd_hg") is None
+    assert _latest_backup(tmp_path / "data" / "backups", "btc_trading") is None
+
+
+def test_label_store_dry_run_no_files(tmp_path, monkeypatch):
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--label-store", "--dry-run"])
+    rc = backup.main()
+    assert rc == 0
+    assert list((tmp_path / "data" / "label-store-backups").glob("label_store_*.db")) == []
+
+
+def test_label_store_row_counts_in_manifest(tmp_path, monkeypatch):
+    """The manifest must reflect BOTH tables co-located per LS-DEC-001 —
+    proving the whole-file backup unit covers registry and value-store
+    content together, not just whichever table happens to be non-empty."""
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--label-store"])
+    backup.main()
+    bfile = _latest_backup(tmp_path / "data" / "label-store-backups", "label_store")
+    manifest = json.loads((bfile.parent / (bfile.stem + ".manifest.json")).read_text())
+    assert manifest["row_counts"]["label_definitions"] == 2
+    assert manifest["row_counts"]["label_specifications"] == 4
+
+
+# ---------------------------------------------------------------------------
 # Extended --all flag tests
 # ---------------------------------------------------------------------------
 
-def test_all_flag_covers_all_four_dbs(tmp_path, monkeypatch):
+def test_all_flag_covers_all_five_dbs(tmp_path, monkeypatch):
     _setup_root(tmp_path)
     _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
     _make_db(tmp_path / "research" / "data" / "forward_evidence.db", _H6_TABLES)
     _make_db(tmp_path / "research" / "data" / "evidence_forward.db", _EVIDENCE_FWD_TABLES)
     _make_db(tmp_path / "research" / "evidence_library" / "ledger.db", _LEDGER_TABLES)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
     monkeypatch.setattr(backup, "ROOT", tmp_path)
     monkeypatch.setattr(sys, "argv", ["backup.py", "--all"])
     rc = backup.main()
@@ -359,6 +438,7 @@ def test_all_flag_covers_all_four_dbs(tmp_path, monkeypatch):
     assert _latest_backup(tmp_path / "data" / "evidence-backups", "evidence") is not None
     assert _latest_backup(tmp_path / "data" / "evidence-fwd-backups", "fwd_hg") is not None
     assert _latest_backup(tmp_path / "data" / "ledger-backups", "ledger") is not None
+    assert _latest_backup(tmp_path / "data" / "label-store-backups", "label_store") is not None
 
 
 def test_all_flag_return_code_is_max_of_four(tmp_path, monkeypatch):
@@ -391,26 +471,27 @@ def test_all_failure_in_one_does_not_abort_others(tmp_path, monkeypatch):
     assert _latest_backup(tmp_path / "data" / "ledger-backups", "ledger") is not None
 
 
-def test_all_dry_run_prints_four_lines(tmp_path, monkeypatch, capsys):
+def test_all_dry_run_prints_five_lines(tmp_path, monkeypatch, capsys):
     _setup_root(tmp_path)
     # DBs don't need to exist for dry-run (run_backup checks existence first,
     # but dry-run branch actually IS guarded — missing DB returns 1 even in dry-run).
-    # Create all four so we get clean [DRY RUN] output for all four.
+    # Create all five so we get clean [DRY RUN] output for all five.
     _make_db(tmp_path / "data" / "btc_trading.db")
     _make_db(tmp_path / "research" / "data" / "forward_evidence.db")
     _make_db(tmp_path / "research" / "data" / "evidence_forward.db")
     _make_db(tmp_path / "research" / "evidence_library" / "ledger.db")
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db")
     monkeypatch.setattr(backup, "ROOT", tmp_path)
     monkeypatch.setattr(sys, "argv", ["backup.py", "--all", "--dry-run"])
     rc = backup.main()
     assert rc == 0
     out = capsys.readouterr().out
     dry_run_lines = [ln for ln in out.splitlines() if "[DRY RUN] would create" in ln]
-    assert len(dry_run_lines) == 4
+    assert len(dry_run_lines) == 5
 
 
 def test_all_with_specific_flag_still_backs_up_trading(tmp_path, monkeypatch):
-    """--all combined with a specific flag must still produce all four backups.
+    """--all combined with a specific flag must still produce all five backups.
 
     Regression for the L285 edge case: before the fix, `--all --evidence`
     evaluated `if not (True or False or False)` → False and silently skipped
@@ -421,15 +502,17 @@ def test_all_with_specific_flag_still_backs_up_trading(tmp_path, monkeypatch):
     _make_db(tmp_path / "research" / "data" / "forward_evidence.db", _H6_TABLES)
     _make_db(tmp_path / "research" / "data" / "evidence_forward.db", _EVIDENCE_FWD_TABLES)
     _make_db(tmp_path / "research" / "evidence_library" / "ledger.db", _LEDGER_TABLES)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
     monkeypatch.setattr(backup, "ROOT", tmp_path)
     monkeypatch.setattr(sys, "argv", ["backup.py", "--all", "--evidence"])
     rc = backup.main()
     assert rc == 0
-    # All four must be present — trading must not be skipped.
+    # All five must be present — trading must not be skipped.
     assert _latest_backup(tmp_path / "data" / "backups", "btc_trading") is not None
     assert _latest_backup(tmp_path / "data" / "evidence-backups", "evidence") is not None
     assert _latest_backup(tmp_path / "data" / "evidence-fwd-backups", "fwd_hg") is not None
     assert _latest_backup(tmp_path / "data" / "ledger-backups", "ledger") is not None
+    assert _latest_backup(tmp_path / "data" / "label-store-backups", "label_store") is not None
 
 
 # ---------------------------------------------------------------------------

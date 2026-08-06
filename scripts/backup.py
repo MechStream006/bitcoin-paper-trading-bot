@@ -4,18 +4,29 @@ Creates a consistent hot backup using VACUUM INTO (SQLite 3.27+), writes a
 SHA-256 manifest, applies 7-daily/4-weekly/12-monthly rotation, then
 optionally runs a configurable off-host transfer command.
 
-Backs up four databases:
+Backs up five databases:
   1. data/btc_trading.db                    (Layer 2 live trading runtime)
   2. research/data/forward_evidence.db       (H6 forward evidence; --evidence)
   3. research/data/evidence_forward.db       (H5/G1/G3/ivrv collector; --fwd-hg)
   4. research/evidence_library/ledger.db     (governance ledger; --ledger)
+  5. research/label_store/label_store.db     (Label Store; --label-store)
+
+Label Store note (Phase 3 WBS 3.10, LS-DEC-001): the registry, research
+tier, and forward tier are co-located in one file by design (LS-DEC-001,
+approved 2026-08-06) -- so this is one backup unit, not three. Recovery
+*requirements* still differ by table (the registry is regenerable via
+`research/label_store/register_conventions.py --commit`; the forward tier
+is irreplaceable from its first row, ADR-I011 §7) even though the backup
+*mechanism* below operates on the whole file, exactly as it already does
+for `ledger.db`'s own mix of table criticality.
 
 Usage:
     python scripts/backup.py [--db-path PATH] [--backup-dir PATH] [--dry-run]
     python scripts/backup.py --evidence [--dry-run]
     python scripts/backup.py --fwd-hg [--dry-run]
     python scripts/backup.py --ledger [--dry-run]
-    python scripts/backup.py --all [--dry-run]   # backs up all four databases
+    python scripts/backup.py --label-store [--dry-run]
+    python scripts/backup.py --all [--dry-run]   # backs up all five databases
     python scripts/backup.py --all --encrypt     # + encrypt for off-host (BK3)
 
 Environment variable:
@@ -343,9 +354,14 @@ def main() -> int:
         help="Back up research/evidence_library/ledger.db (governance ledger)",
     )
     parser.add_argument(
+        "--label-store", dest="label_store", action="store_true",
+        help="Back up research/label_store/label_store.db (Label Store registry + "
+             "research + forward tiers, co-located per LS-DEC-001)",
+    )
+    parser.add_argument(
         "--all", dest="backup_all", action="store_true",
-        help="Back up all four databases (btc_trading, forward_evidence, "
-             "evidence_forward, ledger)",
+        help="Back up all five databases (btc_trading, forward_evidence, "
+             "evidence_forward, ledger, label_store)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -359,10 +375,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    rc_evidence = 0
-    rc_fwd_hg   = 0
-    rc_ledger   = 0
-    rc_trading  = 0
+    rc_evidence    = 0
+    rc_fwd_hg      = 0
+    rc_ledger      = 0
+    rc_label_store = 0
+    rc_trading     = 0
 
     if args.evidence or args.backup_all:
         evidence_db  = ROOT / "research" / "data" / "forward_evidence.db"
@@ -394,12 +411,23 @@ def main() -> int:
         if args.ledger and not args.backup_all:
             return rc_ledger
 
-    if args.backup_all or not (args.evidence or args.fwd_hg or args.ledger):
+    if args.label_store or args.backup_all:
+        rc_label_store = run_backup(
+            ROOT / "research" / "label_store" / "label_store.db",
+            ROOT / "data" / "label-store-backups",
+            args.dry_run,
+            db_label="label_store",
+            encrypt=args.encrypt,
+        )
+        if args.label_store and not args.backup_all:
+            return rc_label_store
+
+    if args.backup_all or not (args.evidence or args.fwd_hg or args.ledger or args.label_store):
         rc_trading = run_backup(args.db_path, args.backup_dir, args.dry_run,
                                 db_label="btc_trading", encrypt=args.encrypt)
 
     if args.backup_all:
-        return max(rc_trading, rc_evidence, rc_fwd_hg, rc_ledger)
+        return max(rc_trading, rc_evidence, rc_fwd_hg, rc_ledger, rc_label_store)
     return rc_trading
 
 

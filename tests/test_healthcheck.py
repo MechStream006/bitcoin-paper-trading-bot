@@ -184,6 +184,48 @@ def test_ledger_stale_backup_is_warning(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# New: label_store-labeled invocation (Phase 3 WBS 3.10, LS-DEC-001)
+# ---------------------------------------------------------------------------
+
+
+def test_label_store_missing_dir_is_warning(tmp_path: Path):
+    result = hc.check_backup_freshness(
+        tmp_path / "label-store-backups", label="label_store", check_name="label_store_backup"
+    )
+    assert result.name == "label_store_backup"
+    assert result.severity == hc.WARNING
+    assert "does not exist" in result.message
+
+
+def test_label_store_no_matching_backups_is_warning(tmp_path: Path):
+    bdir = tmp_path / "label-store-backups"
+    bdir.mkdir()
+    result = hc.check_backup_freshness(bdir, label="label_store", check_name="label_store_backup")
+    assert result.name == "label_store_backup"
+    assert result.severity == hc.WARNING
+    assert "no backups found" in result.message
+
+
+def test_label_store_fresh_backup_is_ok(tmp_path: Path):
+    bdir = tmp_path / "label-store-backups"
+    _touch_backup(bdir, "label_store", "20260806_020000", age_hours=1)
+    result = hc.check_backup_freshness(bdir, label="label_store", check_name="label_store_backup")
+    assert result.name == "label_store_backup"
+    assert result.severity == hc.OK
+    assert result.detail["newest_backup"] == "label_store_20260806_020000.db"
+
+
+def test_label_store_stale_backup_is_warning(tmp_path: Path):
+    bdir = tmp_path / "label-store-backups"
+    _touch_backup(bdir, "label_store", "20260701_020000",
+                  age_hours=hc.BACKUP_WARN_HOURS + 1)
+    result = hc.check_backup_freshness(bdir, label="label_store", check_name="label_store_backup")
+    assert result.name == "label_store_backup"
+    assert result.severity == hc.WARNING
+    assert "backup stale" in result.message
+
+
+# ---------------------------------------------------------------------------
 # Label isolation — one directory, both labels present
 # ---------------------------------------------------------------------------
 
@@ -232,6 +274,7 @@ def test_runtime_health_includes_ledger_backup_check(tmp_path: Path):
         thresholds_path=tmp_path / "thresholds.yaml",
         backup_dir=tmp_path / "backups",
         ledger_backup_dir=ledger_backup_dir,
+        label_store_backup_dir=tmp_path / "label-store-backups",
         service_name="btcbot.service",
         log_level="INFO",
         cache_ttl_seconds=0.0,
@@ -246,6 +289,43 @@ def test_runtime_health_includes_ledger_backup_check(tmp_path: Path):
 
     ledger_check = next(c for c in result["checks"] if c["name"] == "ledger_backup")
     assert ledger_check["severity"] == hc.OK
+
+
+def test_runtime_health_includes_label_store_backup_check(tmp_path: Path):
+    """Mirrors test_runtime_health_includes_ledger_backup_check exactly, for
+    the Label Store's own freshness check (Phase 3 WBS 3.10). Deliberately
+    does NOT assert an offhost_backup check for label_store — off-host
+    wiring is out of this milestone's scope (feature_store_backup_strategy.md
+    §4's own "not recommended at the same time as local backup" carve-out)."""
+    from src.api.config import ApiSettings
+    from src.api import services
+
+    label_store_backup_dir = tmp_path / "label-store-backups"
+    _touch_backup(label_store_backup_dir, "label_store", "20260806_020000", age_hours=1)
+
+    settings = ApiSettings(
+        host="127.0.0.1",
+        port=9109,
+        token="t" * 40,
+        trading_db_path=tmp_path / "btc_trading.db",
+        forward_db_path=tmp_path / "evidence_forward.db",
+        ledger_db_path=tmp_path / "ledger.db",
+        registry_path=tmp_path / "registry.yaml",
+        thresholds_path=tmp_path / "thresholds.yaml",
+        backup_dir=tmp_path / "backups",
+        ledger_backup_dir=tmp_path / "ledger-backups",
+        label_store_backup_dir=label_store_backup_dir,
+        service_name="btcbot.service",
+        log_level="INFO",
+        cache_ttl_seconds=0.0,
+    )
+
+    result = services.runtime_health(settings)
+    names = [c["name"] for c in result["checks"]]
+    assert "label_store_backup" in names
+
+    label_store_check = next(c for c in result["checks"] if c["name"] == "label_store_backup")
+    assert label_store_check["severity"] == hc.OK
 
 
 # ---------------------------------------------------------------------------

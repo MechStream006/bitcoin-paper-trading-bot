@@ -41,6 +41,7 @@ class ApiSettings:
     thresholds_path: Path
     backup_dir: Path
     ledger_backup_dir: Path
+    label_store_backup_dir: Path
     service_name: str
     log_level: str
     cache_ttl_seconds: float
@@ -103,6 +104,9 @@ def load_settings(env: dict | None = None) -> ApiSettings:
         backup_dir=Path(env.get("BACKUP_DIR") or (ROOT / "data" / "backups")),
         ledger_backup_dir=Path(
             env.get("LEDGER_BACKUP_DIR") or (ROOT / "data" / "ledger-backups")
+        ),
+        label_store_backup_dir=Path(
+            env.get("LABEL_STORE_BACKUP_DIR") or (ROOT / "data" / "label-store-backups")
         ),
         service_name=env.get("API_TARGET_SERVICE", "btcbot.service"),
         log_level=env.get("API_LOG_LEVEL", "INFO"),
