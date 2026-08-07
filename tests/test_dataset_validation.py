@@ -98,14 +98,15 @@ class TestBuildAndScope:
         assert val.TIER_ORDER == ("A", "B", "C", "D")
 
     def test_deferred_checks_named_with_owner(self):
-        assert set(val.DEFERRED_CHECKS) == {"RF2", "RF3"}
+        """RF2 left this set at WBS 4.6 -- it is enforced at resolution now."""
+        assert set(val.DEFERRED_CHECKS) == {"RF3"}
         for text in val.DEFERRED_CHECKS.values():
             assert "WBS 4." in text
 
     def test_report_carries_deferred(self, db):
         h = _resolved(db)
         report = val.validate(db, h, good_inputs())
-        assert set(report.deferred) == {"RF2", "RF3"}
+        assert set(report.deferred) == {"RF3"}
 
     def test_rf4_delegates_to_the_lattice(self):
         """RF4 must not reimplement the comparison — a second authority on
@@ -271,12 +272,15 @@ class TestTierB:
         d["sealed_region_exclusions"] = [{"start": "2026-01-01", "end": "2025-01-01"}]
         assert any(x.code == "TB4" for x in val.check_tier_b(d, good_inputs()))
 
-    def test_rf2_not_implemented_here(self, db):
-        """Sealed-region INTERSECTION is RF2 (WBS 4.6). TB4 checks coherence
-        only; it must not silently stand in for the intersection rule."""
+    def test_rf2_is_enforced_at_resolution_not_here(self, db):
+        """Sealed-region INTERSECTION is RF2, enforced at resolution since WBS
+        4.6. It must NOT appear in validation's deferred map (that would say
+        unchecked) and must NOT be a validation finding (that would duplicate
+        the authority). TB4 still checks exclusion coherence only."""
         h = _resolved(db)
         report = val.validate(db, h, good_inputs())
-        assert "RF2" in report.deferred
+        assert "RF2" not in report.deferred
+        assert report.by_code("RF2") == []
 
 
 # ---------------------------------------------------------------------------

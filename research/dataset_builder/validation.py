@@ -21,9 +21,11 @@ RF4 IS `satisfies()`, NOT A REIMPLEMENTATION
     authority on admissibility, which is exactly what IQROS-P4 forbids.
 
 DEFERRED, NEVER SILENT
-    §12's Tier B text includes sealed-region intersection (RF2, WBS 4.6) and
-    its Tier C text includes lane conflict (RF3, WBS 4.7). Those checks are
-    **not** implemented here. Every `ValidationReport` carries a `deferred`
+    §12's Tier C text includes lane conflict (RF3, WBS 4.7), which is **not**
+    implemented here. §12's Tier B text also mentions sealed-region
+    intersection; that is RF2, implemented at WBS 4.6 and enforced at
+    *resolution* rather than in this module, because §8.1 places exclusion at
+    the resolution boundary. Every `ValidationReport` carries a `deferred`
     map naming each and the milestone that owns it, and Tier D findings
     computed without statistics are recorded as `not_computed` rather than
     passing. A reader can never mistake "not checked" for "checked and clean".
@@ -59,7 +61,11 @@ from dataset_builder import resolution as res
 
 #: Checks §12 describes but a later milestone owns. Present on every report.
 DEFERRED_CHECKS: dict[str, str] = {
-    "RF2": "sealed-region intersection without explicit exclusion — Tier B (WBS 4.6)",
+    # RF2 was listed here until WBS 4.6. It is now enforced at RESOLUTION
+    # (resolution._check_rf2) against the governed registry, which is where
+    # §8.1 says exclusion belongs -- a dataset that fails RF2 never reaches
+    # validation at all. Tier B's TB4 still checks that a declared exclusion
+    # is well-formed; RF2 decides whether one was required.
     "RF3": "lane conflict — confirmatory dataset resolving discovery-lane inputs — Tier C (WBS 4.7)",
 }
 
@@ -248,9 +254,10 @@ def check_tier_b(declaration: dict, inputs: Sequence[InputAdmissibility]) -> lis
     no bound partition outside the window (TB3), exclusion spans well-formed
     and inside the window (TB4).
 
-    **Not implemented here:** sealed-region *intersection* — that is RF2 and
-    WBS 4.6 owns it. TB4 validates that declared exclusions are coherent; it
-    does not decide whether an exclusion was *required*.
+    **Not implemented here:** sealed-region *intersection* — that is RF2,
+    enforced at resolution (WBS 4.6). TB4 validates that declared exclusions
+    are coherent; RF2 decides whether one was *required*. The split is
+    deliberate: a dataset failing RF2 never reaches validation.
     """
     findings: list[Finding] = []
     scope = declaration.get("temporal_scope")

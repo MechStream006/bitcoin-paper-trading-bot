@@ -6,17 +6,20 @@ Stage 2 RESOLUTION   bind every reference to a hash at `as_of`; pin corpus
 
 REFUSAL SCOPE (WBS 4.3 owns three of the six)
     RF1  unresolvable or non-Active specification reference   <- here
-    RF2  sealed-region intersection without exclusion         -> WBS 4.6
+    RF2  sealed-region intersection without exclusion         <- here (WBS 4.6)
     RF3  lane conflict                                        -> WBS 4.7
     RF4  declared floor exceeds computed meet                 -> WBS 4.4
     RF5  label maturity requirement unsatisfiable             <- here
     RF6  warm-up unavailable within the resolved window       <- here
 
-    §8's stage table also lists sealed-region intersection and lane conflict
-    as Resolution refusals. Those are RF2 and RF3, assigned to later
-    milestones by the roadmap. They are named in `ResolutionReport.deferred`
-    on every run so a reader of a resolution result can never mistake
-    "not checked yet" for "checked and passed".
+    §8's stage table lists sealed-region intersection and lane conflict as
+    Resolution refusals. RF2 landed at WBS 4.6 and is enforced here, reading
+    the governed registry in `sealed_regions.py` -- §8.1's whole point is that
+    exclusion is applied *at resolution*, so a consumer cannot read a sealed
+    region regardless of what the consumer's code does. RF3 remains assigned
+    to a later milestone and is named in `ResolutionReport.deferred` on every
+    run, so a reader can never mistake "not checked yet" for "checked and
+    passed".
 
 DEPENDENCY DIRECTION
     The builder is downstream of the Feature Store and the Label Store, so
@@ -44,12 +47,14 @@ from typing import Iterable, Protocol, runtime_checkable
 
 from dataset_builder import citation_index as ci
 from dataset_builder import registry as reg
+from dataset_builder import sealed_regions as sr
 
 #: Milestones that own the refusals this module deliberately does not run.
 #: Surfaced on every ResolutionReport so an unchecked refusal is never read as
 #: a passed one.
 DEFERRED_REFUSALS: dict[str, str] = {
-    "RF2": "sealed-region intersection without explicit exclusion (WBS 4.6)",
+    # RF2 was here until WBS 4.6 implemented it; it is now enforced by
+    # _check_rf2() below against the governed registry in sealed_regions.py.
     "RF3": "lane conflict -- confirmatory dataset resolving discovery-lane inputs (WBS 4.7)",
     "RF4": "declared admissibility floor exceeds the computed meet (WBS 4.4)",
 }
@@ -368,6 +373,33 @@ def _check_rf5(declaration: dict, resolver: ReferenceResolver) -> list[Refusal]:
     return refusals
 
 
+def _check_rf2(declaration: dict) -> list[Refusal]:
+    """RF2 -- sealed-region intersection without explicit exclusion
+    (§8.1, IQROS-P7; resolves PS3).
+
+    Reads the governed registry rather than a literal. A window touching a
+    sealed region must declare an exclusion that **fully covers** it; partial
+    coverage leaves the remainder readable, which is the leak RF2 exists to
+    prevent.
+
+    This is the refusal that makes the lockbox structural. Before WBS 4.6 the
+    discipline lived inside whichever script happened to read the data; now a
+    non-excluding dataset cannot be resolved at all, so it can never be
+    validated, sealed, or cited -- and the consumer never receives the rows to
+    ignore the rule with.
+    """
+    refusals: list[Refusal] = []
+    for region in sr.unexcluded_regions(declaration):
+        refusals.append(Refusal(
+            "RF2", region.name,
+            f"window intersects sealed region {region.name!r} "
+            f"({region.start}..{region.end}) with no explicit exclusion covering "
+            f"it. {region.reason} Declare a sealed_region_exclusions entry that "
+            f"fully covers the region, or narrow the window (§8.1 RF2, IQROS-P7)",
+        ))
+    return refusals
+
+
 def _check_rf6(declaration: dict, resolver: ReferenceResolver) -> list[Refusal]:
     """RF6 — warm-up unavailable within the resolved corpus window
     (`ADR-I010` §8.4).
@@ -468,6 +500,7 @@ def resolve(
     rf1_refusals, rf1_resolved = _check_rf1(declaration, resolver)
     refusals += rf1_refusals
     resolved += rf1_resolved
+    refusals += _check_rf2(declaration)
     refusals += _check_rf5(declaration, resolver)
     refusals += _check_rf6(declaration, resolver)
 

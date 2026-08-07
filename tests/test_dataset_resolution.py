@@ -117,15 +117,25 @@ class TestBuildAndScope:
         assert module_level == [], f"upstream imported at module level: {module_level}"
 
     def test_deferred_refusals_are_named(self):
-        """RF2/RF3/RF4 must be visibly deferred, never silently absent."""
-        assert set(res.DEFERRED_REFUSALS) == {"RF2", "RF3", "RF4"}
+        """Deferred refusals must be visibly named, never silently absent.
+
+        RF2 left this set at WBS 4.6 -- it is now enforced at resolution
+        against the governed sealed-region registry. RF3 and RF4 remain
+        deferred, each naming its owning milestone.
+        """
+        assert set(res.DEFERRED_REFUSALS) == {"RF3", "RF4"}
         for code, text in res.DEFERRED_REFUSALS.items():
             assert "WBS 4." in text
+
+    def test_rf2_is_no_longer_deferred(self):
+        """WBS 4.6: RF2 must not appear as deferred anywhere, or a reader
+        would think it is unchecked when it is enforced."""
+        assert "RF2" not in res.DEFERRED_REFUSALS
 
     def test_report_carries_deferred_by_default(self, db):
         h = _declare(db).spec_hash
         report = res.resolve(db, h, good_resolver())
-        assert set(report.deferred) == {"RF2", "RF3", "RF4"}
+        assert set(report.deferred) == {"RF3", "RF4"}
 
 
 # ---------------------------------------------------------------------------

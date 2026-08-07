@@ -74,13 +74,13 @@ Full evidence in the [Gap Matrix](verification/records/phase-4-gap-matrix.md). F
 
 ---
 
-## 3. Scope Transfers — `T-1` Ratified; `T-2`–`T-6` Pending
+## 3. Scope Transfers — `T-1`, `T-3` Ratified; `T-2`, `T-4`–`T-6` Pending
 
 | ID | Transfer | Recommendation | Lands in |
 |---|---|---|---|
 | **`T-1`** | **The corpus conformance backfill enters Phase 4.** It is Phase 1 completion work, but Phase 4 is its only consumer and the only phase that can verify it end-to-end | ✅ **ACCEPTED — ratified 2026-08-06 (`DS-DEC-001`).** Enters as WBS 4.0, flagged as inherited Phase 1 work rather than silently absorbed | WBS 4.0 |
 | **`T-2`** | **`FS-GAP-005` (corpus version) becomes jointly ownable.** Phase 3 §4.3 blocked it on "Phase 1 + Phase 4" with a binding do-not-invent instruction | ⚠️ **ACCEPT, scoped to 4.0 + 4.3.** The do-not-invent instruction **stands until jointly decided**: a corpus version is defined by what the raw lake actually lands, not by the builder | WBS 4.0, 4.3 |
-| **`T-3`** | **RF2 modifies existing analysis scripts.** The first Phase 4 change outside `research/dataset_builder/` | ⚠️ **ACCEPT with a separate gate.** Three scripts hold the constant; relocation must not change any published result | WBS 4.6 |
+| **`T-3`** | **RF2 modifies existing analysis scripts.** The first Phase 4 change outside `research/dataset_builder/` | ✅ **ACCEPTED — ratified 2026-08-07 (`DS-DEC-004`), scoped.** Analysis scripts producing published output only; `evidence_library` migration/seed/replay/historical scripts excluded. Relocation must not change any published result, and the lockbox must not be opened to prove it | WBS 4.6 |
 | **`T-4`** | **Training Dataset scope reduces to structure only** | ✅ **ACCEPT.** Building the layer is correct; expecting a real instance is not (`A-3`) | WBS 4.10 |
 | **`T-5`** | **`ADR-I011` LG7/DI8 use-counting lands here**, as Phase 3 §4.3 assigned | ✅ **ACCEPT as proposed** | WBS 4.9 |
 | **`T-6`** | **`ADR-I010` §11 / `ADR-I011` LG5 retirement checks land here**, via the citation index | ✅ **ACCEPT as proposed** | WBS 4.2, 4.11 |
@@ -116,7 +116,7 @@ Sizes are t-shirt (S = one focused session, M = 2–4, L = 5+), calibrated again
 | **`DS-DEC-002`** | Conformance **method** — full re-download, local re-derivation, hybrid, or forward-only | Rohith | Before D0 | ✅ **RATIFIED 2026-08-06 — ADOPTED (hybrid).** Local re-derivation for all 274 + sampled re-download that reports drift; **full re-download rejected** |
 | **`G-CORPUS`** | Open the corpus gate | Rohith | Before D0 | ✅ **RATIFIED 2026-08-06 — OPENED** under conditions `C1`–`C6`, staged D0a → D0b (§0.1) |
 | **`DS-DEC-003`** | `FS-GAP-005` — define corpus version, or keep the do-not-invent instruction | Rohith + `T-2` | Before 4.3 | **Owed.** Do-not-invent instruction **stands** |
-| **`DS-DEC-004`** | Accept `T-3` — authorise RF2 to modify three analysis scripts | Rohith | Before 4.6 | **Owed** |
+| **`DS-DEC-004`** | Accept `T-3` — authorise RF2 to modify three analysis scripts | Rohith | Before 4.6 | ✅ **RATIFIED 2026-08-07 — ACCEPTED, scoped.** RF2 may modify **only** analysis scripts that participate in published research output. `evidence_library` migration, seed, replay and historical-governance scripts are **excluded** absent a separate decision. Result invariance is the primary acceptance criterion; any observable difference is a failed milestone; **the sealed lockbox must not be opened or consumed during verification** |
 | **`DS-DEC-005`** | Dataset storage location | Rohith | Before 4.1 | ✅ **RATIFIED 2026-08-06 — `research/dataset_builder/dataset_builder.db`** |
 | **`DS-DEC-006`** | Whether the 70 historical ledger runs are retro-bound to Experiment Datasets | Rohith | Not scheduled | **Owed.** `ADR-I012` R9 makes this explicitly out of scope here |
 

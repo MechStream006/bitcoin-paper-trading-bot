@@ -418,10 +418,18 @@ class TestPersistedState:
         assert {c["id"] for c in closure["citations"]["feature"]} == indexed
 
     def test_closure_records_deferred_and_not_computed(self, db, ledger):
+        """The sealed closure records exactly what was deferred at seal time.
+
+        RF2 left the deferred set at WBS 4.6 -- it is enforced at resolution
+        now, so a dataset that seals has already passed it. The closure
+        correctly records one fewer deferred check, which is 4.6 propagating
+        into the provenance record rather than a regression.
+        """
         h, report = _validated(db)
         _seal(db, ledger, h, report)
         closure = sl.get_sealed(db, h)["provenance_closure"]
-        assert set(closure["deferred_checks"]) == {"RF2", "RF3"}
+        assert set(closure["deferred_checks"]) == {"RF3"}
+        assert "RF2" not in closure["deferred_checks"]
         assert closure["not_computed"] == ["TD1", "TD2", "TD3", "TD4", "TD5"]
 
     def test_records_engine_version_and_actor(self, db, ledger):
