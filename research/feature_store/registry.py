@@ -552,11 +552,38 @@ def activate_specification(
         raise SpecificationRejected(spec_hash, [reason])
 
 
-def retire_specification(db_path: Path | str, spec_hash: str, from_phase: str) -> None:
-    """Deprecated/Superseded -> Retired. No citation-index check is
-    performed here (ADR-I010 §11: "Retirement requires zero citations" --
-    the citation index is ADR-I012's Dataset Builder, not built yet; this
-    milestone's retire_specification() is the mechanical transition only,
-    correctly deferring the citation check to whichever future milestone
-    builds the index)."""
+class SpecificationCited(FeatureRegistryError):
+    """Refusing to retire a Specification that a sealed dataset cites
+    (ADR-I010 §11, DG-5)."""
+
+
+def retire_specification(
+    db_path: Path | str,
+    spec_hash: str,
+    from_phase: str,
+    citation_check: Callable[[str], bool] | None = None,
+) -> None:
+    """Deprecated/Superseded -> Retired.
+
+    ADR-I010 §11: *"Retirement requires zero citations. A Specification cited
+    by any sealed artifact cannot be retired -- the citation index (ADR-I012)
+    is the authority."* WBS 4.2 built that index, so the check is no longer
+    deferred: pass `citation_check`, a `(spec_hash) -> bool` callable that
+    reports whether a citable dataset cites this Specification. True refuses.
+
+    The callable is **injected, never imported**. This module has no knowledge
+    of the Dataset Builder, so the dependency arrow keeps pointing one way;
+    `dataset_builder.citation_index.make_citation_check(db, "feature")` builds
+    the callable a caller passes in.
+
+    `citation_check=None` preserves the pre-4.2 signature and behaviour for
+    existing callers. That is a deliberate backward-compatibility choice, not
+    an escape hatch: a caller that omits the check is asserting there is no
+    citation index to consult, which was literally true before 4.2.
+    """
+    if citation_check is not None and citation_check(spec_hash):
+        raise SpecificationCited(
+            f"refusing to retire {spec_hash[:12]}...: cited by at least one "
+            f"sealed dataset (ADR-I010 §11, the citation index is the authority)"
+        )
     _transition_phase(db_path, spec_hash, from_phase, "Retired")

@@ -602,11 +602,34 @@ def activate_specification(
         raise SpecificationRejected(spec_hash, [reason])
 
 
-def retire_specification(db_path: Path | str, spec_hash: str, from_phase: str) -> None:
-    """Deprecated/Superseded -> Retired. No citation-index check is
-    performed here (§12.1: "Retirement requires zero citations" -- the
-    citation index is ADR-I012's Dataset Builder, not built yet; this
-    milestone's retire_specification() is the mechanical transition only,
-    correctly deferring the citation check to whichever future milestone
-    builds the index -- mirrors LG5)."""
+class SpecificationCited(LabelRegistryError):
+    """Refusing to retire a Specification that a sealed dataset cites
+    (ADR-I011 LG5 / DI7, DG-5)."""
+
+
+def retire_specification(
+    db_path: Path | str,
+    spec_hash: str,
+    from_phase: str,
+    citation_check: Callable[[str], bool] | None = None,
+) -> None:
+    """Deprecated/Superseded -> Retired.
+
+    ADR-I011 LG5: *"A Specification cited by a sealed artifact can never be
+    retired or made unresolvable."* DI7 adds that the citation index must
+    answer *"what cites this Specification?"* before retirement is permitted.
+    WBS 4.2 built that index, so the check is no longer deferred: pass
+    `citation_check`, a `(spec_hash) -> bool` callable. True refuses.
+
+    The callable is **injected, never imported** -- this module has no
+    knowledge of the Dataset Builder, preserving the dependency direction.
+    `dataset_builder.citation_index.make_citation_check(db, "label")` builds it.
+
+    `citation_check=None` preserves the pre-4.2 signature and behaviour.
+    """
+    if citation_check is not None and citation_check(spec_hash):
+        raise SpecificationCited(
+            f"refusing to retire {spec_hash[:12]}...: cited by at least one "
+            f"sealed dataset (ADR-I011 LG5, the citation index is the authority)"
+        )
     _transition_phase(db_path, spec_hash, from_phase, "Retired")
