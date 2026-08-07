@@ -47,6 +47,15 @@ ACTIONS = frozenset({
     # Phase 3 Label Store roadmap v1.1.0 (WBS 3.8a). Purely additive, same
     # discipline as "evaluate" above.
     "register", "adjudicate",
+    # Phase 4 Dataset Builder roadmap v1.0.2 (WBS 4.5), which names
+    # `dataset.seal` receipts in its own acceptance criteria. ADR-I012 DG-1:
+    # "Sealing is a human act emitting a receipt (IQROS-P8, P10)." No existing
+    # verb described sealing -- "promote" is a different decision (DG-1 vs the
+    # promotion authority in §13.1) and reusing it would conflate making a
+    # dataset citable with advancing it through a research gate. Purely
+    # ADDITIVE, same discipline as "evaluate" and "register" above: no existing
+    # receipt uses it, no existing validation is loosened.
+    "seal",
 })
 
 SUBJECT_KINDS = frozenset({
@@ -76,6 +85,13 @@ DECISION_TAXONOMY: dict[str, str] = {
     "family.demote": "discretionary",
     "feature.promote": "discretionary",
     "feature.retire": "discretionary",
+    # Phase 4 WBS 4.5. DISCRETIONARY, not derived, and the distinction is
+    # ADR-I012 DG-1/DG-2 stated exactly: resolution and validation are
+    # COMPUTATIONS and replay (DG-2, IQROS Ph3); sealing is a HUMAN ACT (DG-1,
+    # IQROS-P8). A seal receipt is therefore envelope-verified, never re-derived
+    # -- re-running the battery years later must not be able to manufacture a
+    # seal that no human granted.
+    "dataset.seal": "discretionary",
     "dataset.promote": "discretionary",
     "dataset.retire": "discretionary",
     "model.promote": "discretionary",
