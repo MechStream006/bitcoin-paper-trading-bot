@@ -428,8 +428,9 @@ class TestPersistedState:
         h, report = _validated(db)
         _seal(db, ledger, h, report)
         closure = sl.get_sealed(db, h)["provenance_closure"]
-        assert set(closure["deferred_checks"]) == {"RF3"}
+        assert closure["deferred_checks"] == {}
         assert "RF2" not in closure["deferred_checks"]
+        assert "RF3" not in closure["deferred_checks"]
         assert closure["not_computed"] == ["TD1", "TD2", "TD3", "TD4", "TD5"]
 
     def test_records_engine_version_and_actor(self, db, ledger):

@@ -99,14 +99,12 @@ class TestBuildAndScope:
 
     def test_deferred_checks_named_with_owner(self):
         """RF2 left this set at WBS 4.6 -- it is enforced at resolution now."""
-        assert set(val.DEFERRED_CHECKS) == {"RF3"}
-        for text in val.DEFERRED_CHECKS.values():
-            assert "WBS 4." in text
+        assert val.DEFERRED_CHECKS == {}
 
     def test_report_carries_deferred(self, db):
         h = _resolved(db)
         report = val.validate(db, h, good_inputs())
-        assert set(report.deferred) == {"RF3"}
+        assert report.deferred == {}
 
     def test_rf4_delegates_to_the_lattice(self):
         """RF4 must not reimplement the comparison — a second authority on
@@ -341,9 +339,14 @@ class TestTierC:
         f = val.check_tier_c(valid_declaration(), inputs, m, None)
         assert any(x.code == "TC3" for x in f)
 
-    def test_rf3_not_implemented_here(self, db):
+    def test_rf3_is_enforced_at_resolution_not_here(self, db):
+        """WBS 4.7 moved RF3 to resolution. It must not appear as deferred
+        (that would say unchecked) nor as a validation finding (that would
+        duplicate the authority)."""
         h = _resolved(db)
-        assert "RF3" in val.validate(db, h, good_inputs()).deferred
+        report = val.validate(db, h, good_inputs())
+        assert "RF3" not in report.deferred
+        assert report.by_code("RF3") == []
 
 
 class TestRF4:

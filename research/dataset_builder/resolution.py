@@ -7,19 +7,22 @@ Stage 2 RESOLUTION   bind every reference to a hash at `as_of`; pin corpus
 REFUSAL SCOPE (WBS 4.3 owns three of the six)
     RF1  unresolvable or non-Active specification reference   <- here
     RF2  sealed-region intersection without exclusion         <- here (WBS 4.6)
-    RF3  lane conflict                                        -> WBS 4.7
+    RF3  lane conflict                                        <- here (WBS 4.7)
     RF4  declared floor exceeds computed meet                 -> WBS 4.4
     RF5  label maturity requirement unsatisfiable             <- here
     RF6  warm-up unavailable within the resolved window       <- here
 
     §8's stage table lists sealed-region intersection and lane conflict as
-    Resolution refusals. RF2 landed at WBS 4.6 and is enforced here, reading
-    the governed registry in `sealed_regions.py` -- §8.1's whole point is that
-    exclusion is applied *at resolution*, so a consumer cannot read a sealed
-    region regardless of what the consumer's code does. RF3 remains assigned
-    to a later milestone and is named in `ResolutionReport.deferred` on every
-    run, so a reader can never mistake "not checked yet" for "checked and
-    passed".
+    Resolution refusals; both now land here. RF2 (WBS 4.6) reads the governed
+    registry in `sealed_regions.py`; RF3 (WBS 4.7) reads the frozen lane table
+    in `lanes.py`, which imports it from the evidence ledger rather than
+    redefining it. §8.1's whole point is that these are applied *at
+    resolution*, so a consumer cannot read a sealed region or a contaminated
+    lane regardless of what the consumer's code does.
+
+    RF4 alone remains assigned elsewhere (WBS 4.4, stage 4) and is named in
+    `ResolutionReport.deferred` on every run, so a reader can never mistake
+    "not checked here" for "checked and passed".
 
 DEPENDENCY DIRECTION
     The builder is downstream of the Feature Store and the Label Store, so
@@ -47,16 +50,17 @@ from typing import Iterable, Protocol, runtime_checkable
 
 from dataset_builder import citation_index as ci
 from dataset_builder import registry as reg
+from dataset_builder import lanes as ln
 from dataset_builder import sealed_regions as sr
 
 #: Milestones that own the refusals this module deliberately does not run.
 #: Surfaced on every ResolutionReport so an unchecked refusal is never read as
 #: a passed one.
 DEFERRED_REFUSALS: dict[str, str] = {
-    # RF2 was here until WBS 4.6 implemented it; it is now enforced by
-    # _check_rf2() below against the governed registry in sealed_regions.py.
-    "RF3": "lane conflict -- confirmatory dataset resolving discovery-lane inputs (WBS 4.7)",
-    "RF4": "declared admissibility floor exceeds the computed meet (WBS 4.4)",
+    # RF2 (WBS 4.6) and RF3 (WBS 4.7) were here until implemented; both are
+    # now enforced below. RF4 is a stage-4 check and genuinely does not run at
+    # resolution -- it is the only refusal still deferred from this stage.
+    "RF4": "declared admissibility floor exceeds the computed meet (WBS 4.4, stage 4)",
 }
 
 #: Maturity requirements that demand labels be fully matured by `as_of`.
@@ -130,6 +134,9 @@ class ResolutionReport:
     pinned_revisions: dict[str, str] = field(default_factory=dict)
     #: Refusal points not evaluated here, with the milestone that owns each.
     deferred: dict[str, str] = field(default_factory=lambda: dict(DEFERRED_REFUSALS))
+    #: Checks that ran but could not reach a verdict -- e.g. RF3 when a lane
+    #: expression does not determine its run_kind half. Never a silent pass.
+    not_evaluable: list[str] = field(default_factory=list)
 
     def refusals_by_code(self, code: str) -> list[Refusal]:
         return [r for r in self.refusals if r.code == code]
@@ -400,6 +407,51 @@ def _check_rf2(declaration: dict) -> list[Refusal]:
     return refusals
 
 
+def _check_rf3(
+    declaration: dict, resolver: ReferenceResolver
+) -> tuple[list[Refusal], list[str]]:
+    """RF3 -- lane conflict (§8.1, IQROS-P6; resolves PS4).
+
+    PS4: *"Lane disjointness is convention. Nothing structurally prevents a
+    confirmatory evaluation from resolving discovery-lane inputs"* -- so *"the
+    confirmatory lane can be contaminated by the thing it exists to confirm."*
+    DG4 asks to make that structural, and refusing at resolution does: a
+    conflicting dataset never resolves, so it can never be sealed or cited.
+
+    The lane vocabulary comes from the evidence ledger's frozen `LANES` table
+    via `lanes.py`; nothing is redefined here.
+
+    A resolver may optionally expose `input_lane(kind, reference)` to report
+    the lane an input actually resolved to. It is read with `getattr` rather
+    than added to the Protocol, so every existing resolver -- including WBS
+    4.3's `StoreResolver` and the test doubles -- keeps working unchanged.
+
+    Returns `(refusals, not_evaluable)`. A lane whose `run_kind` half is not
+    determinable yields `not_evaluable`, never a silent pass.
+    """
+    input_lanes: dict[str, object] = {}
+    lookup = getattr(resolver, "input_lane", None)
+    if callable(lookup):
+        evidence = declaration.get("evidence_references")
+        for source in ((evidence or {}).get("sources") or []) if isinstance(evidence, dict) else []:
+            lane = lookup("evidence", str(source))
+            if lane is not None:
+                input_lanes[str(source)] = lane
+        for ref in declaration.get("feature_references") or []:
+            lane = lookup("feature", str(ref))
+            if lane is not None:
+                input_lanes[str(ref)] = lane
+        for ref in declaration.get("label_references") or []:
+            if isinstance(ref, dict) and ref.get("spec_hash"):
+                lane = lookup("label", str(ref["spec_hash"]))
+                if lane is not None:
+                    input_lanes[str(ref["spec_hash"])] = lane
+
+    conflicts, not_evaluable = ln.check_lane_conflicts(declaration, input_lanes)
+    refusals = [Refusal("RF3", c.subject, c.detail) for c in conflicts]
+    return refusals, not_evaluable
+
+
 def _check_rf6(declaration: dict, resolver: ReferenceResolver) -> list[Refusal]:
     """RF6 — warm-up unavailable within the resolved corpus window
     (`ADR-I010` §8.4).
@@ -501,6 +553,8 @@ def resolve(
     refusals += rf1_refusals
     resolved += rf1_resolved
     refusals += _check_rf2(declaration)
+    rf3_refusals, rf3_not_evaluable = _check_rf3(declaration, resolver)
+    refusals += rf3_refusals
     refusals += _check_rf5(declaration, resolver)
     refusals += _check_rf6(declaration, resolver)
 
@@ -527,6 +581,7 @@ def resolve(
         resolved=resolved,
         refusals=refusals,
         pinned_revisions=pinned,
+        not_evaluable=rf3_not_evaluable,
     )
 
     if refusals:

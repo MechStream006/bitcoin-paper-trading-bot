@@ -123,19 +123,22 @@ class TestBuildAndScope:
         against the governed sealed-region registry. RF3 and RF4 remain
         deferred, each naming its owning milestone.
         """
-        assert set(res.DEFERRED_REFUSALS) == {"RF3", "RF4"}
+        assert set(res.DEFERRED_REFUSALS) == {"RF4"}
         for code, text in res.DEFERRED_REFUSALS.items():
             assert "WBS 4." in text
 
-    def test_rf2_is_no_longer_deferred(self):
-        """WBS 4.6: RF2 must not appear as deferred anywhere, or a reader
-        would think it is unchecked when it is enforced."""
+    def test_rf2_and_rf3_are_no_longer_deferred(self):
+        """WBS 4.6 and 4.7: neither may appear as deferred, or a reader would
+        think it unchecked when it is enforced. RF4 alone remains, because it
+        is a stage-4 check that genuinely does not run at resolution."""
         assert "RF2" not in res.DEFERRED_REFUSALS
+        assert "RF3" not in res.DEFERRED_REFUSALS
+        assert "RF4" in res.DEFERRED_REFUSALS
 
     def test_report_carries_deferred_by_default(self, db):
         h = _declare(db).spec_hash
         report = res.resolve(db, h, good_resolver())
-        assert set(report.deferred) == {"RF3", "RF4"}
+        assert set(report.deferred) == {"RF4"}
 
 
 # ---------------------------------------------------------------------------

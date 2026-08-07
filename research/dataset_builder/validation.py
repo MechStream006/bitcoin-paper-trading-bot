@@ -21,11 +21,11 @@ RF4 IS `satisfies()`, NOT A REIMPLEMENTATION
     authority on admissibility, which is exactly what IQROS-P4 forbids.
 
 DEFERRED, NEVER SILENT
-    §12's Tier C text includes lane conflict (RF3, WBS 4.7), which is **not**
-    implemented here. §12's Tier B text also mentions sealed-region
-    intersection; that is RF2, implemented at WBS 4.6 and enforced at
-    *resolution* rather than in this module, because §8.1 places exclusion at
-    the resolution boundary. Every `ValidationReport` carries a `deferred`
+    §12's Tier B text mentions sealed-region intersection and its Tier C text
+    mentions lane conflict. Those are RF2 (WBS 4.6) and RF3 (WBS 4.7), both
+    enforced at *resolution* rather than in this module, because §8.1 places
+    them at the resolution boundary. `DEFERRED_CHECKS` is consequently empty:
+    every check §12 assigns to this module runs here. Every `ValidationReport` carries a `deferred`
     map naming each and the milestone that owns it, and Tier D findings
     computed without statistics are recorded as `not_computed` rather than
     passing. A reader can never mistake "not checked" for "checked and clean".
@@ -60,14 +60,14 @@ from dataset_builder import registry as reg
 from dataset_builder import resolution as res
 
 #: Checks §12 describes but a later milestone owns. Present on every report.
-DEFERRED_CHECKS: dict[str, str] = {
-    # RF2 was listed here until WBS 4.6. It is now enforced at RESOLUTION
-    # (resolution._check_rf2) against the governed registry, which is where
-    # §8.1 says exclusion belongs -- a dataset that fails RF2 never reaches
-    # validation at all. Tier B's TB4 still checks that a declared exclusion
-    # is well-formed; RF2 decides whether one was required.
-    "RF3": "lane conflict — confirmatory dataset resolving discovery-lane inputs — Tier C (WBS 4.7)",
-}
+#: Empty since WBS 4.7. RF2 (4.6) and RF3 (4.7) were listed here until each was
+#: implemented; both are enforced at RESOLUTION, which is where §8.1 places
+#: them -- a dataset failing either never reaches validation at all. Tier B's
+#: TB4 still checks that a declared exclusion is well-formed and Tier C still
+#: checks that a lane was recorded; RF2 and RF3 decide whether an exclusion was
+#: required and whether the lane conflicts. An empty map is the honest state:
+#: every check §12 assigns to this module now runs here.
+DEFERRED_CHECKS: dict[str, str] = {}
 
 #: Tier order is fixed by §12 and by the roadmap. A later tier may depend on an
 #: earlier one having run, and a blocking failure short-circuits the rest.

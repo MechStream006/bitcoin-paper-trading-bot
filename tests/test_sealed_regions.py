@@ -395,10 +395,12 @@ class TestRegression:
     def test_rf2_removed_from_validation_deferred(self):
         assert "RF2" not in val.DEFERRED_CHECKS
 
-    def test_rf3_still_deferred_in_both(self):
-        """Only RF2 moved. RF3 must remain visibly deferred."""
-        assert "RF3" in res.DEFERRED_REFUSALS
-        assert "RF3" in val.DEFERRED_CHECKS
+    def test_rf3_also_relocated_at_wbs_4_7(self):
+        """RF2 moved at 4.6 and RF3 at 4.7. Neither is deferred now; RF4
+        alone remains, and only from resolution's perspective."""
+        assert "RF3" not in res.DEFERRED_REFUSALS
+        assert val.DEFERRED_CHECKS == {}
+        assert "RF4" in res.DEFERRED_REFUSALS
 
     def test_validation_does_not_duplicate_rf2(self, db):
         """One authority per refusal. If validation also reported RF2 there
