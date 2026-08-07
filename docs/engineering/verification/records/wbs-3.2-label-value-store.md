@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-05 |
 | **Implementer** | Claude Sonnet 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 
 **Scope discipline, stated up front.** Entirely new, additive code, corresponding to WBS 3.2 only. Does not modify any existing source file, including `research/label_store/registry.py` (WBS 3.1, untouched). Does not import, wrap, or depend on `research/feature_store/value_store.py` or on `research/label_store/registry.py` itself (no `spec_hash` foreign-key check — mirrors Feature Store's identical scoped simplification). No H6 wrapping (WBS 3.4), no real convention (WBS 3.3), no real data of any kind. Every value exercised in testing is hand-written. **WBS 3.3 is explicitly not begun.**
 
@@ -99,18 +99,18 @@
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed — Rohith Suresh, 2026-08-07 (`LS-DEC-003`, Approval Package `A1`).*
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.2 exactly, no scope creep into 3.3+
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" list matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed, including the trigger's documented exception
-- [ ] **RC7** — Full diff read — should be 100% new files
-- [ ] **RC8** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.2 exactly, no scope creep into 3.3+
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" list matches `git status` exactly
+- [x] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed, including the trigger's documented exception
+- [x] **RC7** — Full diff read — should be 100% new files
+- [x] **RC8** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-07
 
 ---
 

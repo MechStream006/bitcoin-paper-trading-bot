@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Sonnet 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 
 **WBS 3.4–3.8b semantics are unchanged, as instructed.** Every Label Store file (`registry.py`, `value_store.py`, `standing.py`, `superseded.py`, `propagation.py`, `label_receipts.py`), both stores' admissibility substrate (`lattice.py`, `composition.py`), the Feature Store, and the governance-receipt infrastructure (`receipts.py`, `receipt_ledger.py`, `migrate_bootstrap_feature_receipts.py`) show **zero diff** (`git diff --stat` confirms; the only diffs present predate this session entirely, unchanged in size from WBS 3.8b's own record). This milestone adds exactly one new module and two new test files.
 
@@ -112,19 +112,19 @@
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed — Rohith Suresh, 2026-08-07 (`LS-DEC-003`, Approval Package `A1`).*
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.9 exactly, no scope creep into Phase 4
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" list matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full, confirmed to exercise real behaviour, including `TestEndToEndLabelStoreIntegration::test_full_pipeline`
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed
-- [ ] **RC7** — Full diff read — confirm every WBS 3.1–3.8b file (both stores, plus the governance-receipt substrate) shows no diff
-- [ ] **RC8** — Real local `label_store.db` confirmed untouched (no `governance_receipts` table exists on it — correctly so, per §2 TV2)
-- [ ] **RC9** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.9 exactly, no scope creep into Phase 4
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" list matches `git status` exactly
+- [x] **RC4** — At least two tests read in full, confirmed to exercise real behaviour, including `TestEndToEndLabelStoreIntegration::test_full_pipeline`
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed
+- [x] **RC7** — Full diff read — confirm every WBS 3.1–3.8b file (both stores, plus the governance-receipt substrate) shows no diff
+- [x] **RC8** — Real local `label_store.db` confirmed untouched (no `governance_receipts` table exists on it — correctly so, per §2 TV2)
+- [x] **RC9** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-07
 
 ---
 

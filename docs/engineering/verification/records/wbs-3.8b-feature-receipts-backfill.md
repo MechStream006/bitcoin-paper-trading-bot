@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Sonnet 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 
 **WBS 3.4–3.8a semantics are unchanged, as instructed.** Every Label Store file (`registry.py`, `value_store.py`, `standing.py`, `superseded.py`, `propagation.py`, `label_receipts.py`) and every Feature Store file (`registry.py`, `value_store.py`, `conditioning.py`) show zero diff (`git diff --stat` confirms). `research/evidence_library/receipts.py` gains one more small, purely additive extension — a single new `DECISION_TAXONOMY` entry, `"feature.register": "derived"` — the same mechanism used at WBS 3.8a for `"label.register"`/`"label.adjudicate"` and at PR-7 for `"evaluate"`. `"feature"` (`SUBJECT_KINDS`) and `"register"` (`ACTIONS`) already existed (PR-1 and WBS 3.8a respectively) — no further taxonomy growth was needed.
 
@@ -111,19 +111,19 @@
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed — Rohith Suresh, 2026-08-07 (`LS-DEC-003`, Approval Package `A1`).*
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.8b exactly, no scope creep into 3.9
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" list matches `git status` exactly
-- [ ] **RC4** — §0's disclosed defect and its correction read in full and understood
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed
-- [ ] **RC7** — Full diff read — confirm every WBS 3.1–3.8a file (both stores) shows no diff, and `receipts.py`'s diff is exactly one additive `DECISION_TAXONOMY` row plus the pre-existing, pre-session hunks
-- [ ] **RC8** — Real local `feature_store.db`'s 17 bootstrap receipts independently spot-checked
-- [ ] **RC9** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.8b exactly, no scope creep into 3.9
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" list matches `git status` exactly
+- [x] **RC4** — §0's disclosed defect and its correction read in full and understood
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed
+- [x] **RC7** — Full diff read — confirm every WBS 3.1–3.8a file (both stores) shows no diff, and `receipts.py`'s diff is exactly one additive `DECISION_TAXONOMY` row plus the pre-existing, pre-session hunks
+- [x] **RC8** — Real local `feature_store.db`'s 17 bootstrap receipts independently spot-checked
+- [x] **RC9** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-07
 
 ---
 

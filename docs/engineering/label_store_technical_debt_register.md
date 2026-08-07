@@ -72,10 +72,15 @@ This register records what Phase 3 **did not** build, so that absence stays visi
 |---|---|---|---|
 | `LS-DEC-001` | Forward-tier storage location | ✅ **RESOLVED** 2026-08-06 — co-located. *Brief header is stale; see `LS-GAP-006`* | Rohith |
 | `LS-DEC-002` | Whether the multi-signal collector adopts the Label Store (PS5) | No — out of Phase 3 scope | Rohith + `G-PROD` |
-| [`LS-DEC-003`](#ls-dec-003--reviewer-sign-off-on-ten-phase-3-verification-records) | Reviewer sign-off on ten Phase 3 verification records | ⚠️ **Blocks Phase 3 formal closure** | Rohith |
-| [`LS-DEC-004`](#ls-dec-004--ratify-or-replace-the-roadmaps-label_policyyaml-rollback-strategy) | Ratify or replace the roadmap's `label_policy.yaml` rollback strategy | No | Rohith |
-| [`LS-DEC-005`](#ls-dec-005--ratify-the-p3-1-shared-code-path-test-reading) | Ratify the `P3-1` "shared-code-path test" reading | ⚠️ **Blocks a clean DoD claim** | Rohith |
-| [`LS-DEC-006`](#ls-dec-006--commit-phases-03-to-version-control) | Commit Phases 0–3 to version control | 🔴 **Blocks Phase 4** | Rohith |
+| [`LS-DEC-003`](#ls-dec-003--reviewer-sign-off-on-thirteen-phase-3-verification-records) | Reviewer sign-off on thirteen Phase 3 verification records | ✅ **RATIFIED 2026-08-07** — all 13 signed (`A1`) | Rohith |
+| [`LS-DEC-004`](#ls-dec-004--ratify-or-replace-the-roadmaps-label_policyyaml-rollback-strategy) | Ratify or replace the roadmap's `label_policy.yaml` rollback strategy | ✅ **RATIFIED 2026-08-07** — option (a), structural approach (`A2`) | Rohith |
+| [`LS-DEC-005`](#ls-dec-005--ratify-the-p3-1-shared-code-path-test-reading) | Ratify the `P3-1` "shared-code-path test" reading | ✅ **RATIFIED 2026-08-07** — behavioural-equivalence reading (`A3`) | Rohith |
+| [`LS-DEC-006`](#ls-dec-006--commit-phases-03-to-version-control) | Commit Phases 0–3 to version control | ✅ **RESOLVED 2026-08-06** — committed, pushed, tagged `phase-3-baseline-v1.1.0` | Rohith |
+| [`LS-DEC-007`](verification/records/phase-4-readiness-resolution.md) | Formally add **WBS 3.8c** — label registration receipt backfill | ✅ **RATIFIED 2026-08-07** — added as Phase 3 work (`A4`) | Rohith |
+| [`LS-DEC-008`](verification/records/phase-4-readiness-resolution.md) | Formally add **WBS 3.11** — activation via behavioural equivalence | ✅ **RATIFIED 2026-08-07** — added as Phase 3 work (`A5`) | Rohith |
+| [`LS-DEC-009`](verification/records/phase-4-readiness-resolution.md) | Disposition of `57ce016e51a0` (convention C3) | ✅ **RATIFIED 2026-08-07** — deferral by name upheld (`A6`) | Rohith |
+
+> `LS-DEC-007`/`008`/`009` are defined in [`phase-4-readiness-resolution.md`](verification/records/phase-4-readiness-resolution.md) §8 and indexed here for completeness (correction `D-3`). All six `E2` decisions were ratified in one review — see the [Phase 3 Closure Approval Package](verification/records/phase-3-closure-approval-package.md).
 
 ---
 
@@ -253,9 +258,13 @@ Local backup, manifest, rotation, and freshness monitoring are all live (WBS 3.1
 
 ## 4. Decisions Owed — Detail
 
-### `LS-DEC-003` — Reviewer sign-off on ten Phase 3 verification records
+### `LS-DEC-003` — Reviewer sign-off on thirteen Phase 3 verification records
 
-**All ten** Phase 3 milestone records (3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8a, 3.8b, 3.9, 3.10) have their entire Reviewer Checklist unticked. Every other checkbox in every record — BV, TV, REG, PERF, DBV, BC, RBV, TD, DOD — is complete; only RC is outstanding.
+> ✅ **RATIFIED 2026-08-07.** All 13 records signed. See the [Phase 3 Closure Approval Package](verification/records/phase-3-closure-approval-package.md) `A1`.
+>
+> **Count corrected (`D-3`/`D-1`).** This entry previously read *"ten"* while enumerating *eleven*. The true figure is **thirteen** — the original enumeration predates WBS 3.8c and WBS 3.11, both of which are Phase 3 milestone records carrying their own Reviewer Checklists.
+
+**All thirteen** Phase 3 milestone records (3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8a, 3.8b, **3.8c**, 3.9, 3.10, **3.11**) had their entire Reviewer Checklist unticked. Every other checkbox in every record — BV, TV, REG, PERF, DBV, BC, RBV, TD, DOD — was complete; only RC was outstanding.
 
 **Why this is more than bookkeeping.** Roadmap §8.1 states explicitly: *"🔄 **Reviewer sign-off (Verification Standard §12, RC1–RC8) is obtained per milestone, not deferred.** Phase 2 accumulated five unsigned records (`FS-DEC-002`); **Phase 3 does not repeat that**."* Phase 3 accumulated ten. This is a named criterion the phase set for itself and did not meet.
 
@@ -263,11 +272,15 @@ Local backup, manifest, rotation, and freshness monitoring are all live (WBS 3.1
 
 ### `LS-DEC-004` — Ratify or replace the roadmap's `label_policy.yaml` rollback strategy
 
+> ✅ **RATIFIED 2026-08-07 — option (a).** The structural approach is ratified; roadmap §10's four `label_policy.yaml` config keys are formally **superseded** and will not be built. Approval Package `A2`. `LS-GAP-006` closes as *resolved by design change, recorded*.
+
 Roadmap §10 names four config keys as the rollback levers for WBS 3.5/3.6/3.7/3.9. None exists (`LS-GAP-006`). Four milestones independently satisfied "non-blocking by default" structurally instead — a coherent and arguably better answer, since a config switch that disables falsification protection is *exactly* what §10 itself refuses to build for WBS 3.2.
 
 **The decision:** either (a) ratify the structural approach and record that §10's four keys are superseded, or (b) require `label_policy.yaml` as originally planned. **Recommendation: (a)** — it matches what was built, is already documented in WBS 3.9's record, and avoids adding configuration surface for a store with one writer and no production deployment.
 
 ### `LS-DEC-005` — Ratify the `P3-1` "shared-code-path test" reading
+
+> ✅ **RATIFIED 2026-08-07.** The behavioural-equivalence reading is ratified and `P3-1` is annotated accordingly. **`LR1` is preserved unchanged** — it is explicitly *not* weakened. Approval Package `A3`. Evidence: WBS 3.11's 148/148 independent re-read.
 
 Roadmap `P3-1` requires *"the declare-then-fill **discipline** is proven reused via a shared-code-path test, **and** enforcement is proven strengthened to the storage layer. Both halves required."*
 
@@ -278,6 +291,10 @@ The second half is unambiguously met (the trigger). The first half is **not sati
 **This is a genuine internal inconsistency in an approved roadmap, between `P3-1` and `LR1`.** It is reported rather than edited, per the closeout's documentation-only scope. **Recommendation:** ratify the reading above and annotate `P3-1`; do not weaken `LR1`.
 
 ### `LS-DEC-006` — Commit Phases 0–3 to version control
+
+> ✅ **RESOLVED 2026-08-06 — discharged by action, not by ruling.** Phases 0–3 are committed, pushed to `origin/main`, and tagged `phase-3-baseline-v1.0.0` / `phase-3-baseline-v1.1.0`; WBS 3.11 is durable at `ffaae2b`. The status marker below was stale (correction `D-4`). Correctly **not** part of `E2`, which was already scoped to `LS-DEC-003/004/005/007/008/009`.
+>
+> *The text below is retained as the original finding, and describes the state before discharge.*
 
 **The single highest-severity finding of this closeout.** `git log` shows the most recent commit is `c14ba38` (Program P1). Everything produced by Phases 0, 1, 2, and 3 — `research/admissibility/`, `research/feature_store/`, `research/label_store/`, `research/storage/raw_lake.py`, `research/quality/admissibility.py`, `docs/architecture/`, `docs/engineering/`, and 20+ test files — exists **only as uncommitted working-tree state on one machine**.
 

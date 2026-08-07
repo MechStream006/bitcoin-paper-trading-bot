@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-05 |
 | **Implementer** | Claude Sonnet 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 
 **Scope discipline, stated up front.** New, additive registration script + tests only, corresponding to WBS 3.3. Does not modify `research/label_store/registry.py` or `value_store.py` (WBS 3.1/3.2) — restored to byte-identical state after two deliberate TV3 sabotage/revert cycles (verified: full WBS 3.1+3.2+3.3 test suites, 106/106, plus both Feature Store suites and their own migration script's tests, 188/188, all green). No forward data touched — no read of `forward_evidence.db`/`evidence_forward.db`, no call into `value_store.py`, no `register_binding()`/`activate_specification()` call. **WBS 3.4 is explicitly not begun.**
 
@@ -96,18 +96,18 @@
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed — Rohith Suresh, 2026-08-07 (`LS-DEC-003`, Approval Package `A1`).*
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.3 exactly, no scope creep into 3.4+
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" list matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed
-- [ ] **RC7** — Full diff read — should be 100% new files; confirm `registry.py`/`value_store.py` show no diff
-- [ ] **RC8** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.3 exactly, no scope creep into 3.4+
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" list matches `git status` exactly
+- [x] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed
+- [x] **RC7** — Full diff read — should be 100% new files; confirm `registry.py`/`value_store.py` show no diff
+- [x] **RC8** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-07
 
 ---
 

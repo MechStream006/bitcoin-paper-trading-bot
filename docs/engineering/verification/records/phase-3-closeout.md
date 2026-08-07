@@ -125,7 +125,7 @@ Re-run both suites and `report.py --check` on the committed tree. No behaviour c
 | Item | Recommendation |
 |---|---|
 | **Phase 3 closure** | ✅ **CONDITIONAL — recommended**, subject to `C3-1`…`C3-4` ([Closure Review §10.1](phase-3-closure-review.md#101-phase-3-closure)) |
-| **Phase 4 authorisation** | ⛔ **WITHHELD** — blockers `B-1` (uncommitted phases) and `B-2` (no `Active` Label Specification) |
+| **Phase 4 authorisation** | ⚡ **ENTRY UNBLOCKED 2026-08-07, EXECUTION PENDING** — `B-1` discharged (Phases 0–3 committed, pushed, tagged); `B-2` discharged (4 `Active` Label Specifications via WBS 3.11); `E2` discharged. Sprint D1 is open, but **authorisation to begin WBS 4.1 has not been given** and awaits separate explicit instruction |
 | **Deployment** | ⚪ **N/A.** Nothing in Phase 3 deploys to the EC2 host. `G-PROD` was never opened and no host-side execution occurred |
 | **Recommended interstitial work** | **WBS 3.8c** — label-side registration receipt backfill (`LS-GAP-001`), ~1 session, mechanically identical to the proven 3.8b |
 
@@ -226,7 +226,7 @@ The 148 wrapped labels are 100% matured, visibly clean, and will look like ideal
 | `ADR-I011` realisation verified against every WBS item | ✅ Complete — clause by clause |
 | Unowned requirements identified | ✅ Five (`U1`–`U5`) |
 | Definition of Done assessed | ✅ 10 met, 2 conditional |
-| Phase 4 authorisation determined | ⛔ **WITHHELD** — `B-1`, `B-2` |
+| Phase 4 authorisation determined | ⚡ **ENTRY UNBLOCKED 2026-08-07** — `B-1`, `B-2` both discharged; WBS 4.1 execution awaits separate authorisation |
 | Phase 4 handoff produced | ✅ §6 |
 
 **Phase 3 is engineering-complete and governance-incomplete.** The gap between those two is four decisions and one commit.
@@ -236,5 +236,5 @@ The 148 wrapped labels are 100% matured, visibly clean, and will look like ideal
 | Role | Name | Date |
 |---|---|---|
 | Closeout | Claude Opus 5 | 2026-08-06 |
-| **Phase 3 closure sign-off** | **Rohith Suresh** | **_______________** |
-| **Phase 4 authorisation** | **Rohith Suresh** | **_____ WITHHELD _____** |
+| **Phase 3 closure sign-off** | **Rohith Suresh** | ✅ **2026-08-07** |
+| **Phase 4 authorisation** | **Rohith Suresh** | ⚡ **ENTRY UNBLOCKED 2026-08-07** — `E2` discharged and Sprint D1 open. **Execution authorisation for WBS 4.1 not yet given** — awaits separate explicit instruction |

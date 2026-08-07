@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Opus 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 | **Closes** | `LS-GAP-001` · `ADR-I011` LG1 and §9 ("registration receipt" as Specification metadata) |
 
 **WBS 3.1–3.10 semantics are unchanged, as instructed.** No Label Store module (`registry.py`, `value_store.py`, `standing.py`, `superseded.py`, `propagation.py`, `label_receipts.py`, `set_hygiene.py`, `register_conventions.py`, `migrate_h6_forward_labels.py`) was modified. No Feature Store module was modified. **`research/evidence_library/receipts.py` was NOT modified** — `label.register`, subject kind `label`, and action `register` all already existed from WBS 3.8a, so this milestone needed zero taxonomy growth (the first Label Store milestone since 3.7 to need none).
@@ -131,15 +131,15 @@ Strictly, the `feature_store.pre-*.db` line belongs to WBS 3.8b. It was fixed he
 
 ## 10. Reviewer Checklist (RC)
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.8c exactly, no scope creep into WBS 3.11
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — Bootstrap attestation is the honest classification; no fabricated `evaluation[]`
-- [ ] **RC4** — The disclosed out-of-milestone `.gitignore` fix (§6) is accepted
-- [ ] **RC5** — The two pre-existing test updates (§3 REG5), including one rename, are accepted
-- [ ] **RC6** — Real local `label_store.db`'s 8 bootstrap receipts independently spot-checked
-- [ ] **RC7** — Pre-migration backup confirmed present and readable
-- [ ] **RC8** — All 8 Specifications confirmed still at phase `Registered` (no activation)
-- [ ] **RC9** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.8c exactly, no scope creep into WBS 3.11
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — Bootstrap attestation is the honest classification; no fabricated `evaluation[]`
+- [x] **RC4** — The disclosed out-of-milestone `.gitignore` fix (§6) is accepted
+- [x] **RC5** — The two pre-existing test updates (§3 REG5), including one rename, are accepted
+- [x] **RC6** — Real local `label_store.db`'s 8 bootstrap receipts independently spot-checked
+- [x] **RC7** — Pre-migration backup confirmed present and readable
+- [x] **RC8** — All 8 Specifications confirmed still at phase `Registered` (no activation)
+- [x] **RC9** — Sign-off
 
 ## Files Changed
 

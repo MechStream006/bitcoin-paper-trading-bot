@@ -24,7 +24,7 @@ The engineering quality is high, and one result deserves to be called out: **`AD
 
 **Phase 3 is nevertheless not formally closeable today, and Phase 4 is not authorised.** Six conditions stand in the way. None is an engineering defect in delivered code; five are Rohith's own acts, and one is a scoping omission. Specifically:
 
-- **All ten milestone records are unsigned** — the precise failure roadmap §8.1 named and promised not to repeat.
+- ~~**All ten milestone records are unsigned**~~ — ✅ **RESOLVED 2026-08-07.** The true count was **thirteen** (this line predates WBS 3.8c and 3.11); all 13 are now signed under `LS-DEC-003`. The failure roadmap §8.1 named is closed.
 - **Everything from Phases 0–3 exists only as uncommitted working-tree state.** Roadmap gate `C-3`/`E11` was raised to *blocking for L4 onward*; L4–L7 executed anyway.
 - **`P3-9` is half-delivered.** `FS-GAP-004` is closed feature-side (17 receipts) and open label-side (0 of 8) — the mirror image of the ambiguity scope transfer `S-3` was written to prevent.
 - **Zero Label Specifications are `Active`**, which makes `ADR-I011` DI4 unsatisfiable and blocks Phase 4's own exit criterion.
@@ -126,7 +126,7 @@ Phase 3 set itself explicit process standards. Measured against them:
 | Standard | Source | Outcome |
 |---|---|---|
 | One verification record per milestone | §9 | ✅ **11/11** |
-| **Reviewer sign-off per milestone, not deferred** | §8.1 | ❌ **0/11.** Phase 2 accumulated five unsigned records and Phase 3 explicitly promised not to repeat it; it accumulated ten |
+| **Reviewer sign-off per milestone, not deferred** | §8.1 | ✅ **13/13 signed 2026-08-07** *(was 0/13; earlier drafts of this row said 0/11 and "ten" — both predate WBS 3.8c and 3.11)*. Deferred rather than per-milestone, which `P4-D5` carries forward as a Phase 4 obligation |
 | TV3 sabotage-and-revert every milestone | §9 | ✅ Present in all eleven, including one honestly reported as non-mechanism before the real one was found (3.3) |
 | Injected clock, AST-enforced | §9, `LR5` | ✅ Guard present; **no third timestamp flake was introduced** |
 | Adversarial storage-layer immutability | §9 | ✅ Direct-`sqlite3` tests, not application-path tests |
@@ -186,7 +186,7 @@ Roadmap §11's thirteen risks, re-rated post-delivery:
 |---|---|---|---|
 | **1** | Four phases of work exist on one machine with no version control | 🔴 **Critical** | `LS-DEC-006` — execute the commit plan |
 | **2** | Phase 4 begins, reaches its resolution stage, and discovers no Label Specification is citable | **High** | `LS-GAP-002` — scope a Phase 4 item 4.0 before 4.3 |
-| **3** | Ten unsigned records become permanent, repeating Phase 2's `FS-DEC-002` at twice the scale | **High** | `LS-DEC-003` |
+| **3** | ~~Ten unsigned records become permanent~~ — ✅ **RETIRED 2026-08-07.** All **13** signed under `LS-DEC-003` | ~~High~~ **Closed** | `LS-DEC-003` |
 | **4** | Phase 4 composes DI5's meet and finds every real ceiling capped at `UNKNOWN` | **Medium** | `LS-TD-011` — expected and honest, but should be a known input to Phase 4 planning, not a surprise |
 | **5** | Superseded-input flagging never fires because no real label carries a real revision reference | **Medium** | `LS-TD-004` |
 | **6** | Forward tier grows while off-host replication stays unwired | **Medium** | `LS-TD-013` |

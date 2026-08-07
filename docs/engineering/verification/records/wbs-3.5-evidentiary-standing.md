@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Sonnet 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 
 **This milestone owns evidentiary standing assignment, as instructed.** It respects WBS 3.4's bootstrap markers exactly as recorded: `migrate_h6_forward_labels.py` and its 148 already-declared rows are **untouched** — this milestone's only interaction with them is `backfill_bootstrap_standing()`, a new, separate, additive action performing the one-time `NULL -> Context` assignment their existing `declared_by` marker already entitled them to. No `declared_at`, `matured_at`, `outcome`, or `declared_by` value written by WBS 3.4 was read for any purpose beyond computing the standing that assignment already implies, and none was altered. **WBS 3.6 is explicitly not begun.**
 
@@ -129,18 +129,18 @@ sample row: subject_id=h6-trade-1, declared_at=2021-10-01T00:00:00+00:00,
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed — Rohith Suresh, 2026-08-07 (`LS-DEC-003`, Approval Package `A1`).*
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.5 exactly, no scope creep into 3.6
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" list matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed
-- [ ] **RC7** — Full diff read — confirm `registry.py`/`migrate_h6_forward_labels.py`/`register_conventions.py` show no diff; `value_store.py`'s diff is additive-only
-- [ ] **RC8** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.5 exactly, no scope creep into 3.6
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" list matches `git status` exactly
+- [x] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed
+- [x] **RC7** — Full diff read — confirm `registry.py`/`migrate_h6_forward_labels.py`/`register_conventions.py` show no diff; `value_store.py`'s diff is additive-only
+- [x] **RC8** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-07
 
 ---
 

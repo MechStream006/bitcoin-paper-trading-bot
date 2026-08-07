@@ -9,7 +9,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Opus 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 | **Baseline** | `phase-3-baseline-v1.0.0` = `aae322e77802cc76c7bb70688f87c433518281a3` |
 | **Closes** | `LS-GAP-002` (partially — 4 of 8; see §8) · `ADR-I011` §12.1, DI4 |
 
@@ -23,7 +23,7 @@
 
 `phase_3_label_store_roadmap.md` v1.1.0 **does not contain a WBS 3.11.** A repository-wide search returns zero matches for "3.11", and the roadmap's own changelog fixes its item set: *"WBS numbering 3.1–3.9 preserved; 3.8 split into 3.8a/3.8b as approved; 3.10 added for backup wiring."*
 
-WBS 3.11 is defined only in [`phase-4-readiness-resolution.md`](phase-4-readiness-resolution.md) §4, as proposal **`LS-DEC-008`**, whose status remains *"Awaiting ratification — Rohith."* The same is true of `LS-DEC-005` (behavioural equivalence replacing `P3-1`'s "shared-code-path test"), `LS-DEC-007` (WBS 3.8c) and `LS-DEC-009` (deferral of C3).
+WBS 3.11 is defined only in [`phase-4-readiness-resolution.md`](phase-4-readiness-resolution.md) §4, as proposal **`LS-DEC-008`**. ✅ **Ratified 2026-08-07** — WBS 3.11 is now formally Phase 3 work. `LS-DEC-005` (behavioural equivalence replacing `P3-1`'s "shared-code-path test"), `LS-DEC-007` (WBS 3.8c) and `LS-DEC-009` (deferral of C3) were ratified in the same review; see the [Phase 3 Closure Approval Package](phase-3-closure-approval-package.md). *At the time this milestone was executed all four were unratified, and it proceeded on owner authorisation alone — recorded here unchanged.*
 
 **This milestone proceeded on Rohith's explicit in-session authorisation of 2026-08-06**, which also directed that the authorisation basis be recorded here. The roadmap was **not** modified, no ADR was modified, and no claim of roadmap backing is made anywhere in this record or in the shipped code.
 
@@ -147,16 +147,16 @@ Label Specifications carry `binding_id` as **declared identity only** — `get_b
 
 ## 10. Reviewer Checklist (RC)
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.11 exactly, no scope creep into Phase 4
-- [ ] **RC2** — No file under `docs/architecture/` touched; roadmap unmodified
-- [ ] **RC3** — **The owner-authorised (not roadmap-ratified) basis in §0.1 is accepted**
-- [ ] **RC4** — The 4/4 activate/defer split and its stated reasons are accepted
-- [ ] **RC5** — Deferral of `57ce016e51a0` (C3) citing `A-4` is accepted
-- [ ] **RC6** — The pre-existing test update in §3 REG5 is accepted
-- [ ] **RC7** — Real `label_store.db`'s 4 `Active` Specifications independently spot-checked
-- [ ] **RC8** — Pre-activation backup confirmed present and readable
-- [ ] **RC9** — Confirmed no Specification is in `Rejected` phase
-- [ ] **RC10** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.11 exactly, no scope creep into Phase 4
+- [x] **RC2** — No file under `docs/architecture/` touched; roadmap unmodified
+- [x] **RC3** — **The owner-authorised (not roadmap-ratified) basis in §0.1 is accepted**
+- [x] **RC4** — The 4/4 activate/defer split and its stated reasons are accepted
+- [x] **RC5** — Deferral of `57ce016e51a0` (C3) citing `A-4` is accepted
+- [x] **RC6** — The pre-existing test update in §3 REG5 is accepted
+- [x] **RC7** — Real `label_store.db`'s 4 `Active` Specifications independently spot-checked
+- [x] **RC8** — Pre-activation backup confirmed present and readable
+- [x] **RC9** — Confirmed no Specification is in `Rejected` phase
+- [x] **RC10** — Sign-off
 
 ## Files Changed
 

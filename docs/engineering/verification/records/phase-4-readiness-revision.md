@@ -79,7 +79,7 @@ divergence (main…origin/main)   0   0
 | **`DS-DEC-003`** — corpus version (`FS-GAP-005`) | ⏳ Owed before 4.3. **Do-not-invent instruction stands** |
 | **`DS-DEC-004`** — authorise RF2 to modify three analysis scripts | ⏳ Owed before 4.6 |
 | **`DS-DEC-006`** — retro-binding the 70 historical ledger runs | ⏳ Out of Phase 4 scope (`ADR-I012` R9) |
-| **`E2`** — Phase 3 formal closure | ⏳ **The sole remaining blocker on builder sprints** |
+| **`E2`** — Phase 3 formal closure | ✅ **DISCHARGED 2026-08-07** — was the sole remaining blocker on builder sprints; Sprint D1 now open |
 
 ### 3.4 Superseded record — the pending state as originally written
 
@@ -107,7 +107,7 @@ At the time this revision was drafted, no approval existed and all four signatur
 | **E7** | `DS-DEC-001` + `DS-DEC-002` decided | ✅ **Discharged** | — | Ratified 2026-08-06 |
 | **E10** | `G-CORPUS` opened | ✅ **Discharged** | — | Opened under `C1`–`C6`, staged D0a → D0b |
 | **E8** | `DS-DEC-005` decided | ✅ **Discharged** | — | `dataset_builder.db` ratified |
-| **E2** | Phase 3 formally closed | ⏳ | **Sprint D1** | Sign 13 verification records; ratify `LS-DEC-003/004/005/007/008/009` |
+| **E2** | Phase 3 formally closed | ✅ **2026-08-07** | **Sprint D1 — OPEN** | 13 records signed; `LS-DEC-003/004/005/007/008/009` ratified |
 
 ### 4.3 Not blocking, tracked
 

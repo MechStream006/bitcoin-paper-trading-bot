@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Sonnet 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 
 **LS-DEC-001 applied, as approved.** Rohith's ruling (2026-08-06): the Label Store forward tier stays co-located with the registry and research tier in a single `label_store.db`, with the explicit instruction *"recovery requirements differ by table, not by database."* This milestone implements that literally: **one backup unit** (one `--label-store` flag, one `VACUUM INTO`, one manifest, one freshness check — mirroring `--ledger`'s exact shape), but the **restore drill's verification is deliberately table-scoped** — proving the forward tier's exact-content survival independently from the registry's independent regenerability, rather than treating "the file restored OK" as sufficient on its own. See the drill transcript, §4/§5.
 
@@ -101,18 +101,18 @@
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed — Rohith Suresh, 2026-08-07 (`LS-DEC-003`, Approval Package `A1`).*
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.10 exactly, no scope creep into 3.4
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" list matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed
-- [ ] **RC7** — Full diff read, including the restore-drill transcript
-- [ ] **RC8** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.10 exactly, no scope creep into 3.4
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" list matches `git status` exactly
+- [x] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed
+- [x] **RC7** — Full diff read, including the restore-drill transcript
+- [x] **RC8** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-07
 
 ---
 

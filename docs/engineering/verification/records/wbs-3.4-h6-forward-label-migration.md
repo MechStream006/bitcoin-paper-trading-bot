@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Sonnet 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 
 **Repository-side implementation only, as instructed.** `G-PROD` was not opened. No production rollout was performed. **Every row count in this record is real, freshly verified against `research/data/forward_evidence.db` — H6's own local, gitignored, dev-machine research database — never against, or claimed to represent, the production EC2 host's live collector.** This is the same category of local-machine, non-production data this session has already operated on legitimately at WBS 3.3 (`register_conventions.py --commit`) and WBS 3.10 (the restore drill) — distinct from the EC2 host `deploy/btcbot*.service` units run, which this milestone never touches. **WBS 3.5 is explicitly not begun.**
 
@@ -126,18 +126,18 @@ A sample row (`h6-trade-1`, 5-day horizon) shows `declared_at="2021-10-01T00:00:
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed — Rohith Suresh, 2026-08-07 (`LS-DEC-003`, Approval Package `A1`).*
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.4 exactly, no scope creep into 3.5
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" list matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed
-- [ ] **RC7** — Full diff read — confirm `registry.py`/`value_store.py`/`register_conventions.py` show no diff
-- [ ] **RC8** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.4 exactly, no scope creep into 3.5
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" list matches `git status` exactly
+- [x] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed
+- [x] **RC7** — Full diff read — confirm `registry.py`/`value_store.py`/`register_conventions.py` show no diff
+- [x] **RC8** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-07
 
 ---
 

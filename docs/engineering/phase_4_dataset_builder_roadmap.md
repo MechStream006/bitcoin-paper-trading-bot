@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | **Title** | Engineering Implementation Roadmap — Phase 4, Research Dataset Builder |
-| **Status** | **Draft — planning artifact. Sprint D0a AUTHORISED; builder sprints (D1+) gated on `E2` (§15)** |
+| **Status** | **Draft — planning artifact. WBS 4.0 COMPLETE (D0a+D0b). `E2` DISCHARGED 2026-08-07 — Sprint D1 OPEN; WBS 4.1 awaits owner authorisation** |
 | **Version** | **1.0.2** |
 | **Document Type** | Engineering Implementation Plan (not an ADR, not an architecture document) |
 | **Governing ADR** | [`ADR-I012`](../architecture/adr/ADR-I012-research-dataset-builder.md) Research Dataset Builder v0.1.0 (**Draft**) |
@@ -164,7 +164,7 @@ Sizes are t-shirt (S = one focused session, M = 2–4, L = 5+), calibrated again
 | Phase 1 — conformed corpus **data** | ❌ **Absent** | **Blocks 4.3, 4.7** → WBS 4.0 |
 | Phase 2 — Feature Store | ✅ 17 Active | Blocks 4.3 |
 | Phase 3 — Label Store | ✅ 4 Active | Blocks 4.3 |
-| Phase 3 formal closure | ⏳ 13 unsigned records; 5 unratified decisions | **Blocks D1** (`E2`) |
+| Phase 3 formal closure | ✅ **DISCHARGED 2026-08-07** — 13 records signed; all 6 decisions ratified | **D1 unblocked** (`E2`) |
 | WBS 3.11 committed | ✅ `ffaae2b`, tagged and pushed | No longer blocking *(v1.0.1)* |
 
 ### 6.2 Internal
@@ -196,7 +196,7 @@ Sizes are t-shirt (S = one focused session, M = 2–4, L = 5+), calibrated again
 | # | Criterion | State |
 |---|---|---|
 | **E1** | Phase 0/1/2/3 code complete | ✅ |
-| **E2** | **Phase 3 formally closed** — 13 records signed; `LS-DEC-003/004/005/007/008/009` ratified | ⏳ **Blocking D1** |
+| **E2** | **Phase 3 formally closed** — 13 records signed; `LS-DEC-003/004/005/007/008/009` ratified | ✅ **DISCHARGED 2026-08-07** — [Approval Package](verification/records/phase-3-closure-approval-package.md) |
 | **E3** | **WBS 3.11 committed and pushed** | ✅ **Discharged** *(v1.0.1)* — `ffaae2b`, tag `phase-3-baseline-v1.1.0`, on remote |
 | **E4** | `ADR-I012` audited against the repository | ✅ [Gap Matrix](verification/records/phase-4-gap-matrix.md) |
 | **E5** | `ADR-I012` requires no revision | ✅ Determined — none required |
@@ -206,7 +206,7 @@ Sizes are t-shirt (S = one focused session, M = 2–4, L = 5+), calibrated again
 | **E9** | Full-suite baselines established | ✅ 2289/19/0 and 1910/60/0 |
 | **E10** | `G-CORPUS` opened | ✅ **Discharged** *(v1.0.2)* — opened under `C1`–`C6`, staged D0a → D0b |
 
-🔄 **D0a is unblocked and may begin** *(v1.0.2)*: `E7` and `E10` are discharged. **D1 remains blocked on `E2`** — Phase 3's formal closure — which is the sole remaining entry blocker for the builder itself. *(v1.0.1: `E3` discharged.)*
+✅ **All entry criteria are discharged** *(2026-08-07)*. `E2` — Phase 3's formal closure, the last remaining blocker — was discharged on 2026-08-07 via the [Phase 3 Closure Approval Package](verification/records/phase-3-closure-approval-package.md): 13 records signed, `LS-DEC-003/004/005/007/008/009` ratified. **Sprint D1 is open**; WBS 4.1 begins on explicit owner authorisation. *(v1.0.2: `E7`, `E10` discharged; v1.0.1: `E3` discharged.)*
 
 ---
 
@@ -294,7 +294,7 @@ Governed by the [Engineering Verification Standard](verification/engineering_ver
 | **`DR5`** | **The citation index becomes load-bearing for three ADRs** (`ADR-I012` R7) | **Certain / Medium** | Accepted and deliberate. Land it early (D1) so downstream items exercise it continuously |
 | **`DR6`** | **Scope inflation** — `ADR-I012` has six object classes, five pipeline stages, six refusals, four validation tiers, three reproducibility levels | **High / Medium** | §4.3's exclusion table restated each revision; every WBS item maps to a numbered ADR clause |
 | **`DR7`** | **Training Dataset work produces no verifiable instance** | **Certain / Low** | Accepted (`A-3`). `P4-6` verifies the **refusal**, which is testable today |
-| **`DR8`** | **Phase 4 begins on an unclosed Phase 3** | 🔄 **Moderate / Low** *(v1.0.1, impact re-rated)* | `E3` is discharged — Phase 3's code is durable at `ffaae2b`, so the *loss* half of this risk is gone. `E2` still blocks: 13 unsigned records and 6 unratified decisions remain, which is twice Phase 2's failure and a governance exposure, not a durability one |
+| **`DR8`** | **Phase 4 begins on an unclosed Phase 3** | ✅ **RETIRED** *(2026-08-07)* | Both halves closed. `E3` made Phase 3's code durable at `ffaae2b`; `E2` was discharged on 2026-08-07 — all 13 records signed and all six decisions ratified in one review. Neither the durability nor the governance exposure remains |
 | **`DR9`** | **`FS-GAP-005` gets invented under delivery pressure** | **Moderate / Severe** | Phase 3 §4.3's binding do-not-invent instruction **stands**; `DS-DEC-003` is the only path to changing it |
 
 ---
@@ -375,11 +375,11 @@ One file per module under `tests/`, house style. Base-env importable where no pa
 | ~~`E10` — `G-CORPUS`~~ | ✅ **DISCHARGED** — opened 2026-08-06 | Conditions `C1`–`C6`; staged D0a → D0b |
 | ~~`E8` — `DS-DEC-005`~~ | ✅ **DISCHARGED** — ratified 2026-08-06 | `research/dataset_builder/dataset_builder.db` |
 | ~~`E3` — WBS 3.11 committed~~ | ✅ **DISCHARGED** | `ffaae2b`, tag `phase-3-baseline-v1.1.0`, pushed. **`B-1` fully closed** |
-| **`E2` — Phase 3 formal closure** | ⏳ **OPEN — the sole remaining blocker** | 13 verification records signed; `LS-DEC-003/004/005/007/008/009` ratified |
+| **`E2` — Phase 3 formal closure** | ✅ **DISCHARGED 2026-08-07** | 13 verification records signed; `LS-DEC-003/004/005/007/008/009` ratified |
 
-**What may begin now:** **D0a** — the dvol conformance pilot (64 partitions / 788 KB) under conditions `C1`–`C6`. It depends on no builder code and on nothing gated by `E2`.
+**What may begin now:** **Sprint D1** — WBS 4.1 (Dataset Registry) then 4.2 (citation index). `E2` is discharged and no entry criterion remains open. WBS 4.0 (D0a + D0b) is complete: all 274 partitions conformed.
 
-**What may not:** D1 onward (`registry.py`, citation index, and everything downstream), which `E2` blocks. D0b additionally requires D0a to pass.
+**What may not:** D2 onward (declaration, resolution, validation, sealing, materialisation) until D1 completes — the ordering constraints in §5 are unchanged by `E2`'s discharge. `G-CORPUS` remains bound by conditions `C1`–`C6`, and per-milestone sign-off (`P4-D5`) applies to every Phase 4 item.
 
 **Three findings must be read before implementation**, because each would produce wrong work if missed: **`A-2`** (0/274 partitions carry a certification verdict — Tier C cannot pass on real data), **`A-3`** (no Forward-evidence label exists — Training Datasets are structurally unbuildable), and **`A-4`** (the lockbox constant is triplicated — RF2's relocation is a real behavioural change to shipped research code).
 

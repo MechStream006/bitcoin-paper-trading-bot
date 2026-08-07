@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Sonnet 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 
 **WBS 3.4–3.7 semantics are unchanged, as instructed.** `migrate_h6_forward_labels.py`, `standing.py`, `superseded.py`, `propagation.py`, `conditioning.py`, `lattice.py`, `composition.py`, and both stores' `registry.py`/`value_store.py` are all untouched (`git diff --stat` confirms zero diff to every one). **`research/evidence_library/receipts.py` gains one small, purely additive extension** (three new frozenset/dict entries — `"label"` in `SUBJECT_KINDS`, `"register"`/`"adjudicate"` in `ACTIONS`, `"label.register"`/`"label.adjudicate"` in `DECISION_TAXONOMY`) — the same, already-precedented extension mechanism used at PR-7 to add `"evaluate"`. No existing receipt substrate function (`receipt_ledger.py`, `evidence_governance.py`, `transition_governance.py`, `contract_receipts.py`) was modified. **Reuses the existing governance receipt infrastructure, per instruction** — see §0 below.
 
@@ -107,18 +107,18 @@
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed — Rohith Suresh, 2026-08-07 (`LS-DEC-003`, Approval Package `A1`).*
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.8a exactly, no scope creep into 3.8b
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" list matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed
-- [ ] **RC7** — Full diff read — confirm `registry.py`, `value_store.py`, `standing.py`, `superseded.py`, `propagation.py`, `conditioning.py`, `lattice.py`, `composition.py`, `receipt_ledger.py`, `evidence_governance.py`, `transition_governance.py`, `contract_receipts.py` all show no diff, and that `receipts.py`'s diff is exactly the three additive blocks described in §0
-- [ ] **RC8** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.8a exactly, no scope creep into 3.8b
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" list matches `git status` exactly
+- [x] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed
+- [x] **RC7** — Full diff read — confirm `registry.py`, `value_store.py`, `standing.py`, `superseded.py`, `propagation.py`, `conditioning.py`, `lattice.py`, `composition.py`, `receipt_ledger.py`, `evidence_governance.py`, `transition_governance.py`, `contract_receipts.py` all show no diff, and that `receipts.py`'s diff is exactly the three additive blocks described in §0
+- [x] **RC8** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-07
 
 ---
 

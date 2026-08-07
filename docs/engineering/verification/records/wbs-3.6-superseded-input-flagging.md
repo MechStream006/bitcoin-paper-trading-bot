@@ -8,7 +8,7 @@
 | **Standard version referenced** | 1.0.0 |
 | **Date** | 2026-08-06 |
 | **Implementer** | Claude Sonnet 5 |
-| **Reviewer** | *(pending — Rohith)* |
+| **Reviewer** | Rohith Suresh — signed 2026-08-07 (`LS-DEC-003`) |
 
 **WBS 3.4 and WBS 3.5 migration semantics are unchanged, as instructed.** `migrate_h6_forward_labels.py`, `standing.py`, `registry.py`, and `register_conventions.py` are all untouched (`git status` confirms no diff to any of them). **`value_store.py` is also untouched this milestone** — unlike WBS 3.5, this milestone required zero schema changes, because `flag_forward_label()` and `adjudicate_forward_label()` already existed, fully built, at WBS 3.2. This milestone builds the **detection layer only**: `find_affected_labels()` decides which labels are affected; the already-existing, unmodified transition functions do the actual flagging/adjudicating. **WBS 3.7 is explicitly not begun.**
 
@@ -98,18 +98,18 @@
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed — Rohith Suresh, 2026-08-07 (`LS-DEC-003`, Approval Package `A1`).*
 
-- [ ] **RC1** — Milestone corresponds to WBS 3.6 exactly, no scope creep into 3.7
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" list matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed
-- [ ] **RC7** — Full diff read — confirm `value_store.py`, `registry.py`, `migrate_h6_forward_labels.py`, `standing.py`, `register_conventions.py` all show no diff
-- [ ] **RC8** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 3.6 exactly, no scope creep into 3.7
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" list matches `git status` exactly
+- [x] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed
+- [x] **RC7** — Full diff read — confirm `value_store.py`, `registry.py`, `migrate_h6_forward_labels.py`, `standing.py`, `register_conventions.py` all show no diff
+- [x] **RC8** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-07
 
 ---
 

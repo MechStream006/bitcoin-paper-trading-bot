@@ -193,8 +193,8 @@ Accompanied by a changelog entry: *"1.1.1 — resolves `LS-DEC-005`: `P3-1` rest
 | **B-1** Phases 0–3 committed | 🔴 Blocking, plan exists | 🔴 **Blocking, unchanged** | Rohith's act |
 | **B-2** ≥1 `Active` Label Specification | 🔴 Blocking, unowned, undefined | 🟡 **Scoped: WBS 3.11, equivalence pre-verified** | ~1 session |
 | `LS-GAP-001` Label registration receipts | ⚪ Recommended | 🟡 **Ruled in: WBS 3.8c** | ~1 session |
-| `LS-DEC-005` `P3-1` reading | ⚪ Open contradiction | ✅ **Determined; awaiting ratification** | One signature |
-| `LS-DEC-003` Reviewer sign-off ×11 | 🔴 Blocks Phase 3 closure | 🔴 **Unchanged** | Review time |
+| `LS-DEC-005` `P3-1` reading | ⚪ Open contradiction | ✅ **RATIFIED 2026-08-07** | One signature |
+| `LS-DEC-003` Reviewer sign-off ×13 | 🔴 Blocks Phase 3 closure | ✅ **RATIFIED 2026-08-07** | Review time |
 | `LS-DEC-004` `label_policy.yaml` strategy | ⚪ Open | ⚪ **Unchanged** — recommendation stands (ratify the structural approach) | One signature |
 
 **What changed materially:** B-2 was the only blocker carrying genuine unknown design risk. It no longer does. Every remaining item is either a signature, a commit, or a session of mechanically-precedented work with its exit criterion already written.
@@ -207,13 +207,13 @@ Accompanied by a changelog entry: *"1.1.1 — resolves `LS-DEC-005`: `P3-1` rest
 
 | ID | Decision | Ruling | Basis | Status |
 |---|---|---|---|---|
-| **`LS-DEC-003`** | Reviewer sign-off on eleven Phase 3 records | **Required before Phase 3 closure.** No engineering substitute exists | Roadmap §8.1 named this explicitly and promised not to repeat Phase 2's five unsigned records | ⏳ **Owed — Rohith** |
-| **`LS-DEC-004`** | `label_policy.yaml` rollback strategy | **Recommend ratifying the structural approach** and recording that §10's four config keys are superseded | Four milestones independently satisfied "non-blocking by default" structurally; §10 itself refuses a config switch for WBS 3.2 on the grounds that a switch disabling falsification protection will eventually be left off | ⏳ **Owed — Rohith** |
-| **`LS-DEC-005`** | `P3-1` "shared-code-path test" | ✅ **DETERMINED: behavioural equivalence.** `LR1` preserved unchanged. Exact roadmap text prepared (§6), not applied | Phase 2 precedent; `E-1`'s 148/148 verification; strictly stronger than the wording replaced | ⏳ **Awaiting ratification — Rohith** |
-| **`LS-DEC-006`** | Commit Phases 0–3 | **Required. First action.** Gates two irreversible-write milestones | `LR13` materialised; `E-2` makes WBS 3.11 unrecoverable on failure | ⏳ **Owed — Rohith** |
-| **`LS-DEC-007`** *(new)* | Formally add **WBS 3.8c** — label registration receipt backfill | ✅ **DETERMINED: add.** §9 makes the receipt a per-Specification property; mechanism ≠ realisation | `S-3`'s symmetry rationale; `E-4` (no taxonomy change); must precede 3.11 | ⏳ **Awaiting ratification — Rohith** |
-| **`LS-DEC-008`** *(new)* | Formally add **WBS 3.11** — activation via behavioural equivalence | ✅ **DETERMINED: add, as Phase 3 work.** Roadmap §14.1 assigns §12.1 to WBS 3.1, so this is an unfinished Phase 3 obligation, not a Phase 4 one | `E-1` pre-verifies the four Specifications Phase 4 needs; `E-2` mandates a dry-run-on-copy gate | ⏳ **Awaiting ratification — Rohith** |
-| **`LS-DEC-009`** *(new)* | Disposition of `57ce016e51a0` (convention C3) | **Defer by name**, citing `A-4`. Do **not** attempt activation from this machine | `E-3`: every table in `evidence_forward.db` is empty locally; C3 has no declared values, so no dataset can cite it | ⏳ **Awaiting ratification — Rohith** |
+| **`LS-DEC-003`** | Reviewer sign-off on **thirteen** Phase 3 records | **Required before Phase 3 closure.** No engineering substitute exists | Roadmap §8.1 named this explicitly and promised not to repeat Phase 2's five unsigned records | ✅ **RATIFIED 2026-08-07** |
+| **`LS-DEC-004`** | `label_policy.yaml` rollback strategy | **Recommend ratifying the structural approach** and recording that §10's four config keys are superseded | Four milestones independently satisfied "non-blocking by default" structurally; §10 itself refuses a config switch for WBS 3.2 on the grounds that a switch disabling falsification protection will eventually be left off | ✅ **RATIFIED 2026-08-07** |
+| **`LS-DEC-005`** | `P3-1` "shared-code-path test" | ✅ **DETERMINED: behavioural equivalence.** `LR1` preserved unchanged. Exact roadmap text prepared (§6), not applied | Phase 2 precedent; `E-1`'s 148/148 verification; strictly stronger than the wording replaced | ✅ **RATIFIED 2026-08-07** |
+| **`LS-DEC-006`** | Commit Phases 0–3 | **Required. First action.** Gates two irreversible-write milestones | `LR13` materialised; `E-2` makes WBS 3.11 unrecoverable on failure | ✅ **RESOLVED 2026-08-06** — discharged by action (committed, pushed, tagged `phase-3-baseline-v1.1.0`), not by ratification. Not part of `E2` |
+| **`LS-DEC-007`** *(new)* | Formally add **WBS 3.8c** — label registration receipt backfill | ✅ **DETERMINED: add.** §9 makes the receipt a per-Specification property; mechanism ≠ realisation | `S-3`'s symmetry rationale; `E-4` (no taxonomy change); must precede 3.11 | ✅ **RATIFIED 2026-08-07** |
+| **`LS-DEC-008`** *(new)* | Formally add **WBS 3.11** — activation via behavioural equivalence | ✅ **DETERMINED: add, as Phase 3 work.** Roadmap §14.1 assigns §12.1 to WBS 3.1, so this is an unfinished Phase 3 obligation, not a Phase 4 one | `E-1` pre-verifies the four Specifications Phase 4 needs; `E-2` mandates a dry-run-on-copy gate | ✅ **RATIFIED 2026-08-07** |
+| **`LS-DEC-009`** *(new)* | Disposition of `57ce016e51a0` (convention C3) | **Defer by name**, citing `A-4`. Do **not** attempt activation from this machine | `E-3`: every table in `evidence_forward.db` is empty locally; C3 has no declared values, so no dataset can cite it | ✅ **RATIFIED 2026-08-07** |
 
 **Superseded from the Phase 3 Closeout:** `LS-GAP-002` is no longer "unowned" — `LS-DEC-008` assigns it to WBS 3.11. `LS-GAP-001` is no longer "unowned" — `LS-DEC-007` assigns it to WBS 3.8c. The Gap Matrix's Unowned bucket reduces from five items (`U1`–`U5`) to three (`U3`, `U4`, `U5` — the documentation deliverables).
 
@@ -229,7 +229,7 @@ Ordered by dependency. Every item's exit criterion is already written; none requ
 | **2** | **Ratify `LS-DEC-005`, `007`, `008`, `009`**; apply the §6 roadmap amendment | Signature | Rohith | 3, 4 | Adds WBS 3.8c and 3.11 to the roadmap; roadmap goes to v1.1.1 |
 | **3** | **WBS 3.8c** — label registration receipt backfill | Engineering | — | 4 | ~1 session. Gate `init_db()` behind `--commit` (3.8b's own lesson). Exit: 0 `LREC1` errors |
 | **4** | **WBS 3.11** — activation via behavioural equivalence | Engineering | — | Phase 4 `E5` | ~1 session. **Dry run against a disposable copy first — failure is irreversible (`E-2`)**. Exit: ≥4 `Active` |
-| **5** | **Reviewer sign-off on all eleven Phase 3 records** (`LS-DEC-003`) | Signature | Rohith | Phase 3 closure | Plus the two new records from actions 3–4 |
+| **5** | **Reviewer sign-off on all thirteen Phase 3 records** (`LS-DEC-003`) — ✅ **done 2026-08-07** | Signature | Rohith | Phase 3 closure | Thirteen including the two new records from actions 3–4 (WBS 3.8c, 3.11) |
 | **6** | **Ratify `LS-DEC-004`**; schedule or waive the three missing §13 deliverables (`LS-GAP-006`) | Signature | Rohith | Phase 3 closure | `label_migration_register.md`, the maturity contract's Tier D extension, `label_policy.yaml` |
 | **7** | **Declare Phase 3 closed**; sign the Closure Review and Closeout | Signature | Rohith | Phase 4 | |
 | **8** | **Audit `ADR-I012` against the delivered Label Store** before writing a Phase 4 roadmap | Engineering | — | Phase 4 quality | Recommended, not blocking. Phase 3's own roadmap §1 did this for `ADR-I011` and found three material divergences (`A-1`, `A-2`, `A-3`) that would otherwise have produced wrong work |
