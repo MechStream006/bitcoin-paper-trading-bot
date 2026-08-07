@@ -10,6 +10,7 @@ Backs up five databases:
   3. research/data/evidence_forward.db       (H5/G1/G3/ivrv collector; --fwd-hg)
   4. research/evidence_library/ledger.db     (governance ledger; --ledger)
   5. research/label_store/label_store.db     (Label Store; --label-store)
+  6. research/dataset_builder/dataset_builder.db (Dataset Registry; --dataset-builder)
 
 Label Store note (Phase 3 WBS 3.10, LS-DEC-001): the registry, research
 tier, and forward tier are co-located in one file by design (LS-DEC-001,
@@ -388,9 +389,14 @@ def main() -> int:
              "research + forward tiers, co-located per LS-DEC-001)",
     )
     parser.add_argument(
+        "--dataset-builder", dest="dataset_builder", action="store_true",
+        help="Back up research/dataset_builder/dataset_builder.db (Dataset "
+             "Registry, Phase 4 WBS 4.1, DS-DEC-005)",
+    )
+    parser.add_argument(
         "--all", dest="backup_all", action="store_true",
-        help="Back up all five databases (btc_trading, forward_evidence, "
-             "evidence_forward, ledger, label_store)",
+        help="Back up all six databases (btc_trading, forward_evidence, "
+             "evidence_forward, ledger, label_store, dataset_builder)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -408,6 +414,7 @@ def main() -> int:
     rc_fwd_hg      = 0
     rc_ledger      = 0
     rc_label_store = 0
+    rc_dataset_builder = 0
     rc_trading     = 0
 
     if args.evidence or args.backup_all:
@@ -451,12 +458,25 @@ def main() -> int:
         if args.label_store and not args.backup_all:
             return rc_label_store
 
-    if args.backup_all or not (args.evidence or args.fwd_hg or args.ledger or args.label_store):
+    if args.dataset_builder or args.backup_all:
+        rc_dataset_builder = run_backup(
+            ROOT / "research" / "dataset_builder" / "dataset_builder.db",
+            ROOT / "data" / "dataset-builder-backups",
+            args.dry_run,
+            db_label="dataset_builder",
+            encrypt=args.encrypt,
+        )
+        if args.dataset_builder and not args.backup_all:
+            return rc_dataset_builder
+
+    if args.backup_all or not (args.evidence or args.fwd_hg or args.ledger
+                               or args.label_store or args.dataset_builder):
         rc_trading = run_backup(args.db_path, args.backup_dir, args.dry_run,
                                 db_label="btc_trading", encrypt=args.encrypt)
 
     if args.backup_all:
-        return max(rc_trading, rc_evidence, rc_fwd_hg, rc_ledger, rc_label_store)
+        return max(rc_trading, rc_evidence, rc_fwd_hg, rc_ledger,
+                   rc_label_store, rc_dataset_builder)
     return rc_trading
 
 

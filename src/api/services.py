@@ -126,6 +126,10 @@ def runtime_health(settings) -> dict:
             settings.label_store_backup_dir, label="label_store",
             check_name="label_store_backup", required=False,
         ),
+        hc.check_backup_freshness(
+            settings.dataset_builder_backup_dir, label="dataset_builder",
+            check_name="dataset_builder_backup", required=False,
+        ),
         hc.check_offhost_freshness(settings.backup_dir, check_name="offhost_backup"),
         hc.check_offhost_freshness(
             settings.ledger_backup_dir, check_name="ledger_offhost_backup"

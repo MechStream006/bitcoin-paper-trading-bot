@@ -565,6 +565,12 @@ def main() -> int:
         help="Directory holding label_store_*.db backups (scripts/backup.py --label-store)",
     )
     parser.add_argument(
+        "--dataset-builder-backup-dir", type=Path,
+        default=ROOT / "data" / "dataset-builder-backups",
+        help="Directory holding dataset_builder_*.db backups "
+             "(scripts/backup.py --dataset-builder)",
+    )
+    parser.add_argument(
         "--forward-db-path", type=Path,
         default=ROOT / "research" / "data" / "evidence_forward.db",
         help="Path to evidence_forward.db for the D3a forward-cycle dead-man",
@@ -592,6 +598,10 @@ def main() -> int:
         check_backup_freshness(
             args.label_store_backup_dir, label="label_store",
             check_name="label_store_backup", required=False,
+        ),
+        check_backup_freshness(
+            args.dataset_builder_backup_dir, label="dataset_builder",
+            check_name="dataset_builder_backup", required=False,
         ),
         check_offhost_freshness(backup_dir, check_name="offhost_backup"),
         check_offhost_freshness(

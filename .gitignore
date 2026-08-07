@@ -51,6 +51,12 @@ research/label_store/label_store.db-wal
 research/label_store/label_store.db-shm
 research/label_store/label_store.pre-*.db
 
+# Dataset Builder registry DB — data, not code (Phase 4 WBS 4.1, DS-DEC-005)
+research/dataset_builder/dataset_builder.db
+research/dataset_builder/dataset_builder.db-wal
+research/dataset_builder/dataset_builder.db-shm
+research/dataset_builder/dataset_builder.pre-*.db
+
 # Build/run launchers and logs at repo root
 run_*.bat
 corpus_build*.log

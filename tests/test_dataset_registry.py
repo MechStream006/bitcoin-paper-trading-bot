@@ -1,0 +1,834 @@
+"""WBS 4.1 — Dataset Registry (ADR-I012 §6, §7, §10, §11, §12 Tier A).
+
+Verification standard: §3 BV (import boundary), §4 TV (positive, negative,
+TV3 sabotage, TV5 content-address stability), §5 REG, §8 BC, §9 RBV.
+
+The roadmap's acceptance criteria for 4.1, each covered below:
+  - registry accepts a hand-written declaration           -> TestDeclare
+  - Tier A refuses on each mandatory field, ONE NEGATIVE
+    TEST PER FIELD                                        -> TestTierAPerField
+  - a sealed record cannot be edited, proven by a direct
+    sqlite3 attempt                                       -> TestSealedImmutability
+  - no default --db                                       -> TestNoDefaultDb
+  - a schema assertion refuses a non-dataset database
+    before any write (LR4)                                -> TestLR4SchemaAssertion
+"""
+
+from __future__ import annotations
+
+import ast
+import copy
+import json
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "research") not in sys.path:
+    sys.path.insert(0, str(ROOT / "research"))
+
+from dataset_builder import registry as reg  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+def valid_declaration() -> dict:
+    """A complete, hand-written declaration carrying every §7.2 field."""
+    return {
+        "intent": {
+            "research_question": "Does the IV-RV spread time spot direction?",
+            "declaring_actor": "rohith",
+            "rationale": "H-IVRV is a feature candidate; this is its substrate.",
+        },
+        "temporal_scope": {
+            "window_start": "2021-01-01",
+            "window_end": "2025-05-31",
+            "as_of": "2026-08-07",
+            "timezone": "UTC",
+            "calendar_convention": "exchange_daily_1200Z",
+        },
+        "conditioning": {
+            "statement": "P(observed | near-ATM and near-dated at sample time)",
+        },
+        "evidence_references": {
+            "sources": ["dvol", "spot", "funding", "perp"],
+            "partition_revision_sets": {"dvol": "rev2", "spot": "rev2"},
+            "required_certification_verdict": "GREEN",
+            "required_lane": "offline-corpus",
+        },
+        "feature_references": ["f" * 64, "e" * 64],
+        "label_references": [
+            {"spec_hash": "a" * 64, "maturity_requirement": "matured"},
+            {"spec_hash": "b" * 64, "maturity_requirement": "matured"},
+        ],
+        "sealed_region_exclusions": [
+            {"start": "2025-06-01", "end": "2026-05-31", "reason": "lockbox"},
+        ],
+        "admissibility_floor": "offline-corpus",
+        "lane": "offline-corpus",
+    }
+
+
+@pytest.fixture()
+def db(tmp_path: Path) -> Path:
+    p = tmp_path / "dataset_builder.db"
+    reg.init_db(p)
+    return p
+
+
+def _declare(db: Path, decl: dict | None = None, **kw):
+    kw.setdefault("lineage", "ivrv-substrate")
+    kw.setdefault("declared_by", "rohith")
+    return reg.declare_dataset(db, decl if decl is not None else valid_declaration(), **kw)
+
+
+def _seal(db: Path, h: str) -> None:
+    reg.mark_resolved(db, h)
+    reg.mark_validated(db, h)
+    reg.seal(db, h)
+
+
+# ---------------------------------------------------------------------------
+# §3 BV — build / import boundary
+# ---------------------------------------------------------------------------
+
+class TestImportBoundary:
+    def test_module_imports(self):
+        assert reg.PHASES
+
+    def test_no_src_import_anywhere(self):
+        """P4-8 / DG9: the builder reads no operational data. Proven
+        structurally by parsing the AST, not by grepping a docstring."""
+        src = (ROOT / "research" / "dataset_builder" / "registry.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                offenders += [a.name for a in node.names if a.name.split(".")[0] == "src"]
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and node.module.split(".")[0] == "src":
+                    offenders.append(node.module)
+        assert offenders == [], f"operational imports found: {offenders}"
+
+    def test_seven_phases_exactly(self):
+        assert reg.PHASES == {
+            "Declared", "Resolved", "Validated", "Sealed",
+            "Superseded", "Retired", "Rejected",
+        }
+
+    def test_allowed_arcs_match_adr_diagram(self):
+        assert reg.ALLOWED_TRANSITIONS == {
+            ("Declared", "Resolved"), ("Declared", "Rejected"),
+            ("Resolved", "Validated"), ("Resolved", "Rejected"),
+            ("Validated", "Sealed"), ("Validated", "Rejected"),
+            ("Sealed", "Superseded"), ("Sealed", "Retired"),
+        }
+
+    def test_no_arc_leaves_a_terminal_phase(self):
+        for frm, _to in reg.ALLOWED_TRANSITIONS:
+            assert frm not in reg.TERMINAL_PHASES, f"{frm} is terminal but has an outgoing arc"
+
+
+# ---------------------------------------------------------------------------
+# Positive path
+# ---------------------------------------------------------------------------
+
+class TestDeclare:
+    def test_accepts_a_hand_written_declaration(self, db):
+        h = _declare(db)
+        assert h.phase == "Declared"
+        assert len(h.spec_hash) == 64
+        assert h.version_ordinal == 1
+
+    def test_specification_is_retrievable_by_hash_alone(self, db):
+        h = _declare(db)
+        spec = reg.get_specification(db, h.spec_hash)
+        assert spec["phase"] == "Declared"
+        assert spec["declaration"] == valid_declaration()
+
+    def test_unknown_hash_returns_none(self, db):
+        assert reg.get_specification(db, "0" * 64) is None
+
+    def test_version_ordinal_increments_within_lineage(self, db):
+        a = _declare(db)
+        d2 = valid_declaration()
+        d2["temporal_scope"]["window_end"] = "2025-06-30"
+        b = _declare(db, d2)
+        assert (a.version_ordinal, b.version_ordinal) == (1, 2)
+
+    def test_separate_lineages_number_independently(self, db):
+        _declare(db, lineage="line-a")
+        d2 = valid_declaration()
+        d2["intent"]["research_question"] = "different"
+        h = _declare(db, d2, lineage="line-b")
+        assert h.version_ordinal == 1
+
+    def test_lineage_listing_is_version_ordered(self, db):
+        _declare(db)
+        d2 = valid_declaration()
+        d2["temporal_scope"]["window_end"] = "2025-06-30"
+        _declare(db, d2)
+        rows = reg.get_lineage(db, "ivrv-substrate")
+        assert [r["version_ordinal"] for r in rows] == [1, 2]
+
+    def test_lineage_required(self, db):
+        with pytest.raises(reg.DatasetRegistryError, match="lineage"):
+            reg.declare_dataset(db, valid_declaration(), lineage="", declared_by="rohith")
+
+    def test_declared_by_required(self, db):
+        with pytest.raises(reg.DatasetRegistryError, match="declared_by"):
+            reg.declare_dataset(db, valid_declaration(), lineage="l", declared_by="")
+
+
+# ---------------------------------------------------------------------------
+# TV5 — content-address stability
+# ---------------------------------------------------------------------------
+
+class TestContentAddressing:
+    def test_hash_is_deterministic(self):
+        assert reg.declaration_hash(valid_declaration()) == reg.declaration_hash(valid_declaration())
+
+    def test_hash_is_key_order_independent(self):
+        d = valid_declaration()
+        reordered = {k: d[k] for k in reversed(list(d))}
+        assert reg.declaration_hash(d) == reg.declaration_hash(reordered)
+
+    def test_any_declared_field_change_changes_the_hash(self):
+        base = reg.declaration_hash(valid_declaration())
+        d = valid_declaration()
+        d["temporal_scope"]["window_end"] = "2025-06-01"
+        assert reg.declaration_hash(d) != base
+
+    def test_redeclaring_identical_content_is_idempotent(self, db):
+        a = _declare(db)
+        b = _declare(db)
+        assert a.spec_hash == b.spec_hash
+        con = sqlite3.connect(db)
+        try:
+            n = con.execute("SELECT COUNT(*) FROM dataset_specifications").fetchone()[0]
+        finally:
+            con.close()
+        assert n == 1
+
+    def test_hash_survives_lifecycle_transitions(self, db):
+        h = _declare(db)
+        before = h.spec_hash
+        _seal(db, before)
+        spec = reg.get_specification(db, before)
+        assert spec["spec_hash"] == before
+        assert reg.declaration_hash(spec["declaration"]) == before
+
+
+# ---------------------------------------------------------------------------
+# Tier A — ONE NEGATIVE TEST PER MANDATORY FIELD (roadmap acceptance)
+# ---------------------------------------------------------------------------
+
+TOP_LEVEL_FIELDS = list(reg.MANDATORY_FIELDS)
+
+NESTED_FIELDS = [
+    ("intent", "research_question"),
+    ("intent", "declaring_actor"),
+    ("intent", "rationale"),
+    ("temporal_scope", "window_start"),
+    ("temporal_scope", "window_end"),
+    ("temporal_scope", "as_of"),
+    ("temporal_scope", "timezone"),
+    ("temporal_scope", "calendar_convention"),
+    ("conditioning", "statement"),
+    ("evidence_references", "sources"),
+    ("evidence_references", "partition_revision_sets"),
+    ("evidence_references", "required_certification_verdict"),
+    ("evidence_references", "required_lane"),
+]
+
+
+class TestTierAPerField:
+    @pytest.mark.parametrize("field", TOP_LEVEL_FIELDS)
+    def test_missing_top_level_field_is_refused_by_name(self, field):
+        d = valid_declaration()
+        del d[field]
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False
+        assert any(e.startswith(f"{field}:") for e in errors), errors
+
+    @pytest.mark.parametrize("field", TOP_LEVEL_FIELDS)
+    def test_empty_top_level_field_is_refused_by_name(self, field):
+        d = valid_declaration()
+        d[field] = "" if isinstance(d[field], str) else type(d[field])()
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False
+        assert any(e.startswith(f"{field}:") for e in errors), errors
+
+    @pytest.mark.parametrize("parent,sub", NESTED_FIELDS)
+    def test_missing_nested_field_is_refused_by_name(self, parent, sub):
+        d = valid_declaration()
+        del d[parent][sub]
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False
+        assert any(e.startswith(f"{parent}.{sub}:") for e in errors), errors
+
+    @pytest.mark.parametrize("parent,sub", NESTED_FIELDS)
+    def test_empty_nested_field_is_refused_by_name(self, parent, sub):
+        d = valid_declaration()
+        d[parent][sub] = ""
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False
+        assert any(e.startswith(f"{parent}.{sub}:") for e in errors), errors
+
+    @pytest.mark.parametrize("key", reg.MANDATORY_LABEL_REF_KEYS)
+    def test_label_reference_missing_key_is_refused_by_name(self, key):
+        d = valid_declaration()
+        del d["label_references"][0][key]
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False
+        assert any(f"label_references[0].{key}" in e for e in errors), errors
+
+    def test_valid_declaration_passes(self):
+        ok, errors = reg.validate_tier_a(valid_declaration())
+        assert ok is True and errors == []
+
+
+class TestTierAStructuralRules:
+    def test_inverted_window_refused(self):
+        d = valid_declaration()
+        d["temporal_scope"]["window_start"] = "2026-01-01"
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False and any("window is empty or inverted" in e for e in errors)
+
+    def test_zero_length_window_refused(self):
+        d = valid_declaration()
+        d["temporal_scope"]["window_start"] = d["temporal_scope"]["window_end"]
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False and any("window is empty or inverted" in e for e in errors)
+
+    def test_as_of_before_window_end_refused(self):
+        d = valid_declaration()
+        d["temporal_scope"]["as_of"] = "2024-01-01"
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False and any("precedes window_end" in e for e in errors)
+
+    def test_duplicate_feature_reference_refused(self):
+        d = valid_declaration()
+        d["feature_references"] = ["f" * 64, "f" * 64]
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False and any("duplicate" in e for e in errors)
+
+    def test_duplicate_label_spec_hash_refused(self):
+        d = valid_declaration()
+        d["label_references"][1]["spec_hash"] = d["label_references"][0]["spec_hash"]
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False and any("duplicate spec_hash" in e for e in errors)
+
+    def test_non_mapping_declaration_refused(self):
+        ok, errors = reg.validate_tier_a(["not", "a", "mapping"])
+        assert ok is False and "mapping" in errors[0]
+
+    def test_wrong_type_for_list_field_refused(self):
+        d = valid_declaration()
+        d["feature_references"] = {"not": "a list"}
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False and any("must be a list" in e for e in errors)
+
+    def test_errors_accumulate(self):
+        d = valid_declaration()
+        del d["lane"]
+        del d["conditioning"]
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is False and len(errors) >= 2
+
+    def test_falsy_but_legitimate_values_are_not_blank(self):
+        d = valid_declaration()
+        d["admissibility_floor"] = 0
+        ok, errors = reg.validate_tier_a(d)
+        assert ok is True, errors
+
+
+class TestRejectionIsPermanent:
+    def test_rejected_declaration_is_persisted_before_raising(self, db):
+        d = valid_declaration()
+        del d["lane"]
+        h = reg.declaration_hash(d)
+        with pytest.raises(reg.SpecificationRejected):
+            _declare(db, d)
+        spec = reg.get_specification(db, h)
+        assert spec is not None and spec["phase"] == "Rejected"
+        assert "lane" in spec["rejection_reason"]
+
+    def test_rejection_names_every_failure(self, db):
+        d = valid_declaration()
+        del d["lane"]
+        del d["conditioning"]
+        with pytest.raises(reg.SpecificationRejected) as exc:
+            _declare(db, d)
+        assert len(exc.value.errors) >= 2
+
+    def test_redeclaring_a_rejected_declaration_still_raises(self, db):
+        d = valid_declaration()
+        del d["lane"]
+        with pytest.raises(reg.SpecificationRejected):
+            _declare(db, d)
+        with pytest.raises(reg.SpecificationRejected):
+            _declare(db, d)
+
+    def test_no_arc_out_of_rejected(self, db):
+        d = valid_declaration()
+        del d["lane"]
+        h = reg.declaration_hash(d)
+        with pytest.raises(reg.SpecificationRejected):
+            _declare(db, d)
+        for target in ("Declared", "Resolved", "Validated", "Sealed"):
+            with pytest.raises(reg.TransitionError):
+                reg._transition(db, h, "Rejected", target)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+class TestLifecycle:
+    def test_full_happy_path(self, db):
+        h = _declare(db).spec_hash
+        reg.mark_resolved(db, h)
+        assert reg.get_specification(db, h)["phase"] == "Resolved"
+        reg.mark_validated(db, h)
+        assert reg.get_specification(db, h)["phase"] == "Validated"
+        reg.seal(db, h)
+        assert reg.get_specification(db, h)["phase"] == "Sealed"
+
+    def test_not_citable_before_seal(self, db):
+        h = _declare(db).spec_hash
+        assert reg.is_citable(db, h) is False
+        reg.mark_resolved(db, h)
+        assert reg.is_citable(db, h) is False
+        reg.mark_validated(db, h)
+        assert reg.is_citable(db, h) is False
+
+    def test_citable_once_sealed(self, db):
+        h = _declare(db).spec_hash
+        _seal(db, h)
+        assert reg.is_citable(db, h) is True
+
+    def test_cannot_skip_a_phase(self, db):
+        """Two independent guards refuse a skip, and it matters which fires.
+
+        `mark_validated` on a Declared row asks for Resolved -> Validated,
+        which IS an arc §11 draws -- so the arc table permits it and the
+        ROW-PHASE guard is what refuses, because the row is not in Resolved.
+        A skip is caught by state, not by the arc table.
+        """
+        h = _declare(db).spec_hash
+        with pytest.raises(reg.TransitionError, match="was not in phase 'Resolved'"):
+            reg.mark_validated(db, h)
+        with pytest.raises(reg.TransitionError, match="was not in phase 'Validated'"):
+            reg.seal(db, h)
+
+    def test_arc_table_refuses_a_pair_the_adr_does_not_draw(self, db):
+        """The other guard, in isolation: Declared -> Sealed is not an arc at
+        all, so it is refused before any row is even consulted."""
+        h = _declare(db).spec_hash
+        with pytest.raises(reg.TransitionError, match="not an arc"):
+            reg._transition(db, h, "Declared", "Sealed")
+
+    def test_both_guards_are_independently_load_bearing(self, db):
+        """A skip that is ALSO a non-arc is refused by the arc table first."""
+        h = _declare(db).spec_hash
+        with pytest.raises(reg.TransitionError, match="not an arc"):
+            reg._transition(db, h, "Declared", "Superseded")
+
+    def test_transition_from_wrong_phase_refuses(self, db):
+        h = _declare(db).spec_hash
+        reg.mark_resolved(db, h)
+        with pytest.raises(reg.TransitionError, match="was not in phase"):
+            reg.mark_resolved(db, h)
+
+    def test_transition_on_unknown_hash_refuses(self, db):
+        with pytest.raises(reg.TransitionError, match="was not in phase"):
+            reg.mark_resolved(db, "0" * 64)
+
+    def test_reject_requires_a_reason(self, db):
+        h = _declare(db).spec_hash
+        with pytest.raises(reg.DatasetRegistryError, match="reason"):
+            reg.reject(db, h, "Declared", "")
+
+    def test_reject_from_each_legal_phase(self, db):
+        for i, phase in enumerate(("Declared", "Resolved", "Validated")):
+            d = valid_declaration()
+            d["intent"]["rationale"] = f"variant {i}"
+            h = _declare(db, d).spec_hash
+            if phase in ("Resolved", "Validated"):
+                reg.mark_resolved(db, h)
+            if phase == "Validated":
+                reg.mark_validated(db, h)
+            reg.reject(db, h, phase, "hard validation failure")
+            assert reg.get_specification(db, h)["phase"] == "Rejected"
+
+
+class TestSupersession:
+    def _two_sealed(self, db):
+        a = _declare(db).spec_hash
+        d2 = valid_declaration()
+        d2["temporal_scope"]["window_end"] = "2025-06-30"
+        b = _declare(db, d2).spec_hash
+        _seal(db, a)
+        _seal(db, b)
+        return a, b
+
+    def test_supersede_records_successor_and_class(self, db):
+        a, b = self._two_sealed(db)
+        reg.supersede(db, a, successor_hash=b, change_class="extension")
+        spec = reg.get_specification(db, a)
+        assert spec["phase"] == "Superseded"
+        assert spec["superseded_by"] == b
+        assert spec["change_class"] == "extension"
+
+    def test_superseded_remains_resolvable_and_citable(self, db):
+        """§10.2 — supersession never invalidates."""
+        a, b = self._two_sealed(db)
+        reg.supersede(db, a, successor_hash=b, change_class="refinement")
+        assert reg.get_specification(db, a) is not None
+        assert reg.is_citable(db, a) is True
+
+    def test_redefinition_refused_as_supersession(self, db):
+        a, b = self._two_sealed(db)
+        with pytest.raises(reg.DatasetRegistryError, match="new lineage"):
+            reg.supersede(db, a, successor_hash=b, change_class="redefinition")
+
+    def test_unknown_change_class_refused(self, db):
+        a, b = self._two_sealed(db)
+        with pytest.raises(reg.DatasetRegistryError, match="change_class"):
+            reg.supersede(db, a, successor_hash=b, change_class="tweak")
+
+    def test_successor_must_exist(self, db):
+        a, _ = self._two_sealed(db)
+        with pytest.raises(reg.UnknownSpecificationError):
+            reg.supersede(db, a, successor_hash="0" * 64, change_class="extension")
+
+    def test_successor_must_be_sealed(self, db):
+        a = _declare(db).spec_hash
+        _seal(db, a)
+        d2 = valid_declaration()
+        d2["temporal_scope"]["window_end"] = "2025-07-31"
+        b = _declare(db, d2).spec_hash
+        with pytest.raises(reg.TransitionError, match="requires a successor to be Sealed"):
+            reg.supersede(db, a, successor_hash=b, change_class="extension")
+
+    def test_cannot_supersede_itself(self, db):
+        a = _declare(db).spec_hash
+        _seal(db, a)
+        with pytest.raises(reg.DatasetRegistryError, match="cannot supersede itself"):
+            reg.supersede(db, a, successor_hash=a, change_class="extension")
+
+
+class TestRetire:
+    def test_retire_from_sealed(self, db):
+        h = _declare(db).spec_hash
+        _seal(db, h)
+        reg.retire(db, h)
+        assert reg.get_specification(db, h)["phase"] == "Retired"
+
+    def test_retired_is_not_citable(self, db):
+        h = _declare(db).spec_hash
+        _seal(db, h)
+        reg.retire(db, h)
+        assert reg.is_citable(db, h) is False
+
+    def test_cannot_retire_before_seal(self, db):
+        """Sealed -> Retired is a legal arc, so the row-phase guard is what
+        refuses here: the row is still Declared."""
+        h = _declare(db).spec_hash
+        with pytest.raises(reg.TransitionError, match="was not in phase 'Sealed'"):
+            reg.retire(db, h)
+        assert reg.get_specification(db, h)["phase"] == "Declared"
+
+
+# ---------------------------------------------------------------------------
+# Storage-layer immutability — the roadmap's P4-D1 acceptance
+# ---------------------------------------------------------------------------
+
+class TestSealedImmutability:
+    """Every claim proven ADVERSARIALLY against a direct sqlite3 connection,
+    bypassing this module entirely. If immutability held only in Python it
+    would not hold at all."""
+
+    def test_direct_sqlite_cannot_edit_a_sealed_declaration(self, db):
+        h = _declare(db).spec_hash
+        _seal(db, h)
+        con = sqlite3.connect(db)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="DATASET_TAMPER"):
+                con.execute(
+                    "UPDATE dataset_specifications SET declaration_json = ? WHERE spec_hash = ?",
+                    (json.dumps({"tampered": True}), h),
+                )
+        finally:
+            con.close()
+
+    def test_direct_sqlite_cannot_change_spec_hash(self, db):
+        h = _declare(db).spec_hash
+        con = sqlite3.connect(db)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="spec_hash is immutable"):
+                con.execute(
+                    "UPDATE dataset_specifications SET spec_hash = ? WHERE spec_hash = ?",
+                    ("9" * 64, h),
+                )
+        finally:
+            con.close()
+
+    def test_direct_sqlite_cannot_rewrite_a_declared_declaration(self, db):
+        """The declaration is frozen from the moment it is written, not merely
+        from seal -- content addressing would otherwise be a lie."""
+        h = _declare(db).spec_hash
+        con = sqlite3.connect(db)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="declaration is immutable"):
+                con.execute(
+                    "UPDATE dataset_specifications SET declaration_json = ? WHERE spec_hash = ?",
+                    ("{}", h),
+                )
+        finally:
+            con.close()
+
+    @pytest.mark.parametrize("column,value", [
+        ("lineage", "other"),
+        ("version_ordinal", 99),
+        ("declared_by", "someone-else"),
+        ("declared_at", "1999-01-01T00:00:00+00:00"),
+    ])
+    def test_direct_sqlite_cannot_change_frozen_column(self, db, column, value):
+        h = _declare(db).spec_hash
+        con = sqlite3.connect(db)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="DATASET_TAMPER"):
+                con.execute(
+                    f"UPDATE dataset_specifications SET {column} = ? WHERE spec_hash = ?",
+                    (value, h),
+                )
+        finally:
+            con.close()
+
+    def test_sealed_cannot_regress_to_an_earlier_phase(self, db):
+        h = _declare(db).spec_hash
+        _seal(db, h)
+        con = sqlite3.connect(db)
+        try:
+            for target in ("Declared", "Resolved", "Validated", "Rejected"):
+                with pytest.raises(sqlite3.IntegrityError, match="only advance"):
+                    con.execute(
+                        "UPDATE dataset_specifications SET phase = ? WHERE spec_hash = ?",
+                        (target, h),
+                    )
+        finally:
+            con.close()
+
+    def test_sealed_may_still_advance_to_superseded_or_retired(self, db):
+        h = _declare(db).spec_hash
+        _seal(db, h)
+        con = sqlite3.connect(db)
+        try:
+            con.execute(
+                "UPDATE dataset_specifications SET phase = 'Retired' WHERE spec_hash = ?", (h,)
+            )
+            con.commit()
+        finally:
+            con.close()
+        assert reg.get_specification(db, h)["phase"] == "Retired"
+
+    def test_terminal_phase_cannot_be_left(self, db):
+        h = _declare(db).spec_hash
+        _seal(db, h)
+        reg.retire(db, h)
+        con = sqlite3.connect(db)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="terminal phase"):
+                con.execute(
+                    "UPDATE dataset_specifications SET phase = 'Sealed' WHERE spec_hash = ?", (h,)
+                )
+        finally:
+            con.close()
+
+    def test_delete_forbidden(self, db):
+        h = _declare(db).spec_hash
+        con = sqlite3.connect(db)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                con.execute("DELETE FROM dataset_specifications WHERE spec_hash = ?", (h,))
+        finally:
+            con.close()
+
+    def test_check_constraint_rejects_an_unknown_phase(self, db):
+        h = _declare(db).spec_hash
+        con = sqlite3.connect(db)
+        try:
+            with pytest.raises(sqlite3.IntegrityError):
+                con.execute(
+                    "UPDATE dataset_specifications SET phase = 'Invented' WHERE spec_hash = ?", (h,)
+                )
+        finally:
+            con.close()
+
+
+# ---------------------------------------------------------------------------
+# LR4 — schema assertion before any write
+# ---------------------------------------------------------------------------
+
+class TestLR4SchemaAssertion:
+    def test_refuses_a_foreign_database(self, tmp_path):
+        foreign = tmp_path / "label_store.db"
+        con = sqlite3.connect(foreign)
+        con.execute("CREATE TABLE label_specifications (spec_hash TEXT)")
+        con.commit()
+        con.close()
+        with pytest.raises(reg.NotADatasetBuilderStore, match="does not look like"):
+            _declare(foreign)
+
+    def test_refuses_before_writing_anything(self, tmp_path):
+        """The assertion must fire BEFORE any write, so a foreign database is
+        never polluted with a stray table."""
+        foreign = tmp_path / "trading.db"
+        con = sqlite3.connect(foreign)
+        con.execute("CREATE TABLE option_quotes (ts TEXT)")
+        con.commit()
+        con.close()
+        before = {r[0] for r in sqlite3.connect(foreign).execute(
+            "SELECT name FROM sqlite_master")}
+        with pytest.raises(reg.NotADatasetBuilderStore):
+            _declare(foreign)
+        after = {r[0] for r in sqlite3.connect(foreign).execute(
+            "SELECT name FROM sqlite_master")}
+        assert before == after, "a foreign database was modified before the assertion"
+
+    def test_refuses_a_nonexistent_path(self, tmp_path):
+        with pytest.raises(reg.NotADatasetBuilderStore, match="does not exist"):
+            _declare(tmp_path / "nope.db")
+
+    def test_transitions_also_assert(self, tmp_path):
+        foreign = tmp_path / "foreign.db"
+        sqlite3.connect(foreign).execute("CREATE TABLE x (a TEXT)")
+        with pytest.raises(reg.NotADatasetBuilderStore):
+            reg.mark_resolved(foreign, "0" * 64)
+
+    def test_init_db_is_idempotent(self, tmp_path):
+        p = tmp_path / "d.db"
+        reg.init_db(p)
+        reg.init_db(p)
+        _declare(p)
+        assert reg.get_lineage(p, "ivrv-substrate")
+
+
+# ---------------------------------------------------------------------------
+# CLI — no default --db
+# ---------------------------------------------------------------------------
+
+class TestNoDefaultDb:
+    def test_cli_requires_db(self):
+        with pytest.raises(SystemExit) as exc:
+            reg._cli([])
+        assert exc.value.code == 2
+
+    def test_no_default_db_constant_in_source(self):
+        """A default would let a caller write to the wrong store by omission."""
+        src = (ROOT / "research" / "dataset_builder" / "registry.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "add_argument":
+                names = [a.value for a in node.args if isinstance(a, ast.Constant)]
+                if "--db" in names:
+                    kw = {k.arg for k in node.keywords}
+                    assert "default" not in kw, "--db must not carry a default"
+                    assert "required" in kw
+
+    def test_cli_summary(self, db, capsys):
+        _declare(db)
+        assert reg._cli(["--db", str(db)]) == 0
+        assert "Declared" in capsys.readouterr().out
+
+    def test_cli_refuses_foreign_db(self, tmp_path, capsys):
+        foreign = tmp_path / "f.db"
+        sqlite3.connect(foreign).execute("CREATE TABLE y (a TEXT)")
+        assert reg._cli(["--db", str(foreign)]) == 2
+
+    def test_cli_spec_lookup(self, db, capsys):
+        h = _declare(db).spec_hash
+        assert reg._cli(["--db", str(db), "--spec-hash", h]) == 0
+        assert h in capsys.readouterr().out
+
+    def test_cli_unknown_spec_returns_1(self, db):
+        assert reg._cli(["--db", str(db), "--spec-hash", "0" * 64]) == 1
+
+    def test_cli_lineage(self, db, capsys):
+        _declare(db)
+        assert reg._cli(["--db", str(db), "--lineage", "ivrv-substrate"]) == 0
+        assert "Declared" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# TV3 — sabotage: prove the guards are load-bearing
+# ---------------------------------------------------------------------------
+
+class TestTV3Sabotage:
+    def test_tier_a_is_not_vacuous(self):
+        """If MANDATORY_FIELDS were emptied, the per-field tests would pass
+        against an empty declaration. Prove they would not."""
+        ok, errors = reg.validate_tier_a({})
+        assert ok is False
+        assert len(errors) >= len(reg.MANDATORY_FIELDS)
+
+    def test_every_mandatory_field_is_actually_checked(self):
+        """Removing any one field must produce an error naming it. A field
+        listed but unchecked would be caught here."""
+        for field in reg.MANDATORY_FIELDS:
+            d = valid_declaration()
+            del d[field]
+            ok, errors = reg.validate_tier_a(d)
+            assert ok is False and any(field in e for e in errors), field
+
+    def test_arc_table_is_load_bearing(self, db):
+        """Every non-arc pair must be refused, not merely the ones tested
+        above by name."""
+        h = _declare(db).spec_hash
+        for frm in reg.PHASES:
+            for to in reg.PHASES:
+                if (frm, to) in reg.ALLOWED_TRANSITIONS:
+                    continue
+                with pytest.raises((reg.TransitionError, reg.DatasetRegistryError)):
+                    reg._transition(db, h, frm, to)
+
+
+# ---------------------------------------------------------------------------
+# §9 RBV — rollback / §8 BC — backward compatibility
+# ---------------------------------------------------------------------------
+
+class TestRollbackAndCompatibility:
+    def test_module_creates_no_file_outside_the_given_db(self, tmp_path):
+        p = tmp_path / "sub" / "d.db"
+        reg.init_db(p)
+        _declare(p)
+        assert {f.name for f in (tmp_path / "sub").iterdir()} <= {
+            "d.db", "d.db-wal", "d.db-shm", "d.db-journal",
+        }
+
+    def test_registry_is_self_contained(self, db):
+        """Dropping the module leaves a readable SQLite file; the registry is
+        not a proprietary format."""
+        _declare(db)
+        con = sqlite3.connect(db)
+        try:
+            rows = con.execute("SELECT spec_hash, phase FROM dataset_specifications").fetchall()
+        finally:
+            con.close()
+        assert len(rows) == 1
+
+    def test_no_other_store_is_touched(self, tmp_path):
+        """Import-boundary in practice: using the registry must not create or
+        modify a Feature Store, Label Store or ledger anywhere."""
+        p = tmp_path / "d.db"
+        reg.init_db(p)
+        _declare(p)
+        names = {f.name for f in tmp_path.rglob("*.db")}
+        assert names == {"d.db"}
