@@ -26,6 +26,7 @@ for p in (ROOT / "research", ROOT / "research" / "admissibility",
 
 import record  # noqa: E402  -- the governing lane authority
 
+from forward_evidence.pre_reg_guard import _sha256_lf  # noqa: E402
 from dataset_builder import citation_index as ci  # noqa: E402
 from dataset_builder import lanes as ln  # noqa: E402
 from dataset_builder import registry as reg  # noqa: E402
@@ -440,7 +441,7 @@ class TestRegression:
         import hashlib, json
         baseline = json.loads((ROOT / "BASELINE_46.json").read_text())
         for rel, was in baseline.items():
-            now = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
+            now = _sha256_lf(ROOT / rel)
             assert now == was, f"{rel} changed"
 
     def test_no_other_store_touched(self, tmp_path):

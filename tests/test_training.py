@@ -27,6 +27,7 @@ for p in (ROOT / "research", ROOT / "research" / "admissibility",
 import receipt_ledger as rl  # noqa: E402
 from lattice import Certification, Provenance, Readiness  # noqa: E402
 
+from forward_evidence.pre_reg_guard import _sha256_lf  # noqa: E402
 from dataset_builder import citation_index as ci  # noqa: E402
 from dataset_builder import experiments as ex  # noqa: E402
 from dataset_builder import materialisation as mat  # noqa: E402
@@ -618,7 +619,7 @@ class TestRegression:
         import hashlib, json
         baseline = json.loads((ROOT / "BASELINE_46.json").read_text())
         for rel, was in baseline.items():
-            assert hashlib.sha256((ROOT / rel).read_bytes()).hexdigest() == was, rel
+            assert _sha256_lf(ROOT / rel) == was, rel
 
     def test_no_other_store_touched(self, tmp_path):
         p = tmp_path / "d.db"; led = tmp_path / "l.db"
