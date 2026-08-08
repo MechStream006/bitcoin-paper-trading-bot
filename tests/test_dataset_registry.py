@@ -849,8 +849,12 @@ class TestRollbackAndCompatibility:
 
 
 def _rejected(db) -> str:
+    # Distinct content: spec_hash is the content hash of the declaration, so a
+    # fixture sharing a body with another would collide regardless of lineage.
+    d = valid_declaration()
+    d["intent"]["rationale"] = "rejected fixture"
     h = reg.declare_dataset(
-        db, valid_declaration(), lineage="af1-rej", declared_by="rohith"
+        db, d, lineage="af1-rej", declared_by="rohith"
     ).spec_hash
     reg.reject(db, h, "Declared", "RF6: warm-up unavailable")
     return h
@@ -1091,3 +1095,238 @@ class TestAF1TV3:
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             con.execute("DELETE FROM dataset_specifications WHERE spec_hash = ?", (h,))
         con.close()
+
+
+# ---------------------------------------------------------------------------
+# EB-1 -- change_class is write-once
+#
+# ADR-I012 6: the Registry is append-only with storage-level immutability
+# enforcement. 10.1: `extension` says prior results remain valid, `refinement`
+# says they may change and comparison needs explicit acknowledgment. supersede()
+# validated the value on write; nothing protected it afterwards, so a one-line
+# UPDATE could silently convert the second into the first.
+# ---------------------------------------------------------------------------
+
+
+class TestChangeClassIsWriteOnce:
+
+    def test_change_class_cannot_be_flipped(self, db):
+        old, _ = _superseded(db)
+        assert reg.get_specification(db, old)["change_class"] == "extension"
+        con = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.IntegrityError, match="change_class is write-once"):
+            con.execute(
+                "UPDATE dataset_specifications SET change_class = 'refinement' "
+                "WHERE spec_hash = ?", (old,)
+            )
+        con.close()
+
+    def test_change_class_cannot_be_nulled(self, db):
+        old, _ = _superseded(db)
+        con = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.IntegrityError, match="change_class is write-once"):
+            con.execute(
+                "UPDATE dataset_specifications SET change_class = NULL "
+                "WHERE spec_hash = ?", (old,)
+            )
+        con.close()
+
+    def test_the_recorded_class_survives_a_failed_edit(self, db):
+        old, _ = _superseded(db)
+        con = sqlite3.connect(str(db))
+        try:
+            con.execute(
+                "UPDATE dataset_specifications SET change_class = 'refinement' "
+                "WHERE spec_hash = ?", (old,)
+            )
+        except sqlite3.IntegrityError:
+            pass
+        con.rollback()
+        con.close()
+        assert reg.get_specification(db, old)["change_class"] == "extension"
+
+    def test_recording_the_class_the_first_time_is_permitted(self, db):
+        """Write-once, not never-written: supersede() must still work."""
+        old, _ = _superseded(db)
+        assert reg.get_specification(db, old)["change_class"] == "extension"
+
+    def test_a_refinement_supersession_is_equally_protected(self, db):
+        old = reg.declare_dataset(
+            db, valid_declaration(), lineage="eb1-ref", declared_by="rohith"
+        ).spec_hash
+        reg.mark_resolved(db, old); reg.mark_validated(db, old); reg.seal(db, old)
+        new = reg.declare_dataset(
+            db, _other_declaration(), lineage="eb1-ref", declared_by="rohith"
+        ).spec_hash
+        reg.mark_resolved(db, new); reg.mark_validated(db, new); reg.seal(db, new)
+        reg.supersede(db, old, successor_hash=new, change_class="refinement")
+        con = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.IntegrityError, match="change_class is write-once"):
+            con.execute(
+                "UPDATE dataset_specifications SET change_class = 'extension' "
+                "WHERE spec_hash = ?", (old,)
+            )
+        con.close()
+
+    def test_ordinary_transitions_are_unaffected(self, db):
+        """The clause must not fire on transitions that leave it NULL.
+
+        `_transition` COALESCEs every metadata column on every arc, so a
+        careless rule would break the whole lifecycle.
+        """
+        h = reg.declare_dataset(
+            db, valid_declaration(), lineage="eb1-life", declared_by="rohith"
+        ).spec_hash
+        reg.mark_resolved(db, h)
+        reg.mark_validated(db, h)
+        reg.seal(db, h)
+        reg.retire(db, h)
+        assert reg.get_specification(db, h)["phase"] == "Retired"
+
+
+class TestFullColumnSweep:
+    """Standing guard against the enumeration error that produced EB-1.
+
+    AF-1 named two columns and missed a third. This asserts the protected set
+    directly, so any column added later without a decision fails here rather
+    than being discovered by a future audit.
+    """
+
+    IMMUTABLE = ("spec_hash", "lineage", "version_ordinal", "declaration_json",
+                 "declared_by", "declared_at")
+    WRITE_ONCE = ("rejection_reason", "superseded_by", "change_class")
+
+    def test_every_column_is_accounted_for(self, db):
+        cols = [c[1] for c in sqlite3.connect(str(db)).execute(
+            "PRAGMA table_info(dataset_specifications)")]
+        accounted = set(self.IMMUTABLE) | set(self.WRITE_ONCE) | {"phase"}
+        assert set(cols) == accounted, (
+            f"unclassified column(s): {set(cols) - accounted}. Every column must be "
+            "immutable, write-once, or the phase itself -- decide which before adding one."
+        )
+
+    def test_immutable_columns_are_refused_on_a_superseded_row(self, db):
+        old, _ = _superseded(db)
+        values = {"spec_hash": "'z'", "lineage": "'other'", "version_ordinal": "99",
+                  "declaration_json": "'{}'", "declared_by": "'x'",
+                  "declared_at": "'2020-01-01'"}
+        con = sqlite3.connect(str(db))
+        for col in self.IMMUTABLE:
+            with pytest.raises(sqlite3.IntegrityError, match="DATASET_TAMPER"):
+                con.execute(
+                    f"UPDATE dataset_specifications SET {col} = {values[col]} "
+                    "WHERE spec_hash = ?", (old,)
+                )
+        con.close()
+
+    def test_write_once_columns_are_refused_once_set(self, db):
+        """Each write-once column, probed on the row whose transition set it."""
+        rej = _rejected(db)
+        sup, _ = _superseded(db)
+        con = sqlite3.connect(str(db))
+        for target, col, val in ((rej, "rejection_reason", "'other'"),
+                                 (sup, "superseded_by", "'f'"),
+                                 (sup, "change_class", "'refinement'")):
+            with pytest.raises(sqlite3.IntegrityError, match="write-once"):
+                con.execute(
+                    f"UPDATE dataset_specifications SET {col} = {val} "
+                    "WHERE spec_hash = ?", (target,)
+                )
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# EB-3 -- the schema swap is atomic
+#
+# The guard is DROPped before being recreated so old stores gain new clauses.
+# `executescript` runs statements in autocommit, so without an explicit
+# transaction an interruption after the DROP left the store with NO guard --
+# and, once unguarded, even the declaration became editable.
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaSwapIsAtomic:
+
+    def test_schema_script_is_wrapped_in_a_transaction(self):
+        sql = reg._SCHEMA_SQL.strip()
+        assert sql.startswith("BEGIN;"), "the DROP must not run outside a transaction"
+        assert sql.endswith("COMMIT;")
+
+    def test_the_drop_is_inside_the_transaction(self):
+        sql = reg._SCHEMA_SQL
+        assert sql.index("BEGIN;") < sql.index("DROP TRIGGER") < sql.index("COMMIT;")
+
+    def test_an_interrupted_swap_leaves_the_old_guard_intact(self, tmp_path):
+        """The failure EB-3 named, reproduced against the real script shape.
+
+        A statement that fails after the DROP must roll the DROP back, so the
+        store is never left with no immutability enforcement.
+        """
+        p = tmp_path / "atomic.db"
+        reg.init_db(p)
+        con = sqlite3.connect(str(p))
+        try:
+            con.executescript(
+                "BEGIN;\n"
+                "DROP TRIGGER IF EXISTS trg_dataset_specifications_guard_update;\n"
+                "CREATE TRIGGER deliberately_invalid ON ;\n"
+                "COMMIT;"
+            )
+        except sqlite3.Error:
+            pass
+        try:
+            con.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        con.close()
+
+        present = sqlite3.connect(str(p)).execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE name = 'trg_dataset_specifications_guard_update'"
+        ).fetchone()[0]
+        assert present == 1, "an interrupted swap left the store unguarded"
+
+    def test_immutability_survives_an_interrupted_swap(self, tmp_path):
+        """The consequence, not just the trigger count: with the guard gone the
+        declaration itself became editable. It must not."""
+        p = tmp_path / "atomic2.db"
+        reg.init_db(p)
+        h = reg.declare_dataset(
+            p, valid_declaration(), lineage="eb3", declared_by="rohith"
+        ).spec_hash
+        con = sqlite3.connect(str(p))
+        try:
+            con.executescript(
+                "BEGIN;\n"
+                "DROP TRIGGER IF EXISTS trg_dataset_specifications_guard_update;\n"
+                "CREATE TRIGGER deliberately_invalid ON ;\n"
+                "COMMIT;"
+            )
+        except sqlite3.Error:
+            pass
+        try:
+            con.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        with pytest.raises(sqlite3.IntegrityError, match="declaration is immutable"):
+            con.execute(
+                "UPDATE dataset_specifications SET declaration_json = '{}' "
+                "WHERE spec_hash = ?", (h,)
+            )
+        con.close()
+
+    def test_init_db_remains_idempotent_under_the_transaction(self, tmp_path):
+        p = tmp_path / "idem.db"
+        reg.init_db(p)
+        h = _rejected(p)
+        before = reg.get_specification(p, h)
+
+        def triggers():
+            return sorted(r[0] for r in sqlite3.connect(str(p)).execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"))
+
+        t1 = triggers()
+        reg.init_db(p)
+        reg.init_db(p)
+        assert triggers() == t1
+        assert reg.get_specification(p, h) == before

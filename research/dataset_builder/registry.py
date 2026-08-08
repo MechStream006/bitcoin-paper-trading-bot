@@ -117,7 +117,15 @@ MANDATORY_SUBFIELDS: dict[str, tuple[str, ...]] = {
 #: a label reference without a maturity requirement is not a reference).
 MANDATORY_LABEL_REF_KEYS: tuple[str, ...] = ("spec_hash", "maturity_requirement")
 
+# Wrapped in an explicit transaction because this script DROPs the guard
+# trigger before recreating it. `executescript` runs each statement in
+# autocommit, so an interruption between the two would leave the store with no
+# immutability enforcement at all -- and ADR-I012 §6 requires that enforcement
+# to be storage-level, not conventional. BEGIN/COMMIT makes the swap atomic:
+# either the new guard is in place or the old one still is, never neither.
 _SCHEMA_SQL = """
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS dataset_specifications (
     spec_hash         TEXT PRIMARY KEY,
     lineage           TEXT NOT NULL,
@@ -187,6 +195,15 @@ BEGIN
              AND NEW.superseded_by IS NOT OLD.superseded_by
             THEN RAISE(ABORT,
                 'DATASET_TAMPER: superseded_by is write-once (ADR-I012 10.2)')
+        -- §10.1: `extension` says prior results remain valid; `refinement` says
+        -- they may change and comparison requires explicit acknowledgment.
+        -- Silently flipping one to the other is how "a research programme
+        -- accumulates conclusions that no longer share a basis". `supersede()`
+        -- validates the value on write; nothing protected it afterwards.
+        WHEN OLD.change_class IS NOT NULL
+             AND NEW.change_class IS NOT OLD.change_class
+            THEN RAISE(ABORT,
+                'DATASET_TAMPER: change_class is write-once (ADR-I012 10.1)')
     END;
 END;
 
@@ -195,6 +212,8 @@ BEFORE DELETE ON dataset_specifications
 BEGIN
     SELECT RAISE(ABORT, 'dataset_specifications is append-only: DELETE forbidden');
 END;
+
+COMMIT;
 """
 
 _REQUIRED_TABLES: frozenset[str] = frozenset({"dataset_specifications"})
