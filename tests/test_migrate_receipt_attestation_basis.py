@@ -294,9 +294,17 @@ class TestRealLedgerCopy:
         assert rc == 0
         assert _sha256(copy) == before_hash  # dry run touches nothing
 
-    def test_all_26_real_receipts_have_null_attestation_basis(self):
+    def test_no_real_receipt_has_a_backfilled_attestation_basis(self):
         # The permanent, correct state per this script's design: no historical
         # receipt is ever backfilled.
+        #
+        # The count is a floor, not an equality. 26 was the chain's length when
+        # the bootstrap migrations completed; the ledger is an append-only
+        # governance chain and legitimately grows as real decisions are made
+        # (the first `dataset.seal` was appended at Phase 4 operational
+        # closure). Pinning equality would make every genuine governance action
+        # fail this test. `non_null == 0` is the assertion that carries the
+        # meaning, and it is unchanged.
         con = sqlite3.connect(REAL_LEDGER)
         try:
             total = con.execute("SELECT COUNT(*) FROM governance_receipts").fetchone()[0]
@@ -305,10 +313,10 @@ class TestRealLedgerCopy:
             ).fetchone()[0]
         finally:
             con.close()
-        assert total == 26
+        assert total >= 26
         assert non_null == 0
 
     def test_chain_still_verifies_on_the_real_ledger(self):
         result = rl.verify_chain(REAL_LEDGER)
         assert result.ok
-        assert result.n_receipts == 26
+        assert result.n_receipts >= 26

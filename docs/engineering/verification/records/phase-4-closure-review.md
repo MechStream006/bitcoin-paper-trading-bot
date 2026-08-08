@@ -9,7 +9,37 @@
 | **Date** | 2026-08-08 |
 | **Author** | Claude Opus 5 |
 | **Approver** | *(pending — Rohith)* |
-| **Status** | **IMPLEMENTATION COMPLETE — EXIT CRITERIA NOT ALL MET.** See §3 and §8 |
+| **Status** | **IMPLEMENTATION COMPLETE · OPERATIONAL CLOSURE COMPLETE.** `P4-1` met 2026-08-08 — see §0 |
+| **Superseding evidence** | [Phase 4 Engineering Audit](phase-4-engineering-audit.md) — operational record |
+
+---
+
+## 0. Update — 2026-08-08, operational closure
+
+**`P4-1` is now MET.** This section is appended rather than rewritten: §3's
+original UNMET finding was correct when written, and erasing it would hide the
+gap that motivated the work.
+
+`research/dataset_builder/dataset_builder.db` was created and **one** real
+Research Dataset was sealed against real Phase 1–3 data:
+
+| | |
+|---|---|
+| Spec hash | `f444c132b2a5d666b9946e08e204b46720690fb79928892a066dce333d245444` |
+| Lineage | `ivrv-vrp-substrate` v2 |
+| Window | 2021-05-01 … 2025-05-31 (lockbox excluded and not intersected) |
+| Inputs | real `dvol` + `spot` partitions, 3 Active Features, 1 Active Label |
+| Ceiling | `OFFLINE_CORPUS / AMBER / READY / FULL / CLEAN` — **AMBER because the corpus is AMBER**, not asserted |
+| Receipt | `dataset.seal` `871a4e54b5ab144f9963…`; chain `ok=True, 27 receipts` |
+| Backup | ✅ verified, with SHA-256 manifest; healthcheck reports `dataset_builder_backup OK` |
+
+**RF6 refused the first declaration on real data** (`rv30` / `vrp_spread`
+warm-up predates DVOL inception). That specification is recorded permanently as
+`Rejected` (v1, `2c9bf77f…`) and was deliberately not erased.
+
+Full evidence, invariant results, and the corrected `P4-9` position are in the
+[Phase 4 Engineering Audit](phase-4-engineering-audit.md). §3 and §4 below
+remain as originally written except for the `P4-1` status line.
 
 ---
 
@@ -57,7 +87,7 @@ the production host.
 
 | # | Criterion | Status |
 |---|---|---|
-| **P4-1** | A Research Dataset seals successfully against **real** Phase 1–3 data, with its admissibility meet stated explicitly | ❌ **UNMET** — see below |
+| **P4-1** | A Research Dataset seals successfully against **real** Phase 1–3 data, with its admissibility meet stated explicitly | ✅ **MET 2026-08-08** (§0). *Original finding, retained:* ❌ UNMET — see below |
 | **P4-2** | All six refusal points refuse by name, each with a negative test | ✅ RF1/RF5/RF6 (4.3), RF4 (4.4), RF2 (4.6), RF3 (4.7) |
 | **P4-3** | Bidirectional index answers both directions; **both** upstream stores' retirement refusals are **enforceable** | ✅ Met as worded — `citation_check` exists on both `feature_store` and `label_store` `retire_specification()`. **Opt-in, defaults to `None`** (`TD-4.2-1`) |
 | **P4-4** | Sealed-region exclusion applied at resolution; every published result bit-identical | ✅ 4.6 — **10 artifacts, 0 changed**, re-verified at every subsequent milestone |
@@ -131,15 +161,17 @@ platform has not reached. Reported rather than reinterpreted to fit.
 | §15.3 Experiment orthogonality | 4.9 | ✅ Built |
 | §16 L1 / L2 | 4.8 | ✅ Demonstrated |
 | §16 **L3** | **4.11** | ✅ Demonstrated — **forward-only** (`TD-4.11-3`) |
-| **Sealing against real data** | **— Unowned —** | ❌ **`P4-1`** — never performed |
+| **Sealing against real data** | operational closure | ✅ **`P4-1` performed 2026-08-08** (§0) |
+| **Materialising a real dataset** | **— Unowned —** | ❌ needs a corpus-reading `ValueProvider`; none exists (`TD-4.12-1`) |
 | **Alerting on any recorded governance event** | **— Unowned —** | ⚠️ Four hazards, one pattern (§7) |
 
 ### Unowned bucket — explicit
 
 Three items belong to no WBS row and to no ratified decision:
 
-1. **`P4-1` — real-data instantiation and seal.** Assumed by the exit criteria,
-   allocated to no row. Requires owner authorisation (§8).
+1. ~~**`P4-1` — real-data instantiation and seal.**~~ ✅ **Closed 2026-08-08**
+   (§0). Superseded by: **materialising** that dataset, which still belongs to
+   no row and needs a corpus-reading `ValueProvider` (`TD-4.12-1`).
 2. **§10.3 superseded-input propagation.** `ADR-I011` specifies it; 4.11 makes
    the blast radius *computable* and *recordable*, but nothing invokes detection
    when an upstream specification is superseded.
@@ -202,7 +234,7 @@ Three items need Rohith, not more engineering:
 
 | # | Decision | Consequence of deferring |
 |---|---|---|
-| **1** | **`P4-1` — authorise creating `research/dataset_builder/dataset_builder.db` and sealing one real Research Dataset against Phase 1–3 data** | Phase 4 stays open. The builder remains verified-but-unexercised, and the first real seal would then happen without a closure gate around it |
+| **1** | ~~`P4-1` — authorise the store and first seal~~ → ✅ **done 2026-08-08**. Now: **deploy Phase 4 to production**, reconciling `HEAD` and the 26 ↔ 27 chain divergence | A production deployment, out of scope for the closure session. Until then the canonical chain and production's differ by the one real `dataset.seal` receipt |
 | **2** | **Accept or amend `P4-9`'s "all four ledgers"** | The criterion as worded is unsatisfiable today; it needs re-wording or an explicit carve-out |
 | **3** | **Sign the twelve WBS verification records** (RC checklists, 4.0–4.11) | Same discipline as Phase 3's `E2`; unsigned records leave the phase formally unclosed |
 
