@@ -144,7 +144,13 @@ CREATE INDEX IF NOT EXISTS idx_dataset_specifications_phase
 -- only along the arcs §11 draws. A Sealed record is editable in exactly one
 -- respect -- advancing to Superseded or Retired -- and in no other, which is
 -- what "mutation of any sealed record is refused" (§6.2) means in practice.
-CREATE TRIGGER IF NOT EXISTS trg_dataset_specifications_guard_update
+-- Dropped before creation, not created IF NOT EXISTS: a store built before a
+-- guard clause was added would otherwise keep the weaker trigger forever, so
+-- the protection would be absent from exactly the databases that already hold
+-- governed records. Schema-only; no row is read or written by this.
+DROP TRIGGER IF EXISTS trg_dataset_specifications_guard_update;
+
+CREATE TRIGGER trg_dataset_specifications_guard_update
 BEFORE UPDATE ON dataset_specifications
 BEGIN
     SELECT CASE
@@ -166,6 +172,21 @@ BEGIN
         WHEN OLD.phase IN ('Rejected', 'Retired', 'Superseded')
              AND NEW.phase IS NOT OLD.phase
             THEN RAISE(ABORT, 'DATASET_TAMPER: terminal phase may not be left')
+        -- Write-once, not never-written: both fields are NULL until the
+        -- transition that sets them, so the guard fires only once a value
+        -- exists. DG-4 (IQROS-P15) makes a rejection a permanent record, and
+        -- `reject()` already refuses to create one without a reason -- a reason
+        -- that could then be erased would make that refusal decorative.
+        WHEN OLD.rejection_reason IS NOT NULL
+             AND NEW.rejection_reason IS NOT OLD.rejection_reason
+            THEN RAISE(ABORT,
+                'DATASET_TAMPER: rejection_reason is write-once (DG-4)')
+        -- §10.2: a superseded dataset must stay reconstructable. Repointing or
+        -- erasing the successor rewrites the version chain silently.
+        WHEN OLD.superseded_by IS NOT NULL
+             AND NEW.superseded_by IS NOT OLD.superseded_by
+            THEN RAISE(ABORT,
+                'DATASET_TAMPER: superseded_by is write-once (ADR-I012 10.2)')
     END;
 END;
 

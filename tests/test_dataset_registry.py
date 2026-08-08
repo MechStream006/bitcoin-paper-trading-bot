@@ -832,3 +832,262 @@ class TestRollbackAndCompatibility:
         _declare(p)
         names = {f.name for f in tmp_path.rglob("*.db")}
         assert names == {"d.db"}
+
+
+# ---------------------------------------------------------------------------
+# AF-1 -- rejection_reason and superseded_by are write-once
+#
+# Found by the Phase 4 final audit: the guard protected six columns, and these
+# two were mutable by direct sqlite3. DG-4 (IQROS-P15) makes a rejection a
+# permanent record; ADR-I012 10.2 requires a superseded dataset to stay
+# reconstructable. Both were enforceable only by convention until now.
+#
+# Every test here writes through raw sqlite3 deliberately: no Python API
+# exposes these mutations, so a test driven through the module API could pass
+# while the database itself remained open.
+# ---------------------------------------------------------------------------
+
+
+def _rejected(db) -> str:
+    h = reg.declare_dataset(
+        db, valid_declaration(), lineage="af1-rej", declared_by="rohith"
+    ).spec_hash
+    reg.reject(db, h, "Declared", "RF6: warm-up unavailable")
+    return h
+
+
+def _superseded(db) -> tuple[str, str]:
+    old = reg.declare_dataset(
+        db, valid_declaration(), lineage="af1-sup", declared_by="rohith"
+    ).spec_hash
+    reg.mark_resolved(db, old)
+    reg.mark_validated(db, old)
+    reg.seal(db, old)
+    new = reg.declare_dataset(
+        db, _other_declaration(), lineage="af1-sup", declared_by="rohith"
+    ).spec_hash
+    reg.mark_resolved(db, new)
+    reg.mark_validated(db, new)
+    reg.seal(db, new)
+    reg.supersede(db, old, successor_hash=new, change_class="extension")
+    return old, new
+
+
+def _other_declaration() -> dict:
+    d = valid_declaration()
+    d["intent"]["rationale"] = "successor"
+    return d
+
+
+class TestRejectionReasonIsWriteOnce:
+    """DG-4 / IQROS-P15 -- a rejection is a permanent record, reason included."""
+
+    def test_reason_cannot_be_erased(self, db):
+        h = _rejected(db)
+        con = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.IntegrityError, match="rejection_reason is write-once"):
+            con.execute(
+                "UPDATE dataset_specifications SET rejection_reason = '' "
+                "WHERE spec_hash = ?", (h,)
+            )
+        con.close()
+
+    def test_reason_cannot_be_nulled(self, db):
+        h = _rejected(db)
+        con = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.IntegrityError, match="rejection_reason is write-once"):
+            con.execute(
+                "UPDATE dataset_specifications SET rejection_reason = NULL "
+                "WHERE spec_hash = ?", (h,)
+            )
+        con.close()
+
+    def test_reason_cannot_be_rewritten_to_something_milder(self, db):
+        """The dangerous edit is not deletion but revision."""
+        h = _rejected(db)
+        con = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.IntegrityError, match="rejection_reason is write-once"):
+            con.execute(
+                "UPDATE dataset_specifications SET rejection_reason = 'minor issue' "
+                "WHERE spec_hash = ?", (h,)
+            )
+        con.close()
+
+    def test_the_reason_survives_a_failed_edit(self, db):
+        h = _rejected(db)
+        con = sqlite3.connect(str(db))
+        try:
+            con.execute(
+                "UPDATE dataset_specifications SET rejection_reason = 'x' "
+                "WHERE spec_hash = ?", (h,)
+            )
+        except sqlite3.IntegrityError:
+            pass
+        con.rollback()
+        con.close()
+        assert "RF6" in reg.get_specification(db, h)["rejection_reason"]
+
+    def test_writing_the_reason_the_first_time_is_permitted(self, db):
+        """Write-once, not never-written: `reject()` must still work."""
+        h = _rejected(db)
+        assert reg.get_specification(db, h)["phase"] == "Rejected"
+        assert reg.get_specification(db, h)["rejection_reason"]
+
+    def test_a_null_reason_row_is_not_frozen_by_the_guard(self, db):
+        """A non-rejected row has NULL here; the guard must not fire on it,
+        or ordinary lifecycle transitions would be blocked."""
+        h = reg.declare_dataset(
+            db, valid_declaration(), lineage="af1-live", declared_by="rohith"
+        ).spec_hash
+        reg.mark_resolved(db, h)
+        assert reg.get_specification(db, h)["phase"] == "Resolved"
+
+
+class TestSupersededByIsWriteOnce:
+    """ADR-I012 10.2 -- supersession must not rewrite history."""
+
+    def test_successor_cannot_be_repointed(self, db):
+        old, _ = _superseded(db)
+        con = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.IntegrityError, match="superseded_by is write-once"):
+            con.execute(
+                "UPDATE dataset_specifications SET superseded_by = ? "
+                "WHERE spec_hash = ?", ("f" * 64, old)
+            )
+        con.close()
+
+    def test_successor_cannot_be_erased(self, db):
+        old, _ = _superseded(db)
+        con = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.IntegrityError, match="superseded_by is write-once"):
+            con.execute(
+                "UPDATE dataset_specifications SET superseded_by = NULL "
+                "WHERE spec_hash = ?", (old,)
+            )
+        con.close()
+
+    def test_the_pointer_survives_a_failed_edit(self, db):
+        old, new = _superseded(db)
+        con = sqlite3.connect(str(db))
+        try:
+            con.execute(
+                "UPDATE dataset_specifications SET superseded_by = NULL "
+                "WHERE spec_hash = ?", (old,)
+            )
+        except sqlite3.IntegrityError:
+            pass
+        con.rollback()
+        con.close()
+        assert reg.get_specification(db, old)["superseded_by"] == new
+
+    def test_recording_the_successor_the_first_time_is_permitted(self, db):
+        old, new = _superseded(db)
+        assert reg.get_specification(db, old)["phase"] == "Superseded"
+        assert reg.get_specification(db, old)["superseded_by"] == new
+
+    def test_a_sealed_row_can_still_be_superseded_after_the_guard(self, db):
+        """Regression: the new clause must not break the Sealed -> Superseded
+        arc, which is the only writer of this column."""
+        old, new = _superseded(db)
+        assert reg.is_citable(db, old)
+
+
+class TestGuardUpgradeOnExistingStores:
+    """The guard is DROPped and recreated, so a store built under an older
+    schema gains the new clauses. Created IF NOT EXISTS, it would not."""
+
+    def test_schema_drops_before_creating_the_guard(self):
+        src = (ROOT / "research" / "dataset_builder" / "registry.py").read_text()
+        drop = src.index("DROP TRIGGER IF EXISTS trg_dataset_specifications_guard_update")
+        create = src.index("CREATE TRIGGER trg_dataset_specifications_guard_update")
+        assert drop < create
+
+    def test_guard_is_not_created_if_not_exists(self):
+        src = (ROOT / "research" / "dataset_builder" / "registry.py").read_text()
+        assert (
+            "CREATE TRIGGER IF NOT EXISTS trg_dataset_specifications_guard_update"
+            not in src
+        )
+
+    def test_an_old_store_gains_the_new_clauses(self, tmp_path):
+        """Simulates a pre-fix database: install the weaker guard by hand, then
+        re-run init_db and prove the mutation is refused afterwards."""
+        p = tmp_path / "old_store.db"
+        reg.init_db(p)
+        con = sqlite3.connect(str(p))
+        con.executescript(
+            "DROP TRIGGER trg_dataset_specifications_guard_update;\n"
+            "CREATE TRIGGER trg_dataset_specifications_guard_update\n"
+            "BEFORE UPDATE ON dataset_specifications\n"
+            "BEGIN\n"
+            "    SELECT CASE\n"
+            "        WHEN NEW.spec_hash IS NOT OLD.spec_hash\n"
+            "            THEN RAISE(ABORT, 'DATASET_TAMPER: spec_hash is immutable')\n"
+            "    END;\n"
+            "END;"
+        )
+        con.commit()
+        h = reg.declare_dataset(
+            p, valid_declaration(), lineage="old", declared_by="rohith"
+        ).spec_hash
+        reg.reject(p, h, "Declared", "original reason")
+
+        con.execute(
+            "UPDATE dataset_specifications SET rejection_reason = 'erased' "
+            "WHERE spec_hash = ?", (h,)
+        )
+        con.commit()
+        con.close()
+        assert reg.get_specification(p, h)["rejection_reason"] == "erased"
+
+        reg.init_db(p)
+
+        con = sqlite3.connect(str(p))
+        with pytest.raises(sqlite3.IntegrityError, match="rejection_reason is write-once"):
+            con.execute(
+                "UPDATE dataset_specifications SET rejection_reason = 'again' "
+                "WHERE spec_hash = ?", (h,)
+            )
+        con.close()
+
+    def test_reinstalling_the_guard_preserves_every_row(self, tmp_path):
+        p = tmp_path / "reinit.db"
+        reg.init_db(p)
+        h = _rejected(p)
+        before = reg.get_specification(p, h)
+        reg.init_db(p)
+        assert reg.get_specification(p, h) == before
+
+
+class TestAF1TV3:
+    """Non-vacuity: these must fail if the new clauses are removed."""
+
+    def test_both_columns_are_named_in_the_guard(self):
+        src = (ROOT / "research" / "dataset_builder" / "registry.py").read_text()
+        guard = src[src.index("CREATE TRIGGER trg_dataset_specifications_guard_update"):]
+        guard = guard[:guard.index("END;")]
+        assert "OLD.rejection_reason IS NOT NULL" in guard
+        assert "OLD.superseded_by IS NOT NULL" in guard
+
+    def test_the_six_original_protections_are_intact(self, db):
+        """Regression: the audit's fix must not weaken what already worked."""
+        h = reg.declare_dataset(
+            db, valid_declaration(), lineage="af1-orig", declared_by="rohith"
+        ).spec_hash
+        con = sqlite3.connect(str(db))
+        for col, val in (("spec_hash", "'z'"), ("declaration_json", "'{}'"),
+                         ("lineage", "'other'"), ("version_ordinal", "99"),
+                         ("declared_by", "'someone'"), ("declared_at", "'2020-01-01'")):
+            with pytest.raises(sqlite3.IntegrityError, match="DATASET_TAMPER"):
+                con.execute(
+                    f"UPDATE dataset_specifications SET {col} = {val} "
+                    "WHERE spec_hash = ?", (h,)
+                )
+        con.close()
+
+    def test_delete_is_still_forbidden(self, db):
+        h = _rejected(db)
+        con = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            con.execute("DELETE FROM dataset_specifications WHERE spec_hash = ?", (h,))
+        con.close()
