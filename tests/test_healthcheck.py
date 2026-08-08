@@ -624,3 +624,131 @@ def test_cli_feature_store_check_reads_its_own_label(tmp_path: Path, monkeypatch
     check = next(c for c in summary["checks"] if c["name"] == "feature_store_backup")
     assert check["severity"] == hc.WARNING
     assert check["newest_backup"].startswith("feature_store_")
+
+
+# ---------------------------------------------------------------------------
+# AF-4 -- a fresh backup of an EMPTY database must not report OK
+#
+# Freshness alone cannot distinguish a healthy backup from a backup of nothing.
+# On EC2 `feature_store.db` and `label_store.db` are zero-table placeholder
+# files, so before this fix a fresh backup of one reported OK -- a green signal
+# for a store holding no data.
+#
+# INFO, not WARNING: an empty optional store is a normal state on a host where
+# its research process never ran, and INFO can never escalate `overall` or send
+# Telegram (the PROD-2 discipline).
+# ---------------------------------------------------------------------------
+
+
+def _backup_of(tmp_path: Path, tables: dict, label: str = "feature_store"):
+    """Produce a real backup + manifest from a database with given contents."""
+    import sqlite3
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "backup_for_af4", Path(__file__).resolve().parent.parent / "scripts" / "backup.py"
+    )
+    backup = importlib.util.module_from_spec(spec)
+    sys.modules["backup_for_af4"] = backup
+    spec.loader.exec_module(backup)
+
+    src = tmp_path / f"{label}.db"
+    con = sqlite3.connect(str(src))
+    for t, n in tables.items():
+        con.execute(f'CREATE TABLE "{t}" (id INTEGER PRIMARY KEY)')
+        for _ in range(n):
+            con.execute(f'INSERT INTO "{t}" VALUES (NULL)')
+    con.commit()
+    con.close()
+
+    bdir = tmp_path / f"{label}-backups"
+    backup.run_backup(src, bdir, dry_run=False, db_label=label)
+    return bdir
+
+
+def test_af4_empty_database_backup_is_info_not_ok(tmp_path: Path):
+    """The defect: a zero-table database produced a fresh, healthy-looking backup."""
+    bdir = _backup_of(tmp_path, {})
+    r = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    assert r.severity == hc.INFO
+    assert "EMPTY" in r.message
+    assert r.detail["rows"] == 0
+
+
+def test_af4_tables_present_but_all_empty_is_also_info(tmp_path: Path):
+    """A schema with no rows is just as empty for recovery purposes."""
+    bdir = _backup_of(tmp_path, {"feature_specifications": 0})
+    r = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    assert r.severity == hc.INFO
+    assert r.detail["rows"] == 0
+
+
+def test_af4_populated_database_is_still_ok(tmp_path: Path):
+    """Regression: the fix must not downgrade a genuinely healthy backup."""
+    bdir = _backup_of(tmp_path, {"feature_specifications": 17, "governance_receipts": 17})
+    r = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    assert r.severity == hc.OK
+    assert r.detail["rows"] == 34
+    assert "34 rows" in r.message
+
+
+def test_af4_missing_manifest_is_not_read_as_empty(tmp_path: Path):
+    """Absence of evidence is not evidence of absence.
+
+    An unreadable manifest must yield `None`, never 0 -- otherwise deleting a
+    manifest would make a healthy backup look empty.
+    """
+    bdir = _backup_of(tmp_path, {"feature_specifications": 17})
+    for m in bdir.glob("*.manifest.json"):
+        m.unlink()
+    r = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    assert r.severity == hc.OK
+    assert r.detail["rows"] is None
+
+
+def test_af4_corrupt_manifest_is_not_read_as_empty(tmp_path: Path):
+    bdir = _backup_of(tmp_path, {"feature_specifications": 17})
+    for m in bdir.glob("*.manifest.json"):
+        m.write_text("{not json", encoding="utf-8")
+    r = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    assert r.severity == hc.OK
+    assert r.detail["rows"] is None
+
+
+def test_af4_staleness_still_outranks_emptiness(tmp_path: Path):
+    """A stale backup is the more urgent signal and must stay WARNING.
+
+    An empty backup is INFO; a stale one is WARNING. If a backup is both, the
+    operator needs to hear about the staleness.
+    """
+    bdir = tmp_path / "feature-store-backups"
+    f = _touch_backup(bdir, "feature_store", "20260701_020000",
+                      age_hours=hc.BACKUP_WARN_HOURS + 1)
+    (bdir / (f.stem + ".manifest.json")).write_text(
+        json.dumps({"row_counts": {}}), encoding="utf-8")
+    r = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    assert r.severity == hc.WARNING
+    assert "stale" in r.message
+
+
+def test_af4_empty_backup_never_escalates_overall(tmp_path: Path):
+    """INFO must not raise `overall` -- the PROD-2 trust-in-the-signal rule."""
+    assert hc._RANK[hc.INFO] < hc._RANK[hc.WARNING]
+    assert hc._RANK[hc.INFO] < hc._RANK[hc.CRITICAL]
+
+
+def test_af4_applies_to_every_labelled_store(tmp_path: Path):
+    """The check is shared, so the fix must hold for all labels, not just one."""
+    for label in ("ledger", "label_store", "dataset_builder", "btc_trading"):
+        sub = tmp_path / label
+        sub.mkdir(parents=True, exist_ok=True)
+        bdir = _backup_of(sub, {}, label=label)
+        r = hc.check_backup_freshness(bdir, label=label, check_name=f"{label}_backup")
+        assert r.severity == hc.INFO, label
+        assert r.detail["rows"] == 0, label

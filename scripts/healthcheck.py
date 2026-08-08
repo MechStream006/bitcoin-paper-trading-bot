@@ -290,11 +290,54 @@ def check_backup_freshness(
             f">= {BACKUP_WARN_HOURS}h)",
             detail,
         )
+
+    # AF-4. Freshness alone cannot tell a healthy backup from a backup of an
+    # empty database. On EC2 `feature_store.db` and `label_store.db` exist as
+    # zero-table placeholder files, so a fresh backup of one reported OK -- a
+    # green signal for a store holding nothing.
+    #
+    # The row counts are already recorded in the sibling manifest by
+    # `backup.py`, so this reads evidence that exists rather than re-opening
+    # the database. INFO, not WARNING: an empty optional store is a normal
+    # state on a host where its research process never ran, and INFO ranks
+    # below WARNING so it can never escalate `overall` or send Telegram --
+    # the same discipline PROD-2 applied above.
+    rows = _manifest_row_total(newest)
+    detail["rows"] = rows
+    if rows == 0:
+        return CheckResult(
+            check_name, INFO,
+            f"backup fresh but EMPTY: {newest.name} ({age_hours:.1f}h ago, "
+            f"0 rows) — the source database contains no data",
+            detail,
+        )
+
     return CheckResult(
         check_name, OK,
+        f"backup OK: {newest.name} ({age_hours:.1f}h ago, {rows} rows)"
+        if rows is not None else
         f"backup OK: {newest.name} ({age_hours:.1f}h ago)",
         detail,
     )
+
+
+def _manifest_row_total(backup_file: Path) -> int | None:
+    """Total rows recorded in a backup's sibling manifest, or None if unknown.
+
+    None means "no evidence either way" -- a missing or unreadable manifest, or
+    one written before row counts were recorded. Callers must not treat None as
+    zero: an unreadable manifest is not proof of an empty database.
+    """
+    manifest = backup_file.parent / (backup_file.stem + ".manifest.json")
+    if not manifest.exists():
+        return None
+    try:
+        counts = json.loads(manifest.read_text(encoding="utf-8")).get("row_counts")
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(counts, dict):
+        return None
+    return sum(v for v in counts.values() if isinstance(v, int))
 
 
 def check_offhost_freshness(
