@@ -162,6 +162,22 @@ def _all_forward_rows(db_path, spec_hash: str, subject_ids: list[str] | None = N
     return [dict(r) for r in rows]
 
 
+def list_subject_ids(db_path, spec_hash: str) -> list[dict]:
+    """Every declared subject for `spec_hash`, regardless of maturity state.
+
+    `request_fully_matured()` deliberately returns only the matured-or-later
+    subset (§16.3) -- a caller that needs to know what exists *before*
+    checking maturity (e.g. to determine which subjects a declared window
+    actually covers) has no other way to see the un-matured ones. This is
+    pure enumeration: no maturity judgement, no admissibility computation,
+    nothing this module's own refusal machinery does not already expose one
+    call away.
+    """
+    rows = _all_forward_rows(db_path, spec_hash)
+    return [{"subject_id": r["subject_id"], "declared_at": r["declared_at"],
+              "maturity_state": r["maturity_state"]} for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Tier D statistic 1: maturity fraction
 # ---------------------------------------------------------------------------

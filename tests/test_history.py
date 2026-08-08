@@ -24,6 +24,7 @@ for p in (ROOT / "research", ROOT / "research" / "admissibility",
         sys.path.insert(0, str(p))
 
 import receipt_ledger as rl  # noqa: E402
+from lattice import Provenance  # noqa: E402
 
 from dataset_builder import citation_index as ci  # noqa: E402
 from dataset_builder import experiments as ex  # noqa: E402
@@ -36,7 +37,7 @@ from dataset_builder import training as tr  # noqa: E402
 from dataset_builder import validation as val  # noqa: E402
 from tests.test_dataset_registry import valid_declaration  # noqa: E402
 from tests.test_dataset_resolution import good_resolver  # noqa: E402
-from tests.test_dataset_validation import good_inputs  # noqa: E402
+from tests.test_dataset_validation import adm, good_inputs  # noqa: E402
 from tests.test_materialisation import rich_provider  # noqa: E402
 from tests.test_training import windowed_declaration  # noqa: E402
 
@@ -385,7 +386,7 @@ class TestRetirement:
                                    ("2025-01-01", "2025-05-31", "hold")))
         for spec, role in ((a, "train"), (b, "validation"), (c, "holdout")):
             tr.register_partition(db, spec, sibling_group="g", role=role,
-                                  registered_by="rohith")
+                                  registered_by="rohith", computed_meet=adm(p=Provenance.MAINNET))
         tr.consume_holdout(db, c, decision_ref="promo-1")
         with pytest.raises(hist.RetirementRefused, match="promo-1"):
             hist.retire_dataset(db, c, actor="rohith")
@@ -393,7 +394,7 @@ class TestRetirement:
     def test_retirement_refuses_when_cited_by_a_model(self, db, ledger):
         h = _pinned(db, ledger)
         tr.register_partition(db, h, sibling_group="g", role="train",
-                              registered_by="rohith")
+                              registered_by="rohith", computed_meet=adm(p=Provenance.MAINNET))
         with pytest.raises(hist.RetirementRefused, match="DG-5"):
             hist.retire_dataset(db, h, actor="rohith")
 

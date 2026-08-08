@@ -98,7 +98,38 @@ def _three_partitions(db, ledger):
 
 def _register(db, h, role, group=GROUP, **kw):
     kw.setdefault("registered_by", "rohith")
+    # computed_meet is mandatory on register_partition() (TD-4.10-1, closed
+    # WBS 4.12) -- most of this file's 58 calls test something other than
+    # admissibility and were written when the argument was optional. A
+    # trivially-passing top-rung default here (MAINNET, satisfies any
+    # declared floor) keeps them unaffected; the handful of tests that
+    # exercise RF4 specifically already pass their own computed_meet, which
+    # this setdefault does not override.
+    kw.setdefault("computed_meet", adm(p=Provenance.MAINNET))
     return tr.register_partition(db, h, sibling_group=group, role=role, **kw)
+
+
+# ===========================================================================
+# TD-4.10-1 (closed, WBS 4.12) — computed_meet is mandatory
+# ===========================================================================
+
+class TestComputedMeetIsMandatory:
+    """`TD-4.10-1`: `computed_meet` was optional, so a caller could silently
+    skip the RF4 gate. WBS 4.12 makes it a required keyword-only argument —
+    proven here at the language level, not by a runtime check that could
+    itself be bypassed."""
+
+    def test_omitting_computed_meet_raises_type_error(self, db, ledger):
+        h = _pinned(db, ledger)
+        with pytest.raises(TypeError, match="computed_meet"):
+            tr.register_partition(
+                db, h, sibling_group=GROUP, role="train", registered_by="rohith",
+            )
+
+    def test_register_partition_signature_has_no_default_for_computed_meet(self):
+        import inspect
+        sig = inspect.signature(tr.register_partition)
+        assert sig.parameters["computed_meet"].default is inspect.Parameter.empty
 
 
 # ===========================================================================
@@ -268,7 +299,7 @@ class TestPartitionStructure:
         h = _pinned(db, ledger)
         with pytest.raises(tr.TrainingError, match="registered_by"):
             tr.register_partition(db, h, sibling_group=GROUP, role="train",
-                                  registered_by="")
+                                  registered_by="", computed_meet=adm(p=Provenance.MAINNET))
 
     def test_idempotent(self, db, ledger):
         a, _, _ = _three_partitions(db, ledger)

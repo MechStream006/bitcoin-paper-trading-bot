@@ -702,3 +702,61 @@ def resolve_and_validate(
         db_path, spec_hash, inputs, declared_floor=declared_floor, stats=stats
     )
     return resolution_report, validation_report
+
+
+def validate_with_derivation(
+    db_path: Path | str,
+    spec_hash: str,
+    *,
+    feature_store_db,
+    label_store_db,
+    raw_dir,
+    declared_floor: Admissibility | None = None,
+    stats: DatasetStatistics | None = None,
+) -> ValidationReport:
+    """WBS 4.12 (`TD-4.4-3`) — derives `inputs` via
+    `dataset_builder.admissibility_derivation.derive_inputs()` instead of
+    accepting them caller-supplied, then runs `validate()` **unchanged**.
+    `validate()`, `compose_admissibility()`, `satisfies()`, `check_tier_c()`
+    are not modified by this function's existence.
+
+    A label input that cannot be honestly derived — no governed per-value
+    data in the declared window (`NoGovernedLabelDataForWindowError`), or
+    what exists does not satisfy the declaration's stated maturity
+    requirement (`set_hygiene.PartialMaturityRefusalError`, mirroring RF5) —
+    becomes a persisted `TC4` finding: `registry.reject()` is called
+    **before** the refusal propagates, exactly as every other refusal in
+    this pipeline already does (see `resolve()`'s own `reg.reject()` call,
+    and this module's own `validate()` at line ~682). `OD-10B`, ratified
+    2026-08-09, requires this — a bare, unpersisted exception would bypass
+    `P4-D3`'s discipline (the `LS-TD-002` failure mode).
+
+    `TC4` was reserved but unused in `Finding`'s own field comment
+    (`code: str  # RF4, TB1-TB4, TC1-TC4, TD1-TD5`) before this addition.
+    """
+    from dataset_builder import admissibility_derivation as ad
+    from label_store import set_hygiene as sh
+
+    spec = reg.get_specification(db_path, spec_hash)
+    if spec is None:
+        raise ValidationError(f"no such specification: {spec_hash}")
+
+    try:
+        inputs = ad.derive_inputs(
+            spec["declaration"],
+            feature_store_db=feature_store_db,
+            label_store_db=label_store_db,
+            raw_dir=raw_dir,
+        )
+    except (ad.NoGovernedLabelDataForWindowError, sh.PartialMaturityRefusalError) as exc:
+        finding = Finding(
+            code="TC4", tier="C",
+            adr_clause="ADR-I012 §12 Tier C (governed admissibility ceiling derivable)",
+            fields=("label_references",),
+            detail=str(exc),
+            blocking=True,
+        )
+        reg.reject(db_path, spec_hash, "Resolved", f"[TC4/C] {exc}")
+        raise ValidationRefused(spec_hash, [finding]) from exc
+
+    return validate(db_path, spec_hash, inputs, declared_floor=declared_floor, stats=stats)

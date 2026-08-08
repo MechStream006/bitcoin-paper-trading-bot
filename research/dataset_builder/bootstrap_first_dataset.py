@@ -38,9 +38,6 @@ for _p in (ROOT / "research", ROOT / "research" / "admissibility",
         sys.path.insert(0, str(_p))
 
 import receipt_ledger as rl  # noqa: E402
-from lattice import (  # noqa: E402
-    Admissibility, Certification, Integrity, Maturity, Provenance, Readiness,
-)
 
 from dataset_builder import citation_index as ci  # noqa: E402
 from dataset_builder import history as hist  # noqa: E402
@@ -85,12 +82,14 @@ LABEL_HORIZON = 5
 
 EVIDENCE_SOURCES = ("dvol", "spot")
 
+#: Used only to populate the declaration's own `required_certification_verdict`
+#: field (a researcher-facing claim in `build_declaration()`/`scan_corpus()`)
+#: -- not for computing any InputAdmissibility ceiling. Ceiling derivation is
+#: WBS 4.12's `admissibility_derivation.py`, which reads the real
+#: `Certification`/`Readiness` lattice ordering directly and does not use
+#: these dicts.
 _CERT_ORDER = {"RED": 1, "AMBER": 2, "GREEN": 3}
-_CERT_ENUM = {"RED": Certification.RED, "AMBER": Certification.AMBER,
-              "GREEN": Certification.GREEN}
 _READY_ORDER = {"NOT_READY": 1, "PARTIAL": 2, "READY": 3}
-_READY_ENUM = {"NOT_READY": Readiness.NOT_READY, "PARTIAL": Readiness.PARTIAL,
-               "READY": Readiness.READY}
 
 
 def _iso(ms: int) -> str:
@@ -166,18 +165,6 @@ def active_specs() -> tuple[dict, dict]:
     return feats, labs
 
 
-def _sources_of(feature_row: dict) -> set[str]:
-    """Which corpus sources a feature actually reads, from its own spec."""
-    reqs = json.loads(feature_row["input_requirements_json"] or "[]")
-    out = set()
-    for r in reqs:
-        s = str(r.get("source", ""))
-        for known in EVIDENCE_SOURCES + ("funding", "perp"):
-            if s.startswith(known):
-                out.add(known)
-    return out
-
-
 def build_declaration(corpus: dict, feats: dict, labs: dict) -> dict:
     missing = [n for n in FEATURE_NAMES if n not in feats]
     if missing:
@@ -242,69 +229,6 @@ def build_declaration(corpus: dict, feats: dict, labs: dict) -> dict:
     }
 
 
-def build_inputs(corpus: dict, feats: dict, labs: dict) -> list:
-    """Honest per-input ceilings, derived from the real corpus, not asserted.
-
-    A feature's ceiling cannot exceed the meet of the sources it reads —
-    `rv30` computed on AMBER spot is not GREEN because its own specification
-    is Active.
-    """
-    inputs = []
-
-    for s in EVIDENCE_SOURCES:
-        a = corpus[s]
-        inputs.append(val.InputAdmissibility(
-            kind="evidence",
-            reference=s,
-            ceiling=Admissibility(
-                Provenance.OFFLINE_CORPUS,
-                _CERT_ENUM[a["cert_meet"]],
-                _READY_ENUM[a["ready_meet"]],
-                Maturity.FULL,
-                Integrity.CLEAN,
-            ),
-            certification_verdict=a["cert_meet"],
-            lane="offline-corpus",
-            window=(a["min"], a["max"]),
-        ))
-
-    for name in FEATURE_NAMES:
-        row = feats[name]
-        srcs = _sources_of(row) or set(EVIDENCE_SOURCES)
-        known = [s for s in srcs if s in corpus]
-        cert = min((corpus[s]["cert_meet"] for s in known),
-                   key=lambda k: _CERT_ORDER.get(k, 0)) if known else "RED"
-        ready = min((corpus[s]["ready_meet"] for s in known),
-                    key=lambda k: _READY_ORDER.get(k, 0)) if known else "NOT_READY"
-        inputs.append(val.InputAdmissibility(
-            kind="feature",
-            reference=row["spec_hash"],
-            ceiling=Admissibility(
-                Provenance.OFFLINE_CORPUS, _CERT_ENUM[cert], _READY_ENUM[ready],
-                Maturity.FULL, Integrity.CLEAN,
-            ),
-            lane="offline-corpus",
-            window=(WINDOW_START, WINDOW_END),
-        ))
-
-    lab = labs[(LABEL_NAME, LABEL_HORIZON)]
-    spot = corpus["spot"]
-    inputs.append(val.InputAdmissibility(
-        kind="label",
-        reference=lab["spec_hash"],
-        ceiling=Admissibility(
-            Provenance.OFFLINE_CORPUS,
-            _CERT_ENUM[spot["cert_meet"]],
-            _READY_ENUM[spot["ready_meet"]],
-            Maturity.FULL,
-            Integrity.CLEAN,
-        ),
-        lane="offline-corpus",
-        window=(WINDOW_START, WINDOW_END),
-    ))
-    return inputs
-
-
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commit", action="store_true",
@@ -325,7 +249,6 @@ def main(argv=None) -> int:
               f"{a['revision']}")
 
     declaration = build_declaration(corpus, feats, labs)
-    inputs = build_inputs(corpus, feats, labs)
     expected = reg.declaration_hash(declaration)
     print(f"\n[2] Declaration built — {len(declaration['feature_references'])} features, "
           f"{len(declaration['label_references'])} label, "
@@ -374,7 +297,10 @@ def main(argv=None) -> int:
     print(f"    resolve  -> Resolved   {len(rep.resolved)} references bound, "
           f"{len(rep.refusals)} refusals, pins={list(rep.pinned_revisions)}")
 
-    vrep = val.validate(STORE, spec_hash, inputs)
+    vrep = val.validate_with_derivation(
+        STORE, spec_hash,
+        feature_store_db=FEATURE_STORE, label_store_db=LABEL_STORE, raw_dir=RAW,
+    )
     print(f"    validate -> Validated  meet={vrep.computed_meet}")
     print(f"                           capped={vrep.capped_admissibility}")
 

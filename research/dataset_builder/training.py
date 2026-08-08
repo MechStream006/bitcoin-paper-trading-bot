@@ -360,7 +360,7 @@ def register_partition(
     role: str,
     registered_by: str,
     inputs=None,
-    computed_meet: Admissibility | None = None,
+    computed_meet: Admissibility,
 ) -> TrainingPartition:
     """Register one sealed dataset as a Training Dataset partition.
 
@@ -372,9 +372,9 @@ def register_partition(
     3. **Pinned** — §15 makes materialisation *required and pinned*; exact-bytes
        recoverability is meaningless without a pin (WBS 4.8).
     4. **RF4** — the forward-lane floor, decided by `validation.check_tier_c()`,
-       never here. Skipped only when the caller supplies no meet, in which case
-       the admissibility obligation is explicitly *not* discharged and the
-       caller is told so by `AdmissibilityFloorError` at the point it matters.
+       never here. `computed_meet` is **mandatory** (`TD-4.10-1`, closed WBS
+       4.12): a caller can no longer omit it to silently skip this check —
+       Python itself refuses the call if it is not supplied.
     5. **Non-overlap** with every already-registered sibling (§15.1).
 
     A Training Dataset is therefore constructible **only** through the governed
@@ -409,14 +409,13 @@ def register_partition(
             f"nothing to recover to without a pin"
         )
 
-    if computed_meet is not None:
-        rf4 = check_training_admissibility(
-            spec["declaration"], inputs or [], computed_meet)
-        if rf4:
-            raise AdmissibilityFloorError(
-                f"RF4 refuses {spec_hash[:12]}... as a Training Dataset: "
-                + "; ".join(f.detail for f in rf4)
-            )
+    rf4 = check_training_admissibility(
+        spec["declaration"], inputs or [], computed_meet)
+    if rf4:
+        raise AdmissibilityFloorError(
+            f"RF4 refuses {spec_hash[:12]}... as a Training Dataset: "
+            + "; ".join(f.detail for f in rf4)
+        )
 
     scope = spec["declaration"].get("temporal_scope") or {}
     window = (str(scope.get("window_start") or ""), str(scope.get("window_end") or ""))
