@@ -34,7 +34,7 @@ Severities are as recorded by the owning milestone: 🔴 High · 🟡 Medium · 
 | `TD-4.3-4` | `_MATURITY_DEMANDING` is a fixed vocabulary | 🟢 | `wbs-4.3` |
 | `TD-4.4-1` | TB1 unreachable through the normal path — Tier A refuses first | 🟡 | `wbs-4.4` |
 | `TD-4.4-2` | Tier D thresholds are module constants | 🟡 | `wbs-4.4` |
-| **`TD-4.4-3`** | **`InputAdmissibility` is caller-supplied; nothing derives it from resolved references.** ⛔ *2026-08-08 — accepted with a binding condition ([`OD-6`](verification/records/owner-decision-pack-2026-08-08.md)): MUST resolve before any Phase 5 code path invokes the Dataset Builder. 🔶 *2026-08-09 — resolution authority RATIFIED ([`OD-10`](verification/records/od-10-td-4-4-3-ratification.md)); implementation not started; still open* | 🟡 | `wbs-4.4`, `wbs-4.12` |
+| **`TD-4.4-3`** | ✅ **RESOLVED 2026-08-09**, commit `c6d00b0`. `InputAdmissibility` is derived from resolved references via `research/dataset_builder/admissibility_derivation.py`, under the ratified [`OD-10A`/`OD-10B`/`OD-10C`](verification/records/od-10-td-4-4-3-ratification.md). Feature ceilings composed from real governed manifests, independent of `propagation.py` (`OD-10A`); label ceilings aggregated through `set_hygiene.set_admissibility_ceiling()`, with missing/non-derivable governed label data producing a persisted `TC4` rejection before the refusal propagates (`OD-10B`). Independently verified — [WBS 4.12 record](verification/records/wbs-4.12-td-4-4-3-admissibility-derivation.md), §§9–10 | 🟡 | `wbs-4.4`, `wbs-4.12` |
 | `TD-4.4-4` | `check_tier_a` re-runs registry Tier A, so findings all carry `TA1` | 🟢 | `wbs-4.4` |
 | **`TD-4.5-1`** | **Seal receipt and sealed row are in different databases — not one transaction** | 🔴 | `wbs-4.5` |
 | `TD-4.5-2` | Already-sealed check unreachable — the phase guard fires first | 🟢 | `wbs-4.5` |
@@ -54,7 +54,7 @@ Severities are as recorded by the owning milestone: 🔴 High · 🟡 Medium · 
 | **`TD-4.9-2`** | **`trial_registration` is free text — a typo creates a phantom independent trial** | 🔴 | `wbs-4.9` |
 | `TD-4.9-3` | Denominator gaps reported as information, not error | 🟢 | `wbs-4.9` |
 | `TD-4.9-4` | `USE_PURPOSES` is a module constant | 🟢 | `wbs-4.9` |
-| **`TD-4.10-1`** | **`computed_meet` optional on `register_partition()` — omitting it skips the RF4 gate** | 🔴 | `wbs-4.10` |
+| **`TD-4.10-1`** | ✅ **RESOLVED 2026-08-09**, commit `c6d00b0`. `computed_meet` is now a mandatory keyword-only argument on `register_partition()` (no default) — a caller omitting it raises `TypeError` at the language level rather than silently skipping the RF4 gate. Enabled by `TD-4.4-3`'s resolution (the meet is now derivable, per the ordering constraint below) | 🔴 | `wbs-4.10` |
 | `TD-4.10-2` | Non-overlap verified between declared windows, not materialised content | 🟡 | `wbs-4.10` |
 | `TD-4.10-3` | Sibling-group completeness never enforced before use | 🟡 | `wbs-4.10` |
 | `TD-4.10-4` | `windows_overlap` treats an unparseable date as non-overlapping | 🟢 | `wbs-4.10` |
@@ -69,12 +69,26 @@ Severities are as recorded by the owning milestone: 🔴 High · 🟡 Medium · 
 | `TD-4.12-4` | *(Resolved 2026-08-08, `dd75aeb`)* `feature_store.db` had no backup path at all | 🔴 | `phase-4-governance-completion-package` |
 | `TD-4.12-5` | *(Resolved 2026-08-08)* Three WBS 4.0 records had no reviewer signature block | 🟡 | `phase-4-governance-completion-package` |
 
-**Eight High-severity items open.** One ordering constraint: **`TD-4.4-3` must be
-resolved before `TD-4.10-1`** — making `computed_meet` mandatory requires the
-meet to be derivable rather than supplied. **`TD-4.4-3` additionally carries a
-binding Phase 5 entry pre-condition since 2026-08-08** ([`OD-6`](verification/records/owner-decision-pack-2026-08-08.md)):
-it must resolve before any Phase 5 code path invokes the Dataset Builder,
-independent of the `TD-4.10-1` ordering constraint.
+**Six High-severity items open** *(updated 2026-08-09 — was "eight"; `TD-4.10-1`
+resolved this date, `TD-4.12-4` already resolved 2026-08-08 but not previously
+reflected in this count)*: `TD-4.5-1`, `TD-4.7-1`, `TD-4.8-1`, `TD-4.9-2`,
+`TD-4.11-3`, `TD-4.12-1`.
+
+**The `TD-4.4-3` → `TD-4.10-1` ordering constraint is discharged**: both
+resolved together, commit `c6d00b0`, 2026-08-09 — `computed_meet` could only
+be made mandatory once the meet was derivable, per `TD-4.4-3`'s own
+resolution. `TD-4.4-3`'s binding Phase 5 entry pre-condition
+([`OD-6`](verification/records/owner-decision-pack-2026-08-08.md): must
+resolve before any Phase 5 code path invokes the Dataset Builder) is
+likewise satisfied — the derivation authority is ratified (`OD-10A`/`OD-10B`)
+and implemented (commit `c6d00b0`), independently verified before this
+closure. See the [WBS 4.12 record](verification/records/wbs-4.12-td-4-4-3-admissibility-derivation.md)
+for full evidence. Two items carried forward as future debt, not closure
+blockers: `NoGovernedEvidenceForWindowError` is not yet converted to a
+persisted rejection (evidence-side, out of `TD-4.4-3`'s scope); a
+successfully-derived label input inherits `propagation.py`'s permanent
+`Readiness.UNKNOWN`, so `TC3` will fire for it (a correct consequence of
+reusing the existing, unmodified label authority — `OD-10B`).
 
 ## 3. Hazards — 19 items
 
