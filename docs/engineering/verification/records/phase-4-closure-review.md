@@ -14,6 +14,13 @@
 
 ---
 
+> **Correction notice (2026-08-08).** §3's `P4-9` finding — *"only one ledger
+> carries governance receipts"* — is **wrong**; it was derived from the wrong
+> files. Three chains exist and all verify clean. See
+> [Governance Closure Report §0 and §12](phase-4-governance-closure-report.md),
+> which also supersedes §8 item 1's deployment framing. Left in place, not
+> rewritten.
+
 ## 0. Update — 2026-08-08, operational closure
 
 **`P4-1` is now MET.** This section is appended rather than rewritten: §3's

@@ -13,6 +13,16 @@
 
 ---
 
+> **Correction notice (2026-08-08).** Two findings in this audit were later
+> proven wrong and are corrected in the
+> [Governance Closure Report §0](phase-4-governance-closure-report.md):
+> **(C-1)** §9's *"only one ledger carries governance receipts"* — three chains
+> exist and all verify clean (27 / 17 / 8); the original check read the wrong
+> files. **(C-2)** §9's framing of the production divergence as a one-receipt
+> gap closable by deployment — production's Feature and Label stores are empty
+> files, so the divergence is structural and no deployment closes it. The
+> statements below are left in place rather than rewritten.
+
 ## 1. Scope of this audit
 
 This audit covers Phase 4 end to end: twelve WBS rows, the ADR clauses each
