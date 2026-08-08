@@ -63,6 +63,35 @@ sudo -u btcbot /opt/btcbot/venv/bin/python scripts/backup.py \
     --backup-dir /opt/btcbot/data/backups
 ```
 
+### Per-store flags
+
+`--all` covers every store below. Each flag may also be used alone, in which
+case only that store is backed up.
+
+| Flag | Database | Backup directory |
+|---|---|---|
+| *(no flag)* | `data/btc_trading.db` | `data/backups/` |
+| `--evidence` | `research/data/forward_evidence.db` | `data/evidence-backups/` |
+| `--fwd-hg` | `research/data/evidence_forward.db` | `data/evidence-fwd-backups/` |
+| `--ledger` | `research/evidence_library/ledger.db` | `data/ledger-backups/` |
+| `--label-store` | `research/label_store/label_store.db` | `data/label-store-backups/` |
+| `--dataset-builder` | `research/dataset_builder/dataset_builder.db` | `data/dataset-builder-backups/` |
+| `--feature-store` | `research/feature_store/feature_store.db` | `data/feature-store-backups/` |
+
+Only `btc_trading.db` is REQUIRED; its absence fails the run. The six research
+databases are OPTIONAL — a missing file is logged as SKIPPED and does not
+affect the exit code (PROD-1, 2026-08-06), because each is created by a
+research process that may legitimately never have run on a given host.
+
+Every store has a matching `check_backup_freshness` entry in
+`scripts/healthcheck.py` and in the read-only API's `runtime_health()`, and all
+are restorable through the same store-agnostic `scripts/restore.py`:
+
+```bash
+python scripts/restore.py data/feature-store-backups/feature_store_<ts>.db \
+    --db-path research/feature_store/feature_store.db --skip-service
+```
+
 Backup files: `data/backups/btc_trading_YYYYMMDD_HHMMSS.db`
 Manifests:    `data/backups/btc_trading_YYYYMMDD_HHMMSS.manifest.json`
 

@@ -57,6 +57,7 @@ def settings(tmp_path: Path) -> ApiSettings:
         ledger_backup_dir=tmp_path / "ledger-backups",
         label_store_backup_dir=tmp_path / "label-store-backups",
         dataset_builder_backup_dir=tmp_path / "dataset-builder-backups",
+        feature_store_backup_dir=tmp_path / "feature-store-backups",
         service_name="btcbot.service",
         log_level="INFO",
         cache_ttl_seconds=0.0,  # disable caching so tests see every call
@@ -722,6 +723,7 @@ class TestAgainstRealLedger:
             ledger_backup_dir=ROOT / "data" / "ledger-backups",
             label_store_backup_dir=ROOT / "data" / "label-store-backups",
             dataset_builder_backup_dir=ROOT / "data" / "dataset-builder-backups",
+            feature_store_backup_dir=ROOT / "data" / "feature-store-backups",
             service_name="btcbot.service", log_level="INFO", cache_ttl_seconds=0.0,
         )
         return TestClient(create_app(s))

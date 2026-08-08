@@ -276,6 +276,7 @@ def test_runtime_health_includes_ledger_backup_check(tmp_path: Path):
         ledger_backup_dir=ledger_backup_dir,
         label_store_backup_dir=tmp_path / "label-store-backups",
         dataset_builder_backup_dir=tmp_path / "dataset-builder-backups",
+        feature_store_backup_dir=tmp_path / "feature-store-backups",
         service_name="btcbot.service",
         log_level="INFO",
         cache_ttl_seconds=0.0,
@@ -317,6 +318,7 @@ def test_runtime_health_includes_label_store_backup_check(tmp_path: Path):
         ledger_backup_dir=tmp_path / "ledger-backups",
         label_store_backup_dir=label_store_backup_dir,
         dataset_builder_backup_dir=tmp_path / "dataset-builder-backups",
+        feature_store_backup_dir=tmp_path / "feature-store-backups",
         service_name="btcbot.service",
         log_level="INFO",
         cache_ttl_seconds=0.0,
@@ -417,3 +419,208 @@ def test_offhost_label_isolation_uses_own_directory(tmp_path: Path):
     )
     assert trading_result.severity == hc.OK
     assert ledger_result.severity == hc.CRITICAL
+
+
+# ---------------------------------------------------------------------------
+# Feature Store backup freshness -- operational-defect fix
+#
+# The Feature Store had no backup path at all, so it also had no freshness
+# check: nothing could have reported the gap. These mirror the Label Store's
+# checks exactly.
+# ---------------------------------------------------------------------------
+
+
+def test_feature_store_missing_dir_is_warning(tmp_path: Path):
+    result = hc.check_backup_freshness(
+        tmp_path / "feature-store-backups", label="feature_store",
+        check_name="feature_store_backup",
+    )
+    assert result.name == "feature_store_backup"
+    assert result.severity == hc.WARNING
+    assert "does not exist" in result.message
+
+
+def test_feature_store_no_matching_backups_is_warning(tmp_path: Path):
+    bdir = tmp_path / "feature-store-backups"
+    bdir.mkdir()
+    result = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    assert result.name == "feature_store_backup"
+    assert result.severity == hc.WARNING
+    assert "no backups found" in result.message
+
+
+def test_feature_store_fresh_backup_is_ok(tmp_path: Path):
+    bdir = tmp_path / "feature-store-backups"
+    _touch_backup(bdir, "feature_store", "20260808_020000", age_hours=1)
+    result = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    assert result.name == "feature_store_backup"
+    assert result.severity == hc.OK
+    assert result.detail["newest_backup"] == "feature_store_20260808_020000.db"
+
+
+def test_feature_store_stale_backup_is_warning(tmp_path: Path):
+    bdir = tmp_path / "feature-store-backups"
+    _touch_backup(bdir, "feature_store", "20260701_020000",
+                  age_hours=hc.BACKUP_WARN_HOURS + 1)
+    result = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    assert result.name == "feature_store_backup"
+    assert result.severity == hc.WARNING
+    assert "backup stale" in result.message
+
+
+def test_feature_store_label_does_not_pick_up_other_stores(tmp_path: Path):
+    """One directory, three labels. `feature_store` must match only its own.
+
+    `label_store_*` and `feature_store_*` share the `_store_` substring, so a
+    sloppier glob would cross-match and report a healthy Feature Store backup
+    that does not exist.
+    """
+    bdir = tmp_path / "mixed-backups"
+    _touch_backup(bdir, "label_store", "20260808_020000", age_hours=1)
+    _touch_backup(bdir, "dataset_builder", "20260808_020000", age_hours=1)
+    _touch_backup(bdir, "feature_store", "20260701_020000",
+                  age_hours=hc.BACKUP_WARN_HOURS + 1)
+
+    fs = hc.check_backup_freshness(
+        bdir, label="feature_store", check_name="feature_store_backup")
+    ls = hc.check_backup_freshness(
+        bdir, label="label_store", check_name="label_store_backup")
+
+    assert fs.severity == hc.WARNING
+    assert fs.detail["newest_backup"].startswith("feature_store_")
+    assert ls.severity == hc.OK
+    assert ls.detail["newest_backup"].startswith("label_store_")
+
+
+def test_feature_store_check_is_registered_in_the_cli(tmp_path: Path):
+    """The check must be wired into main(), not merely available.
+
+    The defect was one of absence, so a check that exists but is never
+    invoked would reproduce it exactly.
+    """
+    import inspect
+
+    src = inspect.getsource(hc.main)
+    assert "feature_store_backup" in src
+    assert "feature_store_backup_dir" in src
+
+
+def test_feature_store_cli_flag_exists_with_expected_default():
+    import inspect
+
+    src = inspect.getsource(hc.main)
+    assert "--feature-store-backup-dir" in src
+    assert "feature-store-backups" in src
+
+
+def test_runtime_health_includes_feature_store_backup_check(tmp_path: Path):
+    """CLI/API parity, established at P1 Increment 1 and preserved since.
+
+    A check present in the CLI but absent from the read-only API would let the
+    two disagree about backup health, which is the divergence that parity rule
+    exists to prevent.
+    """
+    from src.api.config import ApiSettings
+    from src.api import services
+
+    feature_store_backup_dir = tmp_path / "feature-store-backups"
+    _touch_backup(feature_store_backup_dir, "feature_store", "20260808_020000",
+                  age_hours=1)
+
+    settings = ApiSettings(
+        host="127.0.0.1",
+        port=9109,
+        token="t" * 40,
+        trading_db_path=tmp_path / "btc_trading.db",
+        forward_db_path=tmp_path / "evidence_forward.db",
+        ledger_db_path=tmp_path / "ledger.db",
+        registry_path=tmp_path / "registry.yaml",
+        thresholds_path=tmp_path / "thresholds.yaml",
+        backup_dir=tmp_path / "backups",
+        ledger_backup_dir=tmp_path / "ledger-backups",
+        label_store_backup_dir=tmp_path / "label-store-backups",
+        dataset_builder_backup_dir=tmp_path / "dataset-builder-backups",
+        feature_store_backup_dir=feature_store_backup_dir,
+        service_name="btcbot.service",
+        log_level="INFO",
+        cache_ttl_seconds=0.0,
+    )
+
+    result = services.runtime_health(settings)
+    names = [c["name"] for c in result["checks"]]
+    assert "feature_store_backup" in names
+
+    check = next(c for c in result["checks"] if c["name"] == "feature_store_backup")
+    assert check["severity"] == hc.OK
+
+
+def test_runtime_health_still_includes_every_other_backup_check(tmp_path: Path):
+    """Regression: adding a sixth check must not displace any existing one."""
+    from src.api.config import ApiSettings
+    from src.api import services
+
+    settings = ApiSettings(
+        host="127.0.0.1",
+        port=9109,
+        token="t" * 40,
+        trading_db_path=tmp_path / "btc_trading.db",
+        forward_db_path=tmp_path / "evidence_forward.db",
+        ledger_db_path=tmp_path / "ledger.db",
+        registry_path=tmp_path / "registry.yaml",
+        thresholds_path=tmp_path / "thresholds.yaml",
+        backup_dir=tmp_path / "backups",
+        ledger_backup_dir=tmp_path / "ledger-backups",
+        label_store_backup_dir=tmp_path / "label-store-backups",
+        dataset_builder_backup_dir=tmp_path / "dataset-builder-backups",
+        feature_store_backup_dir=tmp_path / "feature-store-backups",
+        service_name="btcbot.service",
+        log_level="INFO",
+        cache_ttl_seconds=0.0,
+    )
+
+    names = [c["name"] for c in services.runtime_health(settings)["checks"]]
+    for expected in ("backup", "ledger_backup", "label_store_backup",
+                     "dataset_builder_backup", "feature_store_backup",
+                     "offhost_backup", "ledger_offhost_backup"):
+        assert expected in names, expected
+
+
+def test_cli_feature_store_check_reads_its_own_label(tmp_path: Path, monkeypatch, capsys):
+    """End-to-end through `main()`: the registered check must use the right label.
+
+    Added after TV3: swapping the registered label to `label_store` failed
+    nothing, because the earlier tests called `check_backup_freshness`
+    directly and only grepped `main()`'s source. This drives the real CLI and
+    reads the emitted JSON, so a wrong label changes an observable value.
+
+    The directory holds a *fresh* `label_store_*` decoy and a *stale*
+    `feature_store_*` file, so a mis-labelled check reports OK instead of
+    WARNING -- the failure mode that matters, since it would claim a healthy
+    backup for a store that has none.
+    """
+    shared = tmp_path / "shared-backups"
+    _touch_backup(shared, "label_store", "20260808_020000", age_hours=1)
+    _touch_backup(shared, "feature_store", "20260701_020000",
+                  age_hours=hc.BACKUP_WARN_HOURS + 1)
+
+    import sqlite3
+
+    db = tmp_path / "btc_trading.db"
+    sqlite3.connect(str(db)).close()
+
+    monkeypatch.setattr(sys, "argv", [
+        "healthcheck.py",
+        "--db-path", str(db),
+        "--feature-store-backup-dir", str(shared),
+        "--no-telegram",
+        "--no-forward-check",
+    ])
+    hc.main()
+    summary = json.loads(capsys.readouterr().out)
+
+    check = next(c for c in summary["checks"] if c["name"] == "feature_store_backup")
+    assert check["severity"] == hc.WARNING
+    assert check["newest_backup"].startswith("feature_store_")

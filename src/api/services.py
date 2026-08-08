@@ -127,6 +127,10 @@ def runtime_health(settings) -> dict:
             check_name="label_store_backup", required=False,
         ),
         hc.check_backup_freshness(
+            settings.feature_store_backup_dir, label="feature_store",
+            check_name="feature_store_backup", required=False,
+        ),
+        hc.check_backup_freshness(
             settings.dataset_builder_backup_dir, label="dataset_builder",
             check_name="dataset_builder_backup", required=False,
         ),

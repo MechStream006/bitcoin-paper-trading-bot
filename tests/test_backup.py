@@ -90,9 +90,11 @@ def _setup_root(tmp: Path) -> None:
     (tmp / "data" / "evidence-fwd-backups").mkdir(parents=True, exist_ok=True)
     (tmp / "data" / "ledger-backups").mkdir(parents=True, exist_ok=True)
     (tmp / "data" / "label-store-backups").mkdir(parents=True, exist_ok=True)
+    (tmp / "data" / "feature-store-backups").mkdir(parents=True, exist_ok=True)
     (tmp / "research" / "data").mkdir(parents=True, exist_ok=True)
     (tmp / "research" / "evidence_library").mkdir(parents=True, exist_ok=True)
     (tmp / "research" / "label_store").mkdir(parents=True, exist_ok=True)
+    (tmp / "research" / "feature_store").mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -637,3 +639,265 @@ def test_retention_dry_run_does_not_delete_age_artifacts(tmp_path):
 
     assert old.exists()
     assert ciphertext.exists()
+
+
+# ---------------------------------------------------------------------------
+# Feature Store backup -- operational-defect fix
+#
+# `feature_store.db` held 17 Active Feature Specifications and 17
+# `feature.register` receipts with NO backup path of any kind: no flag, no
+# `run_backup()` call, and `--all` did not reach it. These tests mirror the
+# Label Store's exactly, because the requirement was identical operational
+# treatment, not a new mechanism.
+# ---------------------------------------------------------------------------
+
+_FEATURE_STORE_TABLES = {
+    "feature_definitions": 3, "feature_specifications": 17,
+    "governance_receipts": 17,
+}
+
+_sha256 = backup._sha256
+
+
+def _load_restore_module():
+    spec = importlib.util.spec_from_file_location(
+        "restore_module_fs", _SCRIPTS_DIR / "restore.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _feature_store_db(tmp_path: Path) -> Path:
+    return _make_db(
+        tmp_path / "research" / "feature_store" / "feature_store.db",
+        _FEATURE_STORE_TABLES,
+    )
+
+
+def test_feature_store_backup_succeeds(tmp_path, monkeypatch):
+    _setup_root(tmp_path)
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    assert backup.main() == 0
+    bfile = _latest_backup(tmp_path / "data" / "feature-store-backups", "feature_store")
+    assert bfile is not None
+    assert _integrity_ok(bfile)
+
+
+def test_feature_store_correct_label_in_filename(tmp_path, monkeypatch):
+    _setup_root(tmp_path)
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    backup.main()
+    bfile = _latest_backup(tmp_path / "data" / "feature-store-backups", "feature_store")
+    assert bfile.name.startswith("feature_store_")
+
+
+def test_feature_store_correct_backup_dir(tmp_path, monkeypatch):
+    _setup_root(tmp_path)
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    backup.main()
+    assert _latest_backup(
+        tmp_path / "data" / "feature-store-backups", "feature_store") is not None
+    assert _latest_backup(tmp_path / "data" / "backups", "feature_store") is None
+
+
+def test_feature_store_early_return_no_other_backups(tmp_path, monkeypatch):
+    """--feature-store alone must not create trading, ledger or other backups."""
+    _setup_root(tmp_path)
+    _feature_store_db(tmp_path)
+    _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+    _make_db(tmp_path / "research" / "evidence_library" / "ledger.db", _LEDGER_TABLES)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    backup.main()
+    assert _latest_backup(tmp_path / "data" / "backups", "btc_trading") is None
+    assert _latest_backup(tmp_path / "data" / "ledger-backups", "ledger") is None
+
+
+def test_feature_store_dry_run_writes_nothing(tmp_path, monkeypatch):
+    _setup_root(tmp_path)
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store", "--dry-run"])
+    assert backup.main() == 0
+    bdir = tmp_path / "data" / "feature-store-backups"
+    if bdir.exists():
+        assert list(bdir.glob("feature_store_*.db")) == []
+
+
+def test_feature_store_manifest_written_with_row_counts(tmp_path, monkeypatch):
+    _setup_root(tmp_path)
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    backup.main()
+    bfile = _latest_backup(tmp_path / "data" / "feature-store-backups", "feature_store")
+    manifest = bfile.parent / (bfile.stem + ".manifest.json")
+    assert manifest.exists()
+    data = json.loads(manifest.read_text())
+    assert data["row_counts"]["feature_specifications"] == 17
+    assert data["row_counts"]["governance_receipts"] == 17
+
+
+def test_feature_store_manifest_sha_matches_the_written_bytes(tmp_path, monkeypatch):
+    """The manifest must describe the file that was actually written.
+
+    This is the property `restore.py` depends on: it aborts the swap when the
+    recorded SHA-256 does not match the backup on disk.
+    """
+    _setup_root(tmp_path)
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    backup.main()
+    bfile = _latest_backup(tmp_path / "data" / "feature-store-backups", "feature_store")
+    manifest = json.loads((bfile.parent / (bfile.stem + ".manifest.json")).read_text())
+    assert manifest["sha256"] == _sha256(bfile)
+
+
+def test_feature_store_missing_is_skipped_not_failed(tmp_path, monkeypatch):
+    """OPTIONAL classification (PROD-1): absence must not fail the run.
+
+    On EC2 the Feature Store does not exist. Treating that as an error would
+    make `--all` exit 1 every day, which is the exact failure PROD-1 fixed.
+    """
+    _setup_root(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    assert backup.main() == 0
+
+
+def test_all_flag_now_covers_feature_store(tmp_path, monkeypatch):
+    """The defect itself: --all reached five stores and silently skipped this one."""
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+    _make_db(tmp_path / "research" / "data" / "forward_evidence.db", _H6_TABLES)
+    _make_db(tmp_path / "research" / "data" / "evidence_forward.db", _EVIDENCE_FWD_TABLES)
+    _make_db(tmp_path / "research" / "evidence_library" / "ledger.db", _LEDGER_TABLES)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--all"])
+    assert backup.main() == 0
+    assert _latest_backup(
+        tmp_path / "data" / "feature-store-backups", "feature_store") is not None
+
+
+def test_all_still_covers_every_other_store(tmp_path, monkeypatch):
+    """Regression: adding a sixth store must not drop any of the other five."""
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+    _make_db(tmp_path / "research" / "data" / "forward_evidence.db", _H6_TABLES)
+    _make_db(tmp_path / "research" / "data" / "evidence_forward.db", _EVIDENCE_FWD_TABLES)
+    _make_db(tmp_path / "research" / "evidence_library" / "ledger.db", _LEDGER_TABLES)
+    _make_db(tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--all"])
+    backup.main()
+    for bdir, label in (("backups", "btc_trading"), ("evidence-backups", "evidence"),
+                        ("evidence-fwd-backups", "fwd_hg"), ("ledger-backups", "ledger"),
+                        ("label-store-backups", "label_store")):
+        assert _latest_backup(tmp_path / "data" / bdir, label) is not None, label
+
+
+def test_all_dry_run_mentions_feature_store(tmp_path, monkeypatch, capsys):
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "data" / "btc_trading.db")
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--all", "--dry-run"])
+    backup.main()
+    assert "feature_store" in capsys.readouterr().out
+
+
+def test_feature_store_restores_through_the_generic_restore_path(tmp_path, monkeypatch):
+    """`restore.py` is store-agnostic and needed no change.
+
+    The defect was the absent backup, not absent restore support. This proves
+    the existing restore path recovers a Feature Store backup end to end,
+    including SHA-256 manifest verification.
+    """
+    restore_mod = _load_restore_module()
+
+    _setup_root(tmp_path)
+    live = _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    backup.main()
+    bfile = _latest_backup(tmp_path / "data" / "feature-store-backups", "feature_store")
+
+    conn = sqlite3.connect(str(live))
+    conn.execute("DROP TABLE feature_specifications")
+    conn.commit()
+    conn.close()
+
+    assert restore_mod.run_restore(bfile, live, "btcbot", skip_service=True) == 0
+    conn = sqlite3.connect(str(live))
+    n = conn.execute("SELECT COUNT(*) FROM feature_specifications").fetchone()[0]
+    conn.close()
+    assert n == 17
+
+
+def test_feature_store_restore_refuses_on_sha_mismatch(tmp_path, monkeypatch):
+    """A tampered Feature Store backup must not reach the live database."""
+    restore_mod = _load_restore_module()
+
+    _setup_root(tmp_path)
+    live = _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    backup.main()
+    bfile = _latest_backup(tmp_path / "data" / "feature-store-backups", "feature_store")
+
+    manifest_file = bfile.parent / (bfile.stem + ".manifest.json")
+    manifest = json.loads(manifest_file.read_text())
+    manifest["sha256"] = "0" * 64
+    manifest_file.write_text(json.dumps(manifest))
+
+    before = _sha256(live)
+    assert restore_mod.run_restore(bfile, live, "btcbot", skip_service=True) != 0
+    assert _sha256(live) == before
+
+
+def test_all_exit_code_surfaces_a_feature_store_failure(tmp_path, monkeypatch):
+    """`--all` must fold rc_feature_store into its max.
+
+    Added after TV3: removing `rc_feature_store` from the `max(...)` call
+    failed nothing, because no test made this backup fail. A store whose
+    failure cannot change the exit code is not really monitored.
+    """
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+    _feature_store_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+
+    real_run_backup = backup.run_backup
+
+    def failing(db_path, backup_dir, dry_run, db_label=None, **kw):
+        if db_label == "feature_store":
+            return 1
+        return real_run_backup(db_path, backup_dir, dry_run, db_label=db_label, **kw)
+
+    monkeypatch.setattr(backup, "run_backup", failing)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--all"])
+    assert backup.main() == 1
+
+
+def test_feature_store_only_exit_code_is_its_own(tmp_path, monkeypatch):
+    """`--feature-store` alone returns that store's own return code."""
+    _setup_root(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+
+    def failing(db_path, backup_dir, dry_run, db_label=None, **kw):
+        return 1 if db_label == "feature_store" else 0
+
+    monkeypatch.setattr(backup, "run_backup", failing)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
+    assert backup.main() == 1
