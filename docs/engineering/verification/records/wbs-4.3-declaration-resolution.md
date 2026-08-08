@@ -111,6 +111,17 @@ inspecting one small class rather than the whole module.
 
 ### §4 TV — 74 tests, `tests/test_dataset_resolution.py`
 
+> **Count addendum (2026-08-08, audit finding `E-1`).** The figure above is the
+> count **as delivered by this milestone** and is left unchanged. The file now
+> holds **75** tests. The single additional test was added by WBS 4.6
+> (`9828d6e`), which enforced `RF2` inside `resolution.py` and recorded the
+> addition in its own Files-changed table (*"2 assertions updated + 1 test
+> added"*). WBS 4.7 (`5ece707`) further updated deferred-refusal assertions in
+> this file without changing the count.
+>
+> `RC5` reproduction today yields **75**, not 74, and that is correct. No test
+> delivered by WBS 4.3 was removed or altered.
+
 | Group | n | Covers |
 |---|---|---|
 | Build / scope | 4 | no `src` import; upstream only inside the adapter; deferred refusals named |

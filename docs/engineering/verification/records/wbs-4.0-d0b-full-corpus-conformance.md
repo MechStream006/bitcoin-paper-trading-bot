@@ -146,6 +146,11 @@ Every dataset carries **exactly one** conditioning statement, and **all four dif
 - [ ] **RC6** — Three backups confirmed present and readable
 - [ ] **RC7** — Sign-off
 
+  **Reviewer:** _______________  **Date:** _______________
+
+  *Signature block added 2026-08-08 (audit finding `E-1` / `TD-4.12-5`). These three WBS 4.0 records carried a full RC checklist but no place to record sign-off, so they could not be signed as they stood. No existing content was altered.*
+
+
 ## Files Changed
 
 | File | Change |

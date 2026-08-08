@@ -144,6 +144,11 @@ Every manifest field comes from one of exactly two places: the partition's **own
 - [ ] **RC7** — Pre-conformance backup confirmed present and readable
 - [ ] **RC8** — Sign-off
 
+  **Reviewer:** _______________  **Date:** _______________
+
+  *Signature block added 2026-08-08 (audit finding `E-1` / `TD-4.12-5`). These three WBS 4.0 records carried a full RC checklist but no place to record sign-off, so they could not be signed as they stood. No existing content was altered.*
+
+
 ## Files Changed
 
 | File | Change |

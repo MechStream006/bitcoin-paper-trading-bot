@@ -98,6 +98,21 @@ including that no arc leaves a terminal phase.
 
 **128 tests**, `tests/test_dataset_registry.py`:
 
+> **Count addendum (2026-08-08, audit finding `E-1`).** The figure above is the
+> count **as delivered by this milestone** and is left unchanged. The file now
+> holds **160** tests. The 32 additional tests were added by two later
+> commits that strengthened this milestone's guard trigger and therefore
+> extended its test file rather than creating a new one:
+>
+> | Commit | Added | Reason |
+> |---|---|---|
+> | `dc16a70` | +18 | `AF-1` — `rejection_reason` / `superseded_by` made write-once |
+> | `82ce7c0` | +14 | `EB-1` / `EB-3` — `change_class` write-once; atomic schema swap |
+>
+> `RC5` asks the reviewer to reproduce full-suite counts. Reproducing
+> `tests/test_dataset_registry.py` today yields **160**, not 128, and that is
+> correct. No test delivered by WBS 4.1 was removed or altered.
+
 | Group | Count | Covers |
 |---|---|---|
 | Import boundary / state machine | 5 | AST, 7 phases, 8 arcs, terminal closure |
