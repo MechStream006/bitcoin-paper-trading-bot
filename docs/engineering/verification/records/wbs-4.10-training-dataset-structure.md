@@ -213,18 +213,18 @@ or `research/reports/`.**
 
 ## 12. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.10 exactly; no 4.11 scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — Rollback lever confirmed (two new files, additive)
-- [ ] **RC7** — **The `T-4` reasoning (§1) is accepted** — proceeding without ratification, because it is not an entry condition and reduces scope
-- [ ] **RC8** — **`P4-6` accepted as satisfied (§2)** — RF4 refuses today, proven in both directions
-- [ ] **RC9** — **The provenance-only floor (§4) is accepted**
-- [ ] **RC10** — **`TD-4.10-1` accepted** — `computed_meet` is optional, so a caller can skip the RF4 gate; the fix belongs with `TD-4.4-3`
-- [ ] **RC11** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.10 exactly; no 4.11 scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — Rollback lever confirmed (two new files, additive)
+- [x] **RC7** — **The `T-4` reasoning (§1) is accepted** — proceeding without ratification, because it is not an entry condition and reduces scope. **Contemporaneous note, 2026-08-08:** `T-4` has since been ratified (`OD-1`, Owner Decision Pack, 2026-08-08). This does not change the acceptance — §1's reasoning explicitly analysed both possible resolutions of `T-4` and reached the same conclusion under either. The historical wording above is unchanged and unamended.
+- [x] **RC8** — **`P4-6` accepted as satisfied (§2)** — RF4 refuses today, proven in both directions *(basis: verifiable fact, TV3-proven; confirmed 2026-08-08)*
+- [x] **RC9** — **The provenance-only floor (§4) is accepted** *(basis: `OD-7`, Group D — confirmed 2026-08-08: a literal, deliberate reading of `ADR-I012` §15.2)*
+- [x] **RC10** — **`TD-4.10-1` accepted** — `computed_meet` is optional, so a caller can skip the RF4 gate; the fix belongs with `TD-4.4-3` *(basis: `OD-6`, Group C — **carries the binding condition**: `TD-4.4-3` MUST be resolved before any Phase 5 code path invokes the Dataset Builder. Confirmed 2026-08-08 by direct textual citation of `TD-4.4-3` in this item's own wording — see the ordering constraint recorded in the TD register.)*
+- [x] **RC11** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

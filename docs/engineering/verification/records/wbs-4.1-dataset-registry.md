@@ -221,16 +221,16 @@ tooling under `research/`; IQROS-P1's operational/research boundary holds.
 
 ## 7. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.1 exactly; no 4.2+ scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
-- [ ] **RC5** — Full-suite counts reproduced independently in both environments
-- [ ] **RC6** — Rollback lever confirmed
-- [ ] **RC7** — The §4 scope deviation (backup wiring) is accepted
-- [ ] **RC8** — The `redefinition`-refused-as-supersession reading is accepted
-- [ ] **RC9** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.1 exactly; no 4.2+ scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full, confirmed to exercise real behaviour
+- [x] **RC5** — Full-suite counts reproduced independently in both environments
+- [x] **RC6** — Rollback lever confirmed
+- [x] **RC7** — The §4 scope deviation (backup wiring) is accepted *(basis: `OD-7`, Group E — architecture accepted under constraint)*
+- [x] **RC8** — The `redefinition`-refused-as-supersession reading is accepted *(basis: `OD-7`, Group E)*
+- [x] **RC9** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

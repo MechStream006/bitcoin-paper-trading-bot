@@ -194,18 +194,18 @@ or `research/reports/`.**
 
 ## 9. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.6 exactly; no 4.7+ scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — **Result invariance accepted** — 10 artifacts, 0 changed, production `fn_hash` MATCH
-- [ ] **RC7** — **The frozen exceptions (§2) are accepted** as documented, tracked and permanent absent a new decision
-- [ ] **RC8** — **The full-coverage rule (§4) is accepted** — partial exclusion refuses
-- [ ] **RC9** — **`HZ-4.6-1` accepted** — RF2 guards the builder path only; direct corpus reads remain outside it
-- [ ] **RC10** — `BASELINE_46.json` retained as committed evidence *(or instruct removal)*
-- [ ] **RC11** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.6 exactly; no 4.7+ scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — **Result invariance accepted** — 10 artifacts, 0 changed, production `fn_hash` MATCH
+- [x] **RC7** — **The frozen exceptions (§2) are accepted** as documented, tracked and permanent absent a new decision *(basis: `OD-7`, Group E — confirmed 2026-08-08 as legitimately covered by content)*
+- [x] **RC8** — **The full-coverage rule (§4) is accepted** — partial exclusion refuses *(basis: `OD-7`, Group D)*
+- [x] **RC9** — **`HZ-4.6-1` accepted** — RF2 guards the builder path only; direct corpus reads remain outside it *(basis: `OD-4`, Group A)*
+- [x] **RC10** — `BASELINE_46.json` retained as committed evidence — **RETAIN, decided 2026-08-08.** Confirmed git-tracked and load-bearing for `test_experiments.py`, `test_lanes.py`, `test_materialisation.py`, `test_sealed_regions.py` and `test_training.py` (four of which postdate this milestone); actively maintained, not removed, through the `852987e` CI fix. Not modified or removed by this sign-off.
+- [x] **RC11** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

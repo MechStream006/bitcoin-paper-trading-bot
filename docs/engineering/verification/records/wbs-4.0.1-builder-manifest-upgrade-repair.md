@@ -133,16 +133,16 @@ Their `parquet_sha256` was computed **now**, from bytes already on disk, by the 
 
 ## 10. Reviewer Checklist (RC)
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.0.1 exactly; no D0b or 4.1 work
-- [ ] **RC2** — No ADR or roadmap file modified
-- [ ] **RC3** — The §0.2 scope decision (three partitions, not 210) is accepted
-- [ ] **RC4** — The §6 BC4 behaviour change (207 future re-upgrades) is accepted
-- [ ] **RC5** — The §0.3 weaker-provenance record for the three is accepted
-- [ ] **RC6** — The third affected file (`smoke_test_phaseA1.py`), missed by the original blast-radius analysis, is accepted as in-scope
-- [ ] **RC7** — Backup confirmed present and readable
-- [ ] **RC8** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.0.1 exactly; no D0b or 4.1 work
+- [x] **RC2** — No ADR or roadmap file modified
+- [x] **RC3** — The §0.2 scope decision (three partitions, not 210) is accepted *(basis: `OD-8`, Owner Decision Pack 2026-08-08)*
+- [x] **RC4** — The §6 BC4 behaviour change (207 future re-upgrades) is accepted *(basis: `OD-8`)*
+- [x] **RC5** — The §0.3 weaker-provenance record for the three is accepted *(basis: `OD-8`)*
+- [x] **RC6** — The third affected file (`smoke_test_phaseA1.py`), missed by the original blast-radius analysis, is accepted as in-scope *(basis: `OD-8`)*
+- [x] **RC7** — Backup confirmed present and readable
+- [x] **RC8** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08
 
   *Signature block added 2026-08-08 (audit finding `E-1` / `TD-4.12-5`). These three WBS 4.0 records carried a full RC checklist but no place to record sign-off, so they could not be signed as they stood. No existing content was altered.*
 

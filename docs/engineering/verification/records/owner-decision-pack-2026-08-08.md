@@ -5,8 +5,8 @@
 | **Subject** | `DS-DEC-006`, `T-2`, `T-4`, `T-5`, `T-6`, and the 146 RC items across the 14 Phase 4 WBS verification records |
 | **Prepared by** | Claude Opus 5, as a focused reconciliation (2026-08-08) |
 | **Decided by** | Rohith Suresh |
-| **Status** | ✅ **DECIDED 2026-08-08 — OD-1 through OD-8, all ACCEPTED (OD-6 with a binding condition)** |
-| **Nature** | Group-level governance acceptance of the *readings and scope transfers* described below. **This is not the same act as signing the 146 individual RC checklist items** — no RC item's checkbox or signature line was touched by this record. See §9 |
+| **Status** | ✅ **G1 CLOSED 2026-08-08 — `OD-1` through `OD-9` all decided; all 146 RC items across 14 records signed** (see §10) |
+| **Nature** | Group-level governance acceptance (`OD-1`–`OD-9`) plus, in the same sitting, the actual per-item sign-off it authorized. §1–§9 record the acceptances; §10 records the signing and its adjudication |
 
 ---
 
@@ -100,6 +100,19 @@ lost between now and then.
 > consequence of `DS-DEC-002`: corpus provenance is "canonical as re-derived
 > by this platform," not "as originally received from the exchange."
 
+## OD-9 — `4.6/RC10`: `BASELINE_46.json` RETAINED (decided 2026-08-08, second sitting)
+
+**RETAIN. Do not remove or modify.**
+
+> `4.6/RC10` — RETAINED as committed, load-bearing evidence. Confirmed
+> git-tracked and read by five test modules (`test_experiments.py`,
+> `test_lanes.py`, `test_materialisation.py`, `test_sealed_regions.py` —
+> which hard-asserts its existence — and `test_training.py`), four of which
+> postdate WBS 4.6 and independently chose to reuse this baseline rather than
+> create their own. Actively repaired, not removed, at `852987e`. Removal is
+> not a documentation action; it would require rewriting assertions in all
+> five files, an unscoped engineering task not decided here.
+
 ---
 
 ## 9. Reconciliation — what is and is not closed by this record
@@ -110,12 +123,58 @@ lost between now and then.
 | `DS-DEC-006` | Owed, untouched | ✅ **Formally deferred** (OD-2) — substance still undecided, by design |
 | 55 decision-bearing RC items | Not accepted | ✅ **Accepted**, group-by-group (OD-4–OD-8), one (Group C) with a binding condition |
 | 91 verifiable + Groups F/G/H-minus-RC3 (114 items) | Not confirmed | ✅ **Confirmed in bulk** (OD-3) |
-| **146 individual RC checkboxes / signature lines** | 0 signed | **Still 0 signed** — group-level acceptance is not per-item signature. `G1` / `E1` remain open |
-| `TD-4.4-3` | Open debt | **Still open** — now carries a binding Phase 5 entry pre-condition (OD-6) |
+| **146 individual RC checkboxes / signature lines** | 0 signed | ✅ **146/146 signed 2026-08-08** — see §10 |
+| `TD-4.4-3` | Open debt | **Still open** — carries a binding Phase 5 entry pre-condition (`OD-6`), attached specifically to `4.10/RC10` at sign-off |
 | Governance receipt chain | 27, `ok=True` | **27, `ok=True` — unchanged** |
 
-**What actually closes as a Phase 4 governance blocker:** `G4` (`DS-DEC-006`,
-`T-2`, `T-4`, `T-5`, `T-6`) — all five are now decided (ratified or formally
-deferred). **What remains:** `G1` — 146 RC items still require your individual
-signature per record, even though this pack records what you'd be signing
-against.
+**`G4` and `G1` are both now closed.** This pack's acceptances (`OD-1`–`OD-9`)
+were carried into all 14 records' actual signature lines on 2026-08-08 — see
+§10 for the adjudication of the three items that needed correction or
+clarification before signing could proceed honestly.
+
+---
+
+## 10. G1 CLOSED — 2026-08-08 — sign-off adjudication and confirmation
+
+Before any checkbox was touched, three items surfaced during signing
+preparation that this pack's original group-level language did not cleanly
+resolve. Each was adjudicated against primary source — the actual RC wording,
+the TD register, and the roadmap — not assumed, and none was resolved by
+stretching a reading to force closure.
+
+**`4.4/RC9` vs `4.10/RC10` — corrected, not identical.** `HZ-4.4-1` (`4.4/RC9`)
+and `TD-4.4-3` are different defects: `HZ-4.4-1` is about whether a Tier D cap
+survives into the sealed record (fixed and verified at `4.5/RC9` — "the cap
+survives the seal, proven by sabotage"); `TD-4.4-3` is about the meet being
+caller-supplied with nothing deriving it. Only `TD-4.10-1` (`4.10/RC10`) ties
+to `TD-4.4-3` — its own wording says so directly: *"the fix belongs with
+`TD-4.4-3`."* Signed accordingly: `4.4/RC9` under `OD-3` (mechanical, no
+condition), `4.10/RC10` under `OD-6` (binding condition attached).
+
+**`4.6/RC10` — resolved by `OD-9` above**, RETAIN, decided the same sitting as
+this closure.
+
+**`4.10/RC7` — signed with a contemporaneous note, record not amended.** The
+RC item's structural claim ("`T-4` is not an entry condition for 4.10") is
+unaffected by `T-4`'s ratification — `4.10` never named `T-4` as a gate the
+way `4.6` named `T-3`/`DS-DEC-004`. The historical phrase "proceeding without
+ratification" describes what happened, not a present-tense claim. A note was
+appended at the RC7 line; the original §1 text was not rewritten, per this
+project's standing convention (historical records are annotated, not edited).
+
+**The 11 items mapped "by content" in the prior adjudication turn were
+re-verified against their actual source sections** (`wbs-4.3` §HZ table,
+`wbs-4.6` §2, `wbs-4.9` §2/§3, `wbs-4.10` §2/§4) before signing. All 9 not
+already covered above confirmed legitimately within their assigned `OD`'s
+character — no separate owner decision was required for any of them. Two
+minor double-namings in the original Group A–H prose (`4.9/RC11` in both
+Group B and Group G; `TD-4.11-1`/`4.11/RC9` in both Group D and Group G) carry
+the same no-condition treatment under either reading, so the duplication does
+not affect any signature.
+
+**Result: all 146 RC items across all 14 records signed** — `Reviewer: Rohith
+Suresh`, `Date: 2026-08-08`, using the sign-off mechanism already defined by
+the records (the same identity/date convention as the ten Phase 3 records
+signed 2026-08-07). No signature identity was invented. No code, schema,
+production, or research data changed. No governance receipt was created — a
+signature is not in `receipts.DECISION_TAXONOMY`, and none was added to it.

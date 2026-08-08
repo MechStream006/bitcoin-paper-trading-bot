@@ -516,13 +516,13 @@ some and fails others**, and a single verdict would hide that.
 EC8 and EC9 are **unowned scope**, not incomplete milestones. Every WBS row
 delivered what it specified.
 
-## 5.2 Governance completion — ❌ **INCOMPLETE**
+## 5.2 Governance completion — ✅ **COMPLETE** *(updated 2026-08-08 — was INCOMPLETE when this report was written)*
 
 | # | Item | Status |
 |---|---|---|
-| GC1 | 146 RC items across 14 records signed | ❌ **0 signed** |
+| GC1 | 146 RC items across 14 records signed | ✅ **146/146 SIGNED 2026-08-08** — `Reviewer: Rohith Suresh`, see [Owner Decision Pack §10](owner-decision-pack-2026-08-08.md) |
 | GC2 | 55 decision-bearing items accepted | ✅ **ACCEPTED 2026-08-08**, group-by-group (§1.3), one with a binding condition |
-| GC3 | Three 4.0 records given a sign-off block (`TD-4.12-5`) | ❌ |
+| GC3 | Three 4.0 records given a sign-off block (`TD-4.12-5`) | ✅ **Added 2026-08-08** — confirmed present and used at sign-off |
 | GC4 | `DS-DEC-007` decided (§2) | ✅ **RATIFIED 2026-08-08** |
 | GC5 | `T-2`, `T-4`, `T-5`, `T-6` ratified or closed | ✅ **RATIFIED 2026-08-08** |
 | GC6 | `DS-DEC-006` decided | ✅ **FORMALLY DEFERRED 2026-08-08** |
@@ -577,37 +577,38 @@ was not performed.
 
 | # | Gate | Blocking? | Status |
 |---|---|---|---|
-| E1 | 14 records signed (146 items) | ✅ **Blocking** | ❌ |
+| E1 | 14 records signed (146 items) | ✅ **Blocking** | ✅ **CLOSED 2026-08-08** — 146/146 |
 | E2 | `DS-DEC-007` decided | ✅ **Blocking** | ✅ **CLOSED 2026-08-08** |
-| E3 | Sign-off names **fourteen** records | ✅ **Blocking** | ❌ |
-| E4 | 4.0 sign-off blocks added | ✅ **Blocking** (E1 impossible without it) | ❌ |
+| E3 | Sign-off names **fourteen** records | ✅ **Blocking** | ✅ **CLOSED 2026-08-08** — all 14 signed |
+| E4 | 4.0 sign-off blocks added | ✅ **Blocking** (E1 impossible without it) | ✅ **CLOSED 2026-08-08** |
 | E5 | `feature_store` backup exists (DR1) | ✅ **Blocking** | ❌ |
 | E6 | Durability decision taken (§3) | ✅ **Blocking** | ❌ |
 | E7 | §10.3 and governance alerting given an owner | ✅ **Blocking** | ❌ |
 | E8 | Phase 4 deployed, or the lag explicitly accepted | ⬜ Non-blocking | ❌ |
 | E9 | `TD-4.12-1` materialisation decided | ⬜ Non-blocking | ❌ |
-| E10 | `T-2`/`T-4`/`T-5`/`T-6`, `DS-DEC-006` closed | ⬜ Non-blocking | ❌ |
+| E10 | `T-2`/`T-4`/`T-5`/`T-6`, `DS-DEC-006` closed | ⬜ Non-blocking | ✅ **CLOSED 2026-08-08** — `G4`, Owner Decision Pack `OD-1`/`OD-2` |
 | E11 | BK2 drill performed | ⬜ Non-blocking, strongly advised | ❌ |
 | E12 | Full-suite baseline re-established at entry | ⬜ Non-blocking | ❌ |
 
-**Six of seven originally-blocking gates remain — `E2` closed 2026-08-08**
-(`DS-DEC-007` ratified). This section is not otherwise re-audited here: `E4`,
-`E5` and others may have moved since 18:08 2026-08-08 for reasons unrelated to
-`DS-DEC-007`/`AF-2` (see later session work) but are not re-verified in this
-edit, which is scoped only to recording the two decisions above. **`E5` remains
-significant if still open:** starting Phase 5 on a Feature Store with no backup
-would compound an already-single-homed governance layer.
+**Of the seven originally-blocking gates, `E1`–`E4` are now closed (2026-08-08)**
+— `G1` (146/146 signed) and `G2` (`DS-DEC-007` ratified) directly; `E3`/`E4`
+as their structural prerequisites. `E5`, `E6`, `E7` are not re-audited in this
+edit, which is scoped to `G1` closure and its two immediate predecessors
+(`DS-DEC-007`, the Owner Decision Pack) — **not** to operational/durability
+items (BK3, corpus backup) which remain a separate, later-session finding.
+**`E5` remains significant if still open:** starting Phase 5 on a Feature Store
+with no backup would compound an already-single-homed governance layer.
 
 ## 5.7 Verdict
 
 | Dimension | Verdict |
 |---|---|
 | Engineering completion | ✅ **COMPLETE** |
-| Governance completion | ❌ **INCOMPLETE** — 0 of 146 items signed |
-| Operational readiness | ⚠️ **CANONICAL HOST ONLY** |
-| Disaster-recovery readiness | 🔴 **NOT READY** |
-| Production deployment readiness | ✅ **READY, NOT AUTHORISED** |
-| Phase 5 entry readiness | ❌ **NOT READY** — 6 of 7 originally-blocking gates remain (`E2` closed 2026-08-08) |
+| Governance completion | ✅ **COMPLETE 2026-08-08** — 146 of 146 items signed |
+| Operational readiness | ⚠️ **CANONICAL HOST ONLY** *(not re-audited by this edit)* |
+| Disaster-recovery readiness | 🔴 **NOT READY** *(not re-audited by this edit — separate, later-session finding)* |
+| Production deployment readiness | ✅ **READY** *(deployment itself tracked separately)* |
+| Phase 5 entry readiness | ❌ **NOT READY** — `E1`–`E4` closed 2026-08-08; `E5`–`E7` (durability, observability ownership) remain, unrelated to `G1` |
 
 **Phase 4 built what it promised and proved it on real data. What stands
 between it and closure is signature and durability — not engineering.**

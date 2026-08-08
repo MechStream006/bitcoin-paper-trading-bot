@@ -390,7 +390,7 @@ finding, not a deployment finding.
 |---|---|
 | **Engineering complete?** | ✅ **YES.** 14 records, 842 tests, both suites green, all six refusal points live, all eight DGs enforced. Two ADR clauses unsatisfied (§10.3 unowned; L1/L2 not run on real data) — both are *unowned scope*, not incomplete milestones |
 | **Operationally activated?** | ⚠️ **PARTIALLY.** Fully activated on the canonical host: real store, real sealed dataset, real receipt, verified backup, healthcheck coverage. **Not activated on production** — code 9 commits behind, store absent |
-| **Governance complete?** | ❌ **NO.** 146/146 reviewer items unsigned. *(Updated 2026-08-08: `P4-9`'s `DS-DEC-007` dependency is RATIFIED — §12; the 55 decision-bearing and 114 mechanical RC items are group-accepted, one with a binding condition; and the four scope transfers plus `DS-DEC-006` are all decided — [Owner Decision Pack](owner-decision-pack-2026-08-08.md). The remaining gap is narrower than when this report was written: individual signature on the 146 RC items, not open substance.)* |
+| **Governance complete?** | ✅ **YES**, as of 2026-08-08. `P4-9`'s `DS-DEC-007` dependency RATIFIED (§12); all 55 decision-bearing and 91 verifiable RC items accepted; the four scope transfers plus `DS-DEC-006` all decided; and all **146/146 RC items across all 14 records signed**, `Reviewer: Rohith Suresh` — [Owner Decision Pack §10](owner-decision-pack-2026-08-08.md). *(At the time this report was originally written, 0 of 146 were signed — the gap closed entirely in the same session.)* |
 | **Ready for Phase 5?** | ❌ **NO** — blocked on governance sign-off (§15), not on engineering |
 
 **Summary:** Phase 4 built what it promised and proved it on real data. What
@@ -421,7 +421,7 @@ durability gates.
 
 | # | Gate | Rationale | Owner |
 |---|---|---|---|
-| **E1** | All 14 WBS records signed; 146 RC items resolved | Phase 3 required the identical discipline (`E2`) | Rohith |
+| **E1** | ✅ **CLOSED 2026-08-08** — all 14 WBS records signed; 146 RC items resolved | Phase 3 required the identical discipline (`E2`) | Rohith |
 | **E2** | ✅ **CLOSED 2026-08-08** — `DS-DEC-007` decided (RATIFIED) | Phase 4 cannot be declared closed against an unmeetable criterion | Rohith |
 | **E3** | Sign-off instruction names **fourteen** records, not twelve | Two would otherwise be silently skipped (§11.4) | Rohith |
 | **E4** | 4.0 records given a signature block (`TD-4.12-5`) | They currently offer nowhere to sign | Engineering |

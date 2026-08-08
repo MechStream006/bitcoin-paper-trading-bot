@@ -179,17 +179,17 @@ integrity **ok/ok/ok**.
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.2 exactly; no 4.3+ scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — Rollback lever confirmed (purely additive)
-- [ ] **RC7** — **The sealed-only citation reading (§2) is accepted**
-- [ ] **RC8** — **The injected-authority wiring (§3) is accepted over an import**
-- [ ] **RC9** — `TD-4.2-1`/`TD-4.2-2` accepted as deferred to 4.3/4.11
-- [ ] **RC10** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.2 exactly; no 4.3+ scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — Rollback lever confirmed (purely additive)
+- [x] **RC7** — **The sealed-only citation reading (§2) is accepted** *(basis: `OD-7`, Group D)*
+- [x] **RC8** — **The injected-authority wiring (§3) is accepted over an import** *(basis: `OD-7`, Group E)*
+- [x] **RC9** — `TD-4.2-1`/`TD-4.2-2` accepted as deferred to 4.3/4.11 *(basis: `OD-3`, mechanical debt-deferral — confirmed 2026-08-08 as legitimately covered by content)*
+- [x] **RC10** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

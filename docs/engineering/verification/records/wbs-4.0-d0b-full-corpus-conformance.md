@@ -138,15 +138,15 @@ Every dataset carries **exactly one** conditioning statement, and **all four dif
 
 ## 10. Reviewer Checklist (RC)
 
-- [ ] **RC1** — Milestone corresponds to Sprint D0b exactly; WBS 4.1 not begun
-- [ ] **RC2** — No ADR or roadmap file modified
-- [ ] **RC3** — The §0.2 decision (drop `ts_column` from specs, read it per-partition) is accepted
-- [ ] **RC4** — The three D0a test updates (§3 REG5) are accepted
-- [ ] **RC5** — Corpus spot-checked: 274/274 conformed, four distinct conditionings
-- [ ] **RC6** — Three backups confirmed present and readable
-- [ ] **RC7** — Sign-off
+- [x] **RC1** — Milestone corresponds to Sprint D0b exactly; WBS 4.1 not begun
+- [x] **RC2** — No ADR or roadmap file modified
+- [x] **RC3** — The §0.2 decision (drop `ts_column` from specs, read it per-partition) is accepted *(basis: `OD-8`, Owner Decision Pack 2026-08-08)*
+- [x] **RC4** — The three D0a test updates (§3 REG5) are accepted *(basis: `OD-8`)*
+- [x] **RC5** — Corpus spot-checked: 274/274 conformed, four distinct conditionings
+- [x] **RC6** — Three backups confirmed present and readable
+- [x] **RC7** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08
 
   *Signature block added 2026-08-08 (audit finding `E-1` / `TD-4.12-5`). These three WBS 4.0 records carried a full RC checklist but no place to record sign-off, so they could not be signed as they stood. No existing content was altered.*
 

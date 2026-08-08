@@ -162,18 +162,18 @@ integrity **ok/ok/ok**.
 
 ## 9. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.4 exactly; no 4.5+ scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — Rollback lever confirmed (purely additive)
-- [ ] **RC7** — **The Tier D caps-not-blocks model (§1) is accepted**
-- [ ] **RC8** — **The TB4 correction (§4) is accepted** — a non-intersecting exclusion is not a finding
-- [ ] **RC9** — **`HZ-4.4-1` is accepted as a hard requirement on WBS 4.5** — the sealed dataset must carry `capped_admissibility`, not `computed_meet`
-- [ ] **RC10** — `TD-4.4-1` (TB1 unreachable) and `TD-4.4-2` (ungoverned thresholds) accepted
-- [ ] **RC11** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.4 exactly; no 4.5+ scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — Rollback lever confirmed (purely additive)
+- [x] **RC7** — **The Tier D caps-not-blocks model (§1) is accepted** *(basis: `OD-7`, Group D)*
+- [x] **RC8** — **The TB4 correction (§4) is accepted** — a non-intersecting exclusion is not a finding *(basis: `OD-7`, Group D)*
+- [x] **RC9** — **`HZ-4.4-1` is accepted as a hard requirement on WBS 4.5** — the sealed dataset must carry `capped_admissibility`, not `computed_meet` *(basis: `OD-3`, Group F — paired with `4.5/RC9`, resolution confirmed; distinct from `TD-4.4-3`, no binding condition)*
+- [x] **RC10** — `TD-4.4-1` (TB1 unreachable) and `TD-4.4-2` (ungoverned thresholds) accepted *(basis: `OD-3`, mechanical debt acknowledgment — confirmed 2026-08-08 as legitimately covered by content)*
+- [x] **RC11** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

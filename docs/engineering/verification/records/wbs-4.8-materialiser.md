@@ -202,18 +202,18 @@ or `research/reports/`.**
 
 ## 11. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.8 exactly; no 4.9+ scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — Rollback lever confirmed (two new files, additive)
-- [ ] **RC7** — **The float-normalisation decision (§2) is accepted** — decimal strings at the boundary, explicit NaN/Inf sentinels
-- [ ] **RC8** — **The L2 divergence-is-not-an-error semantics (§4) is accepted**
-- [ ] **RC9** — **`TD-4.8-1` accepted** — snapshot bytes are not persisted; an L1 pin is verifiable only by re-materialising until 4.10 adds a byte store
-- [ ] **RC10** — **`HZ-4.8-1` accepted** — divergences are recorded but nothing alerts; wiring needs its own decision
-- [ ] **RC11** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.8 exactly; no 4.9+ scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — Rollback lever confirmed (two new files, additive)
+- [x] **RC7** — **The float-normalisation decision (§2) is accepted** — decimal strings at the boundary, explicit NaN/Inf sentinels *(basis: `OD-7`, Group D)*
+- [x] **RC8** — **The L2 divergence-is-not-an-error semantics (§4) is accepted** *(basis: `OD-7`, Group D)*
+- [x] **RC9** — **`TD-4.8-1` accepted** — snapshot bytes are not persisted; an L1 pin is verifiable only by re-materialising until 4.10 adds a byte store *(basis: `OD-3`, Group G)*
+- [x] **RC10** — **`HZ-4.8-1` accepted** — divergences are recorded but nothing alerts; wiring needs its own decision *(basis: `OD-5`, Group B)*
+- [x] **RC11** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

@@ -135,16 +135,16 @@ Every manifest field comes from one of exactly two places: the partition's **own
 
 ## 10. Reviewer Checklist (RC)
 
-- [ ] **RC1** — Milestone corresponds to Sprint D0a exactly; no scope creep into D0b or WBS 4.1
-- [ ] **RC2** — No ADR or roadmap file modified
-- [ ] **RC3** — The §0.2 provenance limitation (re-derived canonical, not as-received) is accepted
-- [ ] **RC4** — The §5.1 substitution of a stronger `C5` proof is accepted
-- [ ] **RC5** — Discovered defects 1 and 2 (§8) are accepted as pre-existing and correctly out of scope
-- [ ] **RC6** — Real dvol corpus spot-checked: 64/64 conformed, certification split plausible
-- [ ] **RC7** — Pre-conformance backup confirmed present and readable
-- [ ] **RC8** — Sign-off
+- [x] **RC1** — Milestone corresponds to Sprint D0a exactly; no scope creep into D0b or WBS 4.1
+- [x] **RC2** — No ADR or roadmap file modified
+- [x] **RC3** — The §0.2 provenance limitation (re-derived canonical, not as-received) is accepted *(basis: `OD-8`, Owner Decision Pack 2026-08-08 — consequence of ratified `DS-DEC-002`)*
+- [x] **RC4** — The §5.1 substitution of a stronger `C5` proof is accepted *(basis: `OD-8`)*
+- [x] **RC5** — Discovered defects 1 and 2 (§8) are accepted as pre-existing and correctly out of scope *(basis: `OD-8`)*
+- [x] **RC6** — Real dvol corpus spot-checked: 64/64 conformed, certification split plausible
+- [x] **RC7** — Pre-conformance backup confirmed present and readable
+- [x] **RC8** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08
 
   *Signature block added 2026-08-08 (audit finding `E-1` / `TD-4.12-5`). These three WBS 4.0 records carried a full RC checklist but no place to record sign-off, so they could not be signed as they stood. No existing content was altered.*
 

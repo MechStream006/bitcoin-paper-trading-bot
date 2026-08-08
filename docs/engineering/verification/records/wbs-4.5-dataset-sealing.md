@@ -186,19 +186,19 @@ way.
 
 ## 10. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.5 exactly; no 4.6+ scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — Rollback lever confirmed (two new files + one additive edit)
-- [ ] **RC7** — **The taxonomy extension (§3) is accepted** as ratified-roadmap scope, following the PR-7 / WBS 3.8a precedent
-- [ ] **RC8** — **`dataset.seal` as `discretionary` (§2) is accepted** — a seal must not be re-derivable
-- [ ] **RC9** — **HZ-4.4-1 is confirmed resolved** (§1) — the cap survives the seal, proven by sabotage
-- [ ] **RC10** — **`TD-4.5-1` accepted** — cross-database receipt/row atomicity is mitigated by ordering, not eliminated
-- [ ] **RC11** — **`HZ-4.5-2` accepted as a WBS 4.11 requirement** — a sealed ceiling can go stale if a cited input is later flagged
-- [ ] **RC12** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.5 exactly; no 4.6+ scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — Rollback lever confirmed (two new files + one additive edit)
+- [x] **RC7** — **The taxonomy extension (§3) is accepted** as ratified-roadmap scope, following the PR-7 / WBS 3.8a precedent *(basis: `OD-7`, Group E)*
+- [x] **RC8** — **`dataset.seal` as `discretionary` (§2) is accepted** — a seal must not be re-derivable *(basis: `OD-7`, Group D)*
+- [x] **RC9** — **HZ-4.4-1 is confirmed resolved** (§1) — the cap survives the seal, proven by sabotage *(basis: `OD-3`, Group F — discharges `4.4/RC9`)*
+- [x] **RC10** — **`TD-4.5-1` accepted** — cross-database receipt/row atomicity is mitigated by ordering, not eliminated *(basis: `OD-7`, Group E)*
+- [x] **RC11** — **`HZ-4.5-2` accepted as a WBS 4.11 requirement** — a sealed ceiling can go stale if a cited input is later flagged *(basis: `OD-3`, Group F — discharged by `4.11/RC10`)*
+- [x] **RC12** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

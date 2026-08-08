@@ -241,21 +241,21 @@ collection `quotes=66/66` · `report.py --check` OK (35 families) · chain
 
 ## 11. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.11 exactly; no Phase 5 scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — Rollback lever confirmed (two new files, additive)
-- [ ] **RC7** — **The §1 finding is accepted** — the registry was not append-only, and L3 is provided by a side ledger rather than by rebuilding 4.1
-- [ ] **RC8** — **The trigger-based mechanism (§2) is accepted** over Python-side hooks
-- [ ] **RC9** — **The DG-5 scope reading (§3) is accepted** — a bound-but-unused experiment does not block retirement (`TD-4.11-1`)
-- [ ] **RC10** — **The `HZ-4.5-2` resolution (§5) is accepted** — flag beside the seal, never recompute
-- [ ] **RC11** — **`TD-4.11-2` accepted** — L1 re-verification ends at retirement (§6)
-- [ ] **RC12** — **`TD-4.11-3` accepted** — L3 is a forward guarantee; pre-trigger history is reported, not reconstructed
-- [ ] **RC13** — **`HZ-4.11-1` acknowledged** — fourth instance of "recorded but nothing alerts"
-- [ ] **RC14** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.11 exactly; no Phase 5 scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — Rollback lever confirmed (two new files, additive)
+- [x] **RC7** — **The §1 finding is accepted** — the registry was not append-only, and L3 is provided by a side ledger rather than by rebuilding 4.1 *(basis: `OD-7`, Group E)*
+- [x] **RC8** — **The trigger-based mechanism (§2) is accepted** over Python-side hooks *(basis: `OD-7`, Group E)*
+- [x] **RC9** — **The DG-5 scope reading (§3) is accepted** — a bound-but-unused experiment does not block retirement (`TD-4.11-1`) *(basis: `OD-7`, Group D — `TD-4.11-1` also referenced in Group G; same low-severity treatment either way)*
+- [x] **RC10** — **The `HZ-4.5-2` resolution (§5) is accepted** — flag beside the seal, never recompute *(basis: `OD-3`, Group F — discharges `4.5/RC11`)*
+- [x] **RC11** — **`TD-4.11-2` accepted** — L1 re-verification ends at retirement (§6) *(basis: `OD-3`, Group G)*
+- [x] **RC12** — **`TD-4.11-3` accepted** — L3 is a forward guarantee; pre-trigger history is reported, not reconstructed *(basis: `OD-3`, Group G)*
+- [x] **RC13** — **`HZ-4.11-1` acknowledged** — fourth instance of "recorded but nothing alerts" *(basis: `OD-5`, Group B)*
+- [x] **RC14** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

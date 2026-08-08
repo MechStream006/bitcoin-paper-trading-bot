@@ -6,7 +6,7 @@
 | **Companion** | [Closure Review](phase-4-closure-review.md) · [Engineering Audit](phase-4-engineering-audit.md) · [Governance Closure Report](phase-4-governance-closure-report.md) · [Governance Completion Package](phase-4-governance-completion-package.md) |
 | **Engineering freeze** | `82ce7c0e382ed95ee0e15c8bfc0a77a6f831e62c` · tree `7e7e2cc4cad3c61bd825262d6cb65c8a741d95e5` |
 | **Created** | 2026-08-08 — closing audit finding `AF-3` (declared deliverable absent) |
-| **Status** | 🔶 **CLOSEOUT PREPARED — PHASE 4 NOT CLOSED.** See §4 |
+| **Status** | 🔶 **CLOSEOUT PREPARED — PHASE 4 NOT CLOSED.** *(Updated 2026-08-08: G1–G4 all discharged — §7. Formal closure remains an owner act, not yet made.)* See §4 |
 
 ---
 
@@ -65,7 +65,7 @@ Nine blockers, none of them engineering.
 
 | # | Blocker | State |
 |---|---|---|
-| G1 | 146 RC items across 14 records | **0 signed** |
+| G1 | 146 RC items across 14 records | ✅ **CLOSED 2026-08-08** — 146/146 signed, `Reviewer: Rohith Suresh`, see [Owner Decision Pack §10](owner-decision-pack-2026-08-08.md) |
 | G2 | `DS-DEC-007` (`P4-9` wording) | ✅ **RATIFIED 2026-08-08** — [package](../../ds_dec_007_decision_package.md), roadmap §8.2 v1.0.3 |
 | G3 | `AF-2` — rollback levers / `dataset_policy.yaml` | ✅ **RESOLVED 2026-08-08** — Option A accepted, [deviation record](af-2-rollback-lever-deviation.md), roadmap §10/§13.1 v1.0.3 |
 | G4 | `DS-DEC-006`, `T-2`, `T-4`, `T-5`, `T-6` | ✅ **CLOSED 2026-08-08** — see [Owner Decision Pack](owner-decision-pack-2026-08-08.md) |
@@ -121,15 +121,21 @@ alerting — the latter being one pattern behind four separate hazards.
 
 ## 7. Closure condition
 
-Phase 4 closes when **G1–G4** are discharged. **`G2`, `G3` and `G4` are now
-closed** (2026-08-08 — `DS-DEC-007` ratified, `AF-2` resolved by Option A,
-`DS-DEC-006`/`T-2`/`T-4`/`T-5`/`T-6` all decided via the
-[Owner Decision Pack](owner-decision-pack-2026-08-08.md)). **`G1` (146 unsigned
-RC items) is the only remaining governance blocker to Phase 4 closure** — its
-substance is now group-accepted (`OD-3`–`OD-8`), but no individual RC item has
-been signed. **O1–O4** are operational readiness for Phase 5 rather than
-Phase 4 closure conditions, but O2 and O3 grow more consequential with every
-artifact Phase 5 adds to a governance layer that exists in one place.
+Phase 4 closes when **G1–G4** are discharged. **All four are now closed**
+(2026-08-08 — `DS-DEC-007` ratified, `AF-2` resolved by Option A,
+`DS-DEC-006`/`T-2`/`T-4`/`T-5`/`T-6` all decided, and `G1`'s 146 RC items
+across all 14 records signed, `Reviewer: Rohith Suresh`, `Date: 2026-08-08` —
+see the [Owner Decision Pack](owner-decision-pack-2026-08-08.md), which now
+records both the group-level acceptances and the sign-off itself). **O1–O4**
+remain operational readiness for Phase 5 rather than Phase 4 closure
+conditions, but O2 and O3 grow more consequential with every artifact Phase 5
+adds to a governance layer that exists in one place.
+
+**With G1–G4 discharged, nothing engineering, procedural, or documentary
+remains to prevent the owner from declaring Phase 4 formally closed.** That
+declaration is still not made here — consistent with §1's stance throughout
+this document — it is Rohith's act, not a status this record can assert on
+his behalf.
 
 **Nothing in this document marks Phase 4 closed.** That is the owner's act, and
 one governance blocker — signature, not substance — remains open.

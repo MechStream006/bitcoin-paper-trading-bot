@@ -200,18 +200,18 @@ holds.
 
 ## 7. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.3 exactly; no 4.4+ scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — Rollback lever confirmed (purely additive, two new files)
-- [ ] **RC7** — **The RF5 rule (§2) is accepted** — `window_end + horizon <= as_of`
-- [ ] **RC8** — **The RF6 rule (§2) is accepted** — calendar days, latest source binding, silent pass on unknown coverage
-- [ ] **RC9** — **`DuplicateLineageError` is accepted** as a declaration-stage policy rather than a 4.1 registry change
-- [ ] **RC10** — `HZ-4.3-1` (non-transactional declare+index) accepted as detected-not-prevented
-- [ ] **RC11** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.3 exactly; no 4.4+ scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — Rollback lever confirmed (purely additive, two new files)
+- [x] **RC7** — **The RF5 rule (§2) is accepted** — `window_end + horizon <= as_of` *(basis: `OD-7`, Group D)*
+- [x] **RC8** — **The RF6 rule (§2) is accepted** — calendar days, latest source binding, silent pass on unknown coverage *(basis: `OD-7`, Group D)*
+- [x] **RC9** — **`DuplicateLineageError` is accepted** as a declaration-stage policy rather than a 4.1 registry change *(basis: `OD-7`, Group D — confirmed 2026-08-08 as legitimately covered by content)*
+- [x] **RC10** — `HZ-4.3-1` (non-transactional declare+index) accepted as detected-not-prevented *(basis: `OD-3`, mechanical — confirmed 2026-08-08: this is a crash-recovery detection mechanism, not the "recorded-but-unalerted" Group B pattern)*
+- [x] **RC11** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

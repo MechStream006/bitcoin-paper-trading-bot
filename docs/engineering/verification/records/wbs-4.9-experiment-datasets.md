@@ -188,19 +188,19 @@ or `research/reports/`.**
 
 ## 11. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.9 exactly; no 4.10+ scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — Rollback lever confirmed (two new files, additive)
-- [ ] **RC7** — **The derived-not-stored use-count (§2) is accepted**
-- [ ] **RC8** — **The declared-not-invented denominator (§3) is accepted** — `34` is not hard-coded
-- [ ] **RC9** — **DI8's visible-not-refused reading (§5) is accepted**
-- [ ] **RC10** — **`TD-4.9-2` acknowledged** — `trial_registration` is free text; a typo creates a phantom independent trial. A trial registry would need its own decision
-- [ ] **RC11** — **`HZ-4.9-2` acknowledged** — whether an unused bound position counts toward the denominator is a statistical governance question, not a builder one
-- [ ] **RC12** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.9 exactly; no 4.10+ scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — Rollback lever confirmed (two new files, additive)
+- [x] **RC7** — **The derived-not-stored use-count (§2) is accepted** *(basis: `OD-7`, Group D/E — confirmed 2026-08-08 as legitimately covered by content, defended by TV3)*
+- [x] **RC8** — **The declared-not-invented denominator (§3) is accepted** — `34` is not hard-coded *(basis: `OD-7`, Group D/E — confirmed 2026-08-08: protects the frozen `n_trials=34` constant from re-invention)*
+- [x] **RC9** — **DI8's visible-not-refused reading (§5) is accepted** *(basis: `OD-7`, Group D)*
+- [x] **RC10** — **`TD-4.9-2` acknowledged** — `trial_registration` is free text; a typo creates a phantom independent trial. A trial registry would need its own decision *(basis: `OD-3`, Group G)*
+- [x] **RC11** — **`HZ-4.9-2` acknowledged** — whether an unused bound position counts toward the denominator is a statistical governance question, not a builder one *(basis: `OD-3`, Group G — same item also referenced in Group B; low-severity either way)*
+- [x] **RC12** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08

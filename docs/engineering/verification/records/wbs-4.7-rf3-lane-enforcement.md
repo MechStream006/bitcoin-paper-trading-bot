@@ -204,18 +204,18 @@ or `research/reports/`.**
 
 ## 11. Reviewer Checklist (RC)
 
-*Pending — Rohith.*
+*Signed 2026-08-08 — see below.*
 
-- [ ] **RC1** — Milestone corresponds to WBS 4.7 exactly; no later scope
-- [ ] **RC2** — No file under `docs/architecture/` touched
-- [ ] **RC3** — "Files Changed" matches `git status` exactly
-- [ ] **RC4** — At least two tests read in full
-- [ ] **RC5** — Full-suite counts reproduced in both environments
-- [ ] **RC6** — Rollback lever confirmed (one new module, additive wiring)
-- [ ] **RC7** — **The `not_evaluable` third outcome (§3) is accepted** — RF3 reports rather than guesses when a lane is ambiguous
-- [ ] **RC8** — **The one-rule table (§4) is accepted** — not generalised into a lattice
-- [ ] **RC9** — **`TD-4.7-1` acknowledged** — RF3 is inert on today's declarations until they carry a lane code; making it bite needs a `DS-DEC`
-- [ ] **RC10** — **`HZ-4.7-1` accepted** — RF3 guards the builder path only, mirroring `HZ-4.6-1`
-- [ ] **RC11** — Sign-off
+- [x] **RC1** — Milestone corresponds to WBS 4.7 exactly; no later scope
+- [x] **RC2** — No file under `docs/architecture/` touched
+- [x] **RC3** — "Files Changed" matches `git status` exactly
+- [x] **RC4** — At least two tests read in full
+- [x] **RC5** — Full-suite counts reproduced in both environments
+- [x] **RC6** — Rollback lever confirmed (one new module, additive wiring)
+- [x] **RC7** — **The `not_evaluable` third outcome (§3) is accepted** — RF3 reports rather than guesses when a lane is ambiguous *(basis: `OD-7`, Group D)*
+- [x] **RC8** — **The one-rule table (§4) is accepted** — not generalised into a lattice *(basis: `OD-7`, Group D)*
+- [x] **RC9** — **`TD-4.7-1` acknowledged** — RF3 is inert on today's declarations until they carry a lane code; making it bite needs a `DS-DEC` *(basis: `OD-3`, Group G)*
+- [x] **RC10** — **`HZ-4.7-1` accepted** — RF3 guards the builder path only, mirroring `HZ-4.6-1` *(basis: `OD-4`, Group A)*
+- [x] **RC11** — Sign-off
 
-  **Reviewer:** _______________  **Date:** _______________
+  **Reviewer:** Rohith Suresh  **Date:** 2026-08-08
