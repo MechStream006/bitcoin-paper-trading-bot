@@ -34,7 +34,7 @@ Severities are as recorded by the owning milestone: 🔴 High · 🟡 Medium · 
 | `TD-4.3-4` | `_MATURITY_DEMANDING` is a fixed vocabulary | 🟢 | `wbs-4.3` |
 | `TD-4.4-1` | TB1 unreachable through the normal path — Tier A refuses first | 🟡 | `wbs-4.4` |
 | `TD-4.4-2` | Tier D thresholds are module constants | 🟡 | `wbs-4.4` |
-| **`TD-4.4-3`** | **`InputAdmissibility` is caller-supplied; nothing derives it from resolved references.** ⛔ *2026-08-08 — accepted with a binding condition ([`OD-6`](verification/records/owner-decision-pack-2026-08-08.md)): MUST resolve before any Phase 5 code path invokes the Dataset Builder | 🟡 | `wbs-4.4` |
+| **`TD-4.4-3`** | **`InputAdmissibility` is caller-supplied; nothing derives it from resolved references.** ⛔ *2026-08-08 — accepted with a binding condition ([`OD-6`](verification/records/owner-decision-pack-2026-08-08.md)): MUST resolve before any Phase 5 code path invokes the Dataset Builder. 🔶 *2026-08-09 — resolution authority RATIFIED ([`OD-10`](verification/records/od-10-td-4-4-3-ratification.md)); implementation not started; still open* | 🟡 | `wbs-4.4`, `wbs-4.12` |
 | `TD-4.4-4` | `check_tier_a` re-runs registry Tier A, so findings all carry `TA1` | 🟢 | `wbs-4.4` |
 | **`TD-4.5-1`** | **Seal receipt and sealed row are in different databases — not one transaction** | 🔴 | `wbs-4.5` |
 | `TD-4.5-2` | Already-sealed check unreachable — the phase guard fires first | 🟢 | `wbs-4.5` |
