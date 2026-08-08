@@ -1,0 +1,44 @@
+{
+  "run_date": "2026-06-10T15:55:50.356317+00:00",
+  "lockbox": [
+    "2025-06-01",
+    "2026-05-31"
+  ],
+  "calendar_days": 365,
+  "A_pure_h6": {
+    "n": 2,
+    "mean_pct": -4.6760071582971126,
+    "total_ret_pct": -9.561612241770035,
+    "cagr_pct": -9.561612241770035,
+    "sharpe": -3.031541852678464,
+    "sortino": NaN,
+    "calmar": -0.8521878409942862,
+    "maxdd_pct": 11.220075882113111,
+    "win_pct": 50.0,
+    "profit_factor": 0.16649277466090298,
+    "exposure_pct": 3.8356164383561646
+  },
+  "B_h6_atr": {
+    "n": 1,
+    "mean_pct": -11.220075882113118,
+    "total_ret_pct": -11.220075882113111,
+    "cagr_pct": -11.220075882113111,
+    "sharpe": NaN,
+    "sortino": NaN,
+    "calmar": -1.0,
+    "maxdd_pct": 11.220075882113111,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "exposure_pct": 1.9178082191780823
+  },
+  "year_contribution": {
+    "A": {
+      "2025": -9.352014316594225
+    },
+    "B": {
+      "2025": -11.220075882113118
+    }
+  },
+  "atr_survives": false,
+  "recommendation": "REJECT BOTH \u2014 Pure H6 did not generalize positively on the lockbox."
+}

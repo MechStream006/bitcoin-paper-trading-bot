@@ -28,6 +28,8 @@ for p in (ROOT / "research", ROOT / "research" / "admissibility",
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+from forward_evidence.pre_reg_guard import _sha256_lf  # noqa: E402
+
 from dataset_builder import citation_index as ci  # noqa: E402
 from dataset_builder import registry as reg  # noqa: E402
 from dataset_builder import resolution as res  # noqa: E402
@@ -102,10 +104,24 @@ class TestResultInvariance:
         )
 
     def test_every_invariant_file_is_bit_identical(self):
-        """Byte-for-byte comparison against the pre-change baseline.
+        """Content comparison against the pre-change baseline.
 
         Criterion 2: existing published research outputs remain bit-identical.
         Criterion 3: any observable difference is a failed milestone.
+
+        Hashing uses `pre_reg_guard._sha256_lf` — the platform's own convention
+        for hashing governed source artifacts, which normalises CRLF -> LF
+        before hashing. The same function guards the production pre-registration
+        lock, and the governance receipt ledger uses the identical convention
+        (`receipts.sha256_lf`).
+
+        The original raw `sha256(read_bytes())` recorded a *checkout rendering*
+        rather than repository content: this repository has `core.autocrlf=true`,
+        so two of the pinned files carry CRLF in a Windows working tree while
+        their committed blobs are LF. Those entries could therefore never match
+        on Linux — including in CI — regardless of whether anything changed.
+        Normalising fixes what is measured; it does not relax it. A single
+        changed character in any of these files still fails this test.
         """
         baseline = json.loads((ROOT / "BASELINE_46.json").read_text())
         drift = []
@@ -114,7 +130,7 @@ class TestResultInvariance:
             if not p.exists():
                 drift.append(f"{rel}: MISSING")
                 continue
-            now = hashlib.sha256(p.read_bytes()).hexdigest()
+            now = _sha256_lf(p)
             was = baseline.get(rel)
             if was is None:
                 drift.append(f"{rel}: absent from baseline")

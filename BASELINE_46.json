@@ -5,8 +5,8 @@
   "research/forward_evidence/decision_function_g3_atr_expansion.py": "acaf70e9f79dc3a96648572fcf48b6a730caf5b6fef76aa0b61355f092fb5f3c",
   "research/forward_evidence/decision_function_g3_tsmom.py": "90865666cf83c6a1972ba5d0ce7fb8d4694cd2281c9f5654cd99042940a5b7c4",
   "research/forward_evidence/decision_function_h5.py": "fc1720ccb3d9adf99ddcee2e7d9d4d8d655e3ce7ffff4e28b7fd432d0f18a2be",
-  "research/forward_evidence/decision_function_ivrv.py": "8bcc946b5a053a766c9dcb802b74d087e2f37afb2c792fdbf320d7f5c4fb05a6",
+  "research/forward_evidence/decision_function_ivrv.py": "4e57efbfa3114b08dd94e6fa9c7a1b778544e68f2b6a16cb334035a4b52daae1",
   "research/forward_evidence/m0_pre_register.py": "5b61ae190526fd8b567f5f3f0ec29b9a2cc5f81c2d00c77b73b0a8ff807d913b",
-  "research/forward_evidence/pre_registration.json": "6f1cbf999a62100039f40bc7a57805b07bc4170aa6ada5745bb1f2d4ae473e8c",
-  "research/reports/evidence_library/lockbox_validation.json": "868a161dd7e924d4e14fe1e274da93f4cd1c7d7db08e567502b84d6e1f144f58"
+  "research/forward_evidence/pre_registration.json": "9201bd3a9d90d324f2fb6af7c1d58a73d1e060dd80ce29206800460b713b5a27",
+  "research/reports/evidence_library/lockbox_validation.json": "d3923270167ac8bf66f208805af70dcaac7bf9db8391c821aa93b8ba0fb37a01"
 }

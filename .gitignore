@@ -74,5 +74,22 @@ h6_build*.err*
 h6_validation*.log
 h6_validation*.err*
 
-# Corpus summaries, hypothesis reports, smoke-test artifacts — all regenerable
-research/reports/
+# Corpus summaries, hypothesis reports, smoke-test artifacts — all regenerable.
+#
+# Written as `dir/*` rather than `dir/` so a single file can be re-included
+# below: git never descends into an excluded *directory*, so a `!` rule inside
+# one has no effect.
+research/reports/*
+!research/reports/evidence_library/
+research/reports/evidence_library/*
+
+# ...except the published lockbox validation record, which is NOT regenerable:
+# reproducing it means re-running run_lockbox_validation.py, which opens the
+# sealed lockbox (2025-06-01..2026-05-31). That is the final pre-promotion OOS
+# test and spending it is irreversible.
+#
+# It is also load-bearing for two checks: WBS 4.6's RF2 governed source is
+# validated against it (`test_governed_source_matches_published_record`), and
+# BASELINE_46.json pins it. Both are unverifiable on a fresh clone or in CI
+# while the file is ignored.
+!research/reports/evidence_library/lockbox_validation.json
