@@ -94,10 +94,10 @@ real data (`TD-4.12-1`).
 | P4-6 | Training structure; RF4 refuses today | ✅ MET |
 | P4-7 | L1/L2/L3 demonstrated separately | ⚠️ **PARTIAL** — L3 on real data; L1/L2 on fixtures |
 | P4-8 | Builder reads no operational data | ✅ MET |
-| P4-9 | `--check` clean; chains clean; suites zero new failures | ⚠️ **AMENDMENT REQUIRED** — §12 |
+| P4-9 | `--check` clean; chains clean; suites zero new failures | ✅ **MET** — `DS-DEC-007` ratified 2026-08-08, §12 |
 | P4-10 | Closure Review with Unowned bucket | ✅ MET |
 
-**8 met, 2 partial, 0 failed.**
+**9 met, 1 partial, 0 failed.** *(Updated 2026-08-08 — `DS-DEC-007` ratification moved `P4-9` from AMENDMENT REQUIRED to MET. Original tally at the time this report was written: 8 met, 2 partial, 0 failed.)*
 
 ## 4. Governance decision matrix
 
@@ -110,15 +110,17 @@ real data (`TD-4.12-1`).
 | `DS-DEC-004` + amendment | RF2 via Dataset Builder (Option B) | ✅ Ratified; frozen exceptions honoured |
 | `LS-DEC-003/004/005/007/008/009` | Phase 3 closure | ✅ Ratified 2026-08-07 (`E2` discharged) |
 | `DS-DEC-003` | — | Do-not-invent stands; not scheduled |
-| `DS-DEC-006` | Retro-binding 70 historical runs | **OWED**, untouched |
-| `T-2` | Scope transfer | **Unratified** |
-| `T-4` | Training scope → structure only | **Unratified**; non-gating reasoning recorded at 4.10 §1 |
-| `T-5` | `ADR-I011` LG7/DI8 → 4.9 | **Unratified**; discharged in substance |
-| `T-6` | → 4.2 | **Unratified**; discharged in substance |
+| `DS-DEC-006` | Retro-binding 70 historical runs | ✅ **FORMALLY DEFERRED 2026-08-08** (`OD-2`) |
+| `T-2` | Scope transfer | ✅ **RATIFIED 2026-08-08** (`OD-1`) |
+| `T-4` | Training scope → structure only | ✅ **RATIFIED 2026-08-08** (`OD-1`); non-gating reasoning recorded at 4.10 §1 |
+| `T-5` | `ADR-I011` LG7/DI8 → 4.9 | ✅ **RATIFIED 2026-08-08** (`OD-1`); discharged in substance |
+| `T-6` | → 4.2 | ✅ **RATIFIED 2026-08-08** (`OD-1`); discharged in substance |
 | `TD-4.5-1` ruling | Seal receipt targets the platform chain | ✅ Settled — "the ledger must not fork" |
 
-**No new governance decision was required to reach operational closure.**
-Four transfers (`T-2`, `T-4`, `T-5`, `T-6`) and `DS-DEC-006` remain open.
+**No new governance decision was required to reach operational closure.** That
+remained true through operational closure itself. **Updated 2026-08-08:** the
+four transfers and `DS-DEC-006` were separately decided afterward — see the
+[Owner Decision Pack](owner-decision-pack-2026-08-08.md). None remain open.
 
 ## 5. Technical debt register — 41 items
 
@@ -301,6 +303,16 @@ ratified exit criterion. It is not applied here.**
 > contradict `TD-4.5-1`.
 > **Recommendation: RATIFY.**
 
+### `DS-DEC-007` — RATIFIED 2026-08-08
+
+Rohith ratified `DS-DEC-007` exactly as recommended above. Applied to
+`phase_4_dataset_builder_roadmap.md` §8.2 (v1.0.3) — see the
+[`DS-DEC-007` Decision Package](../../ds_dec_007_decision_package.md) for the
+full record and the roadmap for the amended criterion text. `P4-9` is now
+**MET** (§8 table, updated). No implementation change, no receipt re-issued,
+no chain re-verified differently — this is a wording amendment only, as scoped
+in the decision package.
+
 ## 13. Production / canonical divergence review
 
 **The earlier framing of this divergence was wrong** (correction C-2). It is not
@@ -378,7 +390,7 @@ finding, not a deployment finding.
 |---|---|
 | **Engineering complete?** | ✅ **YES.** 14 records, 842 tests, both suites green, all six refusal points live, all eight DGs enforced. Two ADR clauses unsatisfied (§10.3 unowned; L1/L2 not run on real data) — both are *unowned scope*, not incomplete milestones |
 | **Operationally activated?** | ⚠️ **PARTIALLY.** Fully activated on the canonical host: real store, real sealed dataset, real receipt, verified backup, healthcheck coverage. **Not activated on production** — code 9 commits behind, store absent |
-| **Governance complete?** | ❌ **NO.** 146/146 reviewer items unsigned; `P4-9` needs `DS-DEC-007`; four scope transfers and `DS-DEC-006` unratified |
+| **Governance complete?** | ❌ **NO.** 146/146 reviewer items unsigned. *(Updated 2026-08-08: `P4-9`'s `DS-DEC-007` dependency is RATIFIED — §12; the 55 decision-bearing and 114 mechanical RC items are group-accepted, one with a binding condition; and the four scope transfers plus `DS-DEC-006` are all decided — [Owner Decision Pack](owner-decision-pack-2026-08-08.md). The remaining gap is narrower than when this report was written: individual signature on the 146 RC items, not open substance.)* |
 | **Ready for Phase 5?** | ❌ **NO** — blocked on governance sign-off (§15), not on engineering |
 
 **Summary:** Phase 4 built what it promised and proved it on real data. What
@@ -390,11 +402,11 @@ things are unsigned, and the output is single-homed.
 | # | Decision | Blocking Phase 5? |
 |---|---|---|
 | **1** | **Sign the 14 WBS reviewer checklists** (146 items; 22 decision-bearing) | ✅ **Yes** |
-| **2** | **`DS-DEC-007`** — amend `P4-9` (§12); recommendation: RATIFY | ✅ **Yes** |
+| **2** | **`DS-DEC-007`** — amend `P4-9` (§12) | ✅ **RATIFIED 2026-08-08** — closed |
 | **3** | **Accept the single-homed governance layer, or fund BK3** (§13.3) | ⚠️ Should be |
 | **4** | Authorise the Phase 4 production deployment (§13.4) | ❌ No |
-| **5** | Ratify or close `T-2`, `T-4`, `T-5`, `T-6` | ❌ No — none gated any milestone |
-| **6** | `DS-DEC-006` — retro-binding the 70 historical runs | ❌ No |
+| **5** | Ratify or close `T-2`, `T-4`, `T-5`, `T-6` | ✅ **RATIFIED 2026-08-08** — closed (`OD-1`) |
+| **6** | `DS-DEC-006` — retro-binding the 70 historical runs | ✅ **FORMALLY DEFERRED 2026-08-08** — closed (`OD-2`) |
 | **7** | Whether to materialise the first dataset (`TD-4.12-1`) | ❌ No — but it leaves §16 L1/L2 unproven on real data |
 | **8** | Scope governance observability as one work item (§6) | ❌ No |
 
@@ -410,7 +422,7 @@ durability gates.
 | # | Gate | Rationale | Owner |
 |---|---|---|---|
 | **E1** | All 14 WBS records signed; 146 RC items resolved | Phase 3 required the identical discipline (`E2`) | Rohith |
-| **E2** | `DS-DEC-007` decided | Phase 4 cannot be declared closed against an unmeetable criterion | Rohith |
+| **E2** | ✅ **CLOSED 2026-08-08** — `DS-DEC-007` decided (RATIFIED) | Phase 4 cannot be declared closed against an unmeetable criterion | Rohith |
 | **E3** | Sign-off instruction names **fourteen** records, not twelve | Two would otherwise be silently skipped (§11.4) | Rohith |
 | **E4** | 4.0 records given a signature block (`TD-4.12-5`) | They currently offer nowhere to sign | Engineering |
 | **E5** | Durability decision on the single-homed governance layer (§13.3) | Phase 5 will add to a layer that exists in one place | Rohith |

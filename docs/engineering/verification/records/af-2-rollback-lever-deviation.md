@@ -7,7 +7,7 @@
 | **Type** | **Deviation record.** States what was built versus what was declared. **Ratifies nothing** |
 | **Created** | 2026-08-08 |
 | **Decision required from** | Rohith — accept the deviation, or schedule implementation |
-| **Status** | **OPEN — awaiting owner acceptance** |
+| **Status** | ✅ **RESOLVED 2026-08-08 — Option A selected (accept the deviation)** |
 
 ---
 
@@ -86,18 +86,25 @@ deployment to resolve, not a config change.
 
 ## 6. Options for the owner
 
-| Option | Consequence |
-|---|---|
-| **A — Accept the deviation** *(recommended while the builder has no consumer)* | Roadmap §10 and §13.1 are amended to record revert-only rollback for 4.2/4.4/4.7 and to drop `dataset_policy.yaml`. Phase 4 closes with the deviation recorded. Revisit if Phase 5 adds a runtime consumer |
-| **B — Schedule implementation** | A scoped milestone builds `dataset_policy.yaml` and the three read paths with tests. Engineering unfreezes. `AF-2` closes on delivery, not on acceptance |
-| **C — Defer without a record** | **Not recommended.** This is the status quo that produced `AF-2`: the roadmap asserts a control that does not exist, and nothing says so |
+| Option | Consequence | Selected |
+|---|---|---|
+| **A — Accept the deviation** *(recommended while the builder has no consumer)* | Roadmap §10 and §13.1 are amended to record revert-only rollback for 4.2/4.4/4.7 and to drop `dataset_policy.yaml`. Phase 4 closes with the deviation recorded. Revisit if Phase 5 adds a runtime consumer | ✅ **2026-08-08** |
+| **B — Schedule implementation** | A scoped milestone builds `dataset_policy.yaml` and the three read paths with tests. Engineering unfreezes. `AF-2` closes on delivery, not on acceptance | Not selected |
+| **C — Defer without a record** | **Not recommended.** This is the status quo that produced `AF-2`: the roadmap asserts a control that does not exist, and nothing says so | Not selected |
 
-**Recommendation: Option A**, with the trigger for revisiting stated explicitly
-— the first Phase 5 change that gives the Dataset Builder a runtime consumer.
+**Rohith selected Option A on 2026-08-08**, matching the recommendation. No
+`dataset_policy.yaml` was created; no rollback lever was implemented; the three
+milestones' rollback remains revert-only, now documented rather than
+discovered. Trigger for revisiting, stated explicitly and unchanged from the
+recommendation: **the first Phase 5 change that gives the Dataset Builder a
+runtime consumer.**
 
-## 7. What this record does not do
+## 7. What this record does — updated 2026-08-08
 
-It does not amend the roadmap, does not mark any decision ratified, and does not
-close `AF-2`. `AF-2` closes when the owner selects an option; until then it
-remains an open Phase 4 blocker with its status now documented rather than
-merely observed.
+`AF-2` is **resolved**. `phase_4_dataset_builder_roadmap.md` §10 and §13.1 are
+amended (v1.0.3) to record revert-only rollback for 4.2/4.4/4.7 and to drop the
+`dataset_policy.yaml` deliverable — exactly Option A's stated consequence, no
+more. No code was written, no config file created, no rollback lever
+implemented, no production change, no engineering unfreeze. This record's
+rationale (§4) and materiality assessment (§5) stand unchanged as the
+permanent explanation for why the roadmap now reads this way.

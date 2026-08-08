@@ -3,16 +3,16 @@
 | Field | Value |
 |---|---|
 | **Title** | Engineering Implementation Roadmap — Phase 4, Research Dataset Builder |
-| **Status** | **Draft — planning artifact. WBS 4.0 COMPLETE (D0a+D0b). `E2` DISCHARGED 2026-08-07 — Sprint D1 OPEN; WBS 4.1 awaits owner authorisation** |
-| **Version** | **1.0.2** |
+| **Status** | **Draft — planning artifact. WBS 4.0–4.11 COMPLETE. `DS-DEC-007` RATIFIED, `AF-2` resolved (Option A), `T-2`/`T-4`/`T-5`/`T-6` ratified, `DS-DEC-006` formally deferred — all 2026-08-08. Engineering frozen at `82ce7c0`; Phase 4 closure remains gated on `G1` (146 unsigned RC items) only** |
+| **Version** | **1.0.4** |
 | **Document Type** | Engineering Implementation Plan (not an ADR, not an architecture document) |
 | **Governing ADR** | [`ADR-I012`](../architecture/adr/ADR-I012-research-dataset-builder.md) Research Dataset Builder v0.1.0 (**Draft**) |
 | **Parent roadmap** | [`implementation_roadmap_v1.md`](implementation_roadmap_v1.md) v1.0.1, Phase 4 (WBS 4.1–4.7) |
 | **Predecessors** | [Phase 4 Gap Matrix](verification/records/phase-4-gap-matrix.md) · [Phase 3 Closeout](verification/records/phase-3-closeout.md) |
-| **Companion** | [Blocker Decision Brief](ds_dec_phase4_blockers_decision_brief.md) · [Phase 4 Readiness Revision](verification/records/phase-4-readiness-revision.md) |
+| **Companion** | [Blocker Decision Brief](ds_dec_phase4_blockers_decision_brief.md) · [Phase 4 Readiness Revision](verification/records/phase-4-readiness-revision.md) · [`DS-DEC-007` Decision Package](ds_dec_007_decision_package.md) · [`AF-2` Deviation Record](verification/records/af-2-rollback-lever-deviation.md) |
 | **Authors** | Rohith Suresh — Owner / Architect · Drafted with Claude Opus 5 |
 | **Date** | 2026-08-06 |
-| **Changelog** | **1.0.2 (2026-08-06):** records Rohith's formal ratification of `DS-DEC-001`, `DS-DEC-002`, `G-CORPUS` and `DS-DEC-005`. Applies each adopted recommendation to scope, method, sequencing and deliverables: WBS 4.0 becomes **local re-derivation + sampled verification** rather than re-download; `DR1` is re-rated from Moderate/**Severe** to **Low** on a structural, not procedural, basis; sprint D0 splits into **D0a (dvol pilot) / D0b (full)**; `G-CORPUS` opens under binding conditions `C1`–`C6`; the dataset registry is fixed at `research/dataset_builder/dataset_builder.db`. Discharges `E7`, `E8`, `E10`. **No architectural change; `ADR-I012` untouched.** **1.0.1 (2026-08-06):** factual update only. Discharges entry criterion `E3` and assumption `A9` — WBS 3.11 is committed (`ffaae2b`), tagged `phase-3-baseline-v1.1.0`, and pushed; local and remote are identical at `0 0` divergence. Re-rates `DR8`. **No architectural change, no scope change, no WBS change.** The four `DS-DEC` recommendations remain **unratified** and are deliberately NOT reflected in scope, method, or deliverable wording — see [Readiness Revision §3](verification/records/phase-4-readiness-revision.md). **1.0.0 (2026-08-06):** initial draft following the `ADR-I012` architecture audit |
+| **Changelog** | **1.0.4 (2026-08-08):** records Rohith's Owner Decision Pack (`OD-1`–`OD-8`): ratifies `T-2`/`T-4`/`T-5`/`T-6` (§3) and formally defers `DS-DEC-006`; accepts all 55 decision-bearing and 114 mechanical RC items across the 14 WBS 4.<n> records group-by-group, with `TD-4.4-3` (Group C) accepted **on a binding condition** — it must resolve before any Phase 5 code path invokes the Dataset Builder. No RC item individually signed; no code, schema, production, or receipt-chain change. Full record: [Owner Decision Pack](verification/records/owner-decision-pack-2026-08-08.md). **1.0.3 (2026-08-08):** records Rohith's ratification of `DS-DEC-007` (amends `P4-9`, §8.2) and resolution of `AF-2` by Option A (accept the deviation; amends §10 and §13.1 for 4.2/4.4/4.7 and drops the `dataset_policy.yaml` deliverable). Both decisions are documentation-only — no code, schema, or receipt-taxonomy change; no production change. **1.0.2 (2026-08-06):** records Rohith's formal ratification of `DS-DEC-001`, `DS-DEC-002`, `G-CORPUS` and `DS-DEC-005`. Applies each adopted recommendation to scope, method, sequencing and deliverables: WBS 4.0 becomes **local re-derivation + sampled verification** rather than re-download; `DR1` is re-rated from Moderate/**Severe** to **Low** on a structural, not procedural, basis; sprint D0 splits into **D0a (dvol pilot) / D0b (full)**; `G-CORPUS` opens under binding conditions `C1`–`C6`; the dataset registry is fixed at `research/dataset_builder/dataset_builder.db`. Discharges `E7`, `E8`, `E10`. **No architectural change; `ADR-I012` untouched.** **1.0.1 (2026-08-06):** factual update only. Discharges entry criterion `E3` and assumption `A9` — WBS 3.11 is committed (`ffaae2b`), tagged `phase-3-baseline-v1.1.0`, and pushed; local and remote are identical at `0 0` divergence. Re-rates `DR8`. **No architectural change, no scope change, no WBS change.** The four `DS-DEC` recommendations remain **unratified** and are deliberately NOT reflected in scope, method, or deliverable wording — see [Readiness Revision §3](verification/records/phase-4-readiness-revision.md). **1.0.0 (2026-08-06):** initial draft following the `ADR-I012` architecture audit |
 | **Code written** | **None.** Documentation only |
 
 > **What this document is not.** It designs no architecture and decides nothing `ADR-I012` has not already decided. Where it proposes a file path, table name, or signature, that is **engineering planning** — one conforming realisation of an already-written contract. The audit that grounds it is [`phase-4-gap-matrix.md`](verification/records/phase-4-gap-matrix.md); this roadmap does not restate its evidence, only its conclusions.
@@ -74,16 +74,24 @@ Full evidence in the [Gap Matrix](verification/records/phase-4-gap-matrix.md). F
 
 ---
 
-## 3. Scope Transfers — `T-1`, `T-3` Ratified; `T-2`, `T-4`–`T-6` Pending
+## 3. Scope Transfers — All Six Ratified *(v1.0.4, 2026-08-08)*
+
+✅ *(v1.0.4)* `T-2`, `T-4`, `T-5`, `T-6` — RATIFIED 2026-08-08, per
+[Owner Decision Pack `OD-1`](verification/records/owner-decision-pack-2026-08-08.md).
+`DS-DEC-003` (corpus version, `FS-GAP-005`) remains separately deferred and is
+**not** addressed by this ratification — the do-not-invent instruction
+continues to stand. In practice `T-2`'s substantive question never arose:
+`FS-GAP-005`/corpus-version/`DS-DEC-003` occur zero times across the WBS 4.0
+and 4.3 verification records.
 
 | ID | Transfer | Recommendation | Lands in |
 |---|---|---|---|
 | **`T-1`** | **The corpus conformance backfill enters Phase 4.** It is Phase 1 completion work, but Phase 4 is its only consumer and the only phase that can verify it end-to-end | ✅ **ACCEPTED — ratified 2026-08-06 (`DS-DEC-001`).** Enters as WBS 4.0, flagged as inherited Phase 1 work rather than silently absorbed | WBS 4.0 |
-| **`T-2`** | **`FS-GAP-005` (corpus version) becomes jointly ownable.** Phase 3 §4.3 blocked it on "Phase 1 + Phase 4" with a binding do-not-invent instruction | ⚠️ **ACCEPT, scoped to 4.0 + 4.3.** The do-not-invent instruction **stands until jointly decided**: a corpus version is defined by what the raw lake actually lands, not by the builder | WBS 4.0, 4.3 |
+| **`T-2`** | **`FS-GAP-005` (corpus version) becomes jointly ownable.** Phase 3 §4.3 blocked it on "Phase 1 + Phase 4" with a binding do-not-invent instruction | ✅ **ACCEPTED — ratified 2026-08-08 (`OD-1`).** The transfer only; `DS-DEC-003` itself remains undecided and untouched. The do-not-invent instruction **stands** | WBS 4.0, 4.3 |
 | **`T-3`** | **RF2 modifies existing analysis scripts.** The first Phase 4 change outside `research/dataset_builder/` | ✅ **ACCEPTED — ratified 2026-08-07 (`DS-DEC-004`), scoped.** Analysis scripts producing published output only; `evidence_library` migration/seed/replay/historical scripts excluded. Relocation must not change any published result, and the lockbox must not be opened to prove it | WBS 4.6 |
-| **`T-4`** | **Training Dataset scope reduces to structure only** | ✅ **ACCEPT.** Building the layer is correct; expecting a real instance is not (`A-3`) | WBS 4.10 |
-| **`T-5`** | **`ADR-I011` LG7/DI8 use-counting lands here**, as Phase 3 §4.3 assigned | ✅ **ACCEPT as proposed** | WBS 4.9 |
-| **`T-6`** | **`ADR-I010` §11 / `ADR-I011` LG5 retirement checks land here**, via the citation index | ✅ **ACCEPT as proposed** | WBS 4.2, 4.11 |
+| **`T-4`** | **Training Dataset scope reduces to structure only** | ✅ **ACCEPTED — ratified 2026-08-08 (`OD-1`).** Discharged in substance by `wbs-4.10`; formal transfer record was the only outstanding piece | WBS 4.10 |
+| **`T-5`** | **`ADR-I011` LG7/DI8 use-counting lands here**, as Phase 3 §4.3 assigned | ✅ **ACCEPTED — ratified 2026-08-08 (`OD-1`).** Discharged in substance by `wbs-4.9` | WBS 4.9 |
+| **`T-6`** | **`ADR-I010` §11 / `ADR-I011` LG5 retirement checks land here**, via the citation index | ✅ **ACCEPTED — ratified 2026-08-08 (`OD-1`).** Discharged in substance by `wbs-4.2`/`wbs-4.11` | WBS 4.2, 4.11 |
 
 ---
 
@@ -236,7 +244,7 @@ The Engineering Verification Standard's `D1`–`D11` apply unchanged, plus:
 | **P4-6** | Training Dataset structure exists with three-partition siblings and single-use holdout; **RF4 correctly refuses every declaration today**, proven by negative test (**resolves PS5** structurally) |
 | **P4-7** | L1/L2/L3 reproducibility each demonstrated separately, never conflated |
 | **P4-8** | The builder reads **no** operational data — proven by an import-boundary test |
-| **P4-9** | `report.py --check` clean; `verify_chain()` clean on all four ledgers; both full suites at zero new failures |
+| **P4-9** | ✅ *(v1.0.3, `DS-DEC-007` ratified 2026-08-08)* `report.py --check` clean; `verify_chain()` clean on **every governance chain the platform maintains** — as of Phase 4 close these are `research/evidence_library/ledger.db`, `research/feature_store/feature_store.db` and `research/label_store/label_store.db`; both full suites at zero new failures. *Superseded, original wording (v1.0.0–v1.0.2): "`report.py --check` clean; `verify_chain()` clean on all four ledgers; both full suites at zero new failures." The Dataset Builder maintains no separate chain — per `TD-4.5-1` (WBS 4.5), `dataset.seal` receipts are written to the platform-wide evidence ledger, because the platform chain must not fork. Verifying that ledger verifies them.* |
 | **P4-10** | A Phase 4 Closure Review is produced, including an `ADR-I012` Gap Matrix with an explicit **Unowned** bucket |
 
 ---
@@ -265,21 +273,39 @@ Governed by the [Engineering Verification Standard](verification/engineering_ver
 
 ## 10. Rollback Strategy
 
+✅ *(v1.0.3, `AF-2` resolved 2026-08-08, Option A)* The `citation_enforcement`,
+`admissibility_enforcement` and `lane_enforcement` config-flag levers declared
+below for 4.2/4.4/4.7 were **not built** — verified from source at `82ce7c0`:
+zero occurrences of `citation_enforcement` or `lane_enforcement` in any `.py`
+or `.yaml`; `admissibility_enforcement` occurs once, in a comment in
+`research/label_store/propagation.py`, referencing the Label Store's own
+Phase 3 lever, not the Dataset Builder's. `research/dataset_builder/dataset_policy.yaml`
+does not exist. The owner accepted this as a documented deviation
+([`AF-2` record](verification/records/af-2-rollback-lever-deviation.md)) rather
+than scheduling implementation, on the grounds that the Dataset Builder has no
+runtime consumer today (no production path imports it, nothing deploys it) —
+there is nothing running for a graceful-degradation lever to protect. **Revert
+the commit is each mechanism's actual rollback for 4.2, 4.4 and 4.7**, exactly
+as it already was for 4.6. This is recorded here, not silently left for a
+future reader to discover the gap. **Revisit if a Phase 5 change gives the
+Dataset Builder a runtime consumer** — at that point revert-only rollback means
+an incident requires a deployment to resolve, not a config change.
+
 | Mechanism | Lever | Effect when disabled |
 |---|---|---|
 | Corpus backfill (4.0) | 🔄 *(v1.0.2)* **Delete `_raw_lake`** — under re-derivation the original 274 partitions are never written to, so rollback is removing an additive tree, not restoring data. `C1`'s backup remains as defence in depth | Returns to today's unconformed corpus — a regression, never a default |
 | Dataset Registry (4.1) | Revert; no runtime consumer until 4.3 | Nothing depends on it |
-| Citation index (4.2) | `citation_enforcement: false` → index maintained, retirement not gated | Retirement falls back to today's unchecked behaviour, logged |
+| Citation index (4.2) | ✅ *(v1.0.3)* **Revert the commit** (`a203038`) — the declared `citation_enforcement: false` lever was never built; accepted as `AF-2` Option A | Index removed entirely; no consumer existed |
 | Resolution + RF1/RF5/RF6 (4.3) | Revert; sealing does not yet exist | No data implication |
-| Validation + RF4 (4.4) | `admissibility_enforcement: false` → meet computed and recorded, not gating. **Mirrors WBS 3.7's precedent** | Ceilings recorded, not enforced |
+| Validation + RF4 (4.4) | ✅ *(v1.0.3)* **Revert the commit** (`80b5382`) — the declared `admissibility_enforcement: false` lever was never built; accepted as `AF-2` Option A | Validation tiers removed; sealing did not yet exist |
 | Sealing (4.5) | Revert; the ledger is append-only, so emitted receipts persist | Emission stops; history never rewritten |
 | **RF2 relocation (4.6)** | ⚠️ **Revert the commit.** The three scripts' original constants are restored from git | **Deliberate exception:** no configuration lever. A switch that disables sealed-region enforcement is a switch that will eventually be left off — the same reasoning Phase 3 §10 applied to its storage-layer triggers |
-| RF3 (4.7) | `lane_enforcement: false` | Lane recorded, not gating |
+| RF3 (4.7) | ✅ *(v1.0.3)* **Revert the commit** (`5ece707`) — the declared `lane_enforcement: false` lever was never built; accepted as `AF-2` Option A. RF3 is `not_evaluable` on every real declaration today regardless (`TD-4.7-1`) | Lane check removed entirely; no consumer existed |
 | Materialiser (4.8) | Revert; Snapshots are disposable by design | Sealed datasets remain complete without bytes |
 | Use-counting (4.9) | Revert; counts are append-only and persist | Counting stops; history preserved |
 | Training structure (4.10) | Revert; no real instance exists to orphan | None |
 
-**Lesson carried from Phase 2 and 3:** every `warn`-mode flag writes to a **queryable table**, not stdout, from its first commit (`FS-TD-009`).
+**Lesson carried from Phase 2 and 3:** every `warn`-mode flag writes to a **queryable table**, not stdout, from its first commit (`FS-TD-009`). **Not applied to 4.2/4.4/4.7** — see the `AF-2` note above; no flag was built for any of the three.
 
 ---
 
@@ -330,7 +356,7 @@ Governed by the [Engineering Verification Standard](verification/engineering_ver
 | Sealed-region policy | `research/dataset_builder/sealed_regions.py` | 4.6 |
 | Materialiser | `research/dataset_builder/materialise.py` | 4.8 |
 | Experiment / Training layers | `research/dataset_builder/experiment.py`, `training.py` | 4.9, 4.10 |
-| Rollout config | `research/dataset_builder/dataset_policy.yaml` | 4.2, 4.4, 4.7 |
+| ~~Rollout config~~ `research/dataset_builder/dataset_policy.yaml` | ❌ *(v1.0.3)* **Dropped from scope** — `AF-2` Option A, resolved 2026-08-08. Never built; the owner accepted the deviation rather than scheduling implementation. See §10's note and the [`AF-2` record](verification/records/af-2-rollback-lever-deviation.md) | 4.2, 4.4, 4.7 |
 
 ### 13.2 Tests
 

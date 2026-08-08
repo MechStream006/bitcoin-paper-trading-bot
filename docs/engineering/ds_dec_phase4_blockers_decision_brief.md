@@ -249,7 +249,7 @@ Option C is defensible but premature: the citation index's access pattern is a g
 |---|---|---|
 | `DS-DEC-003` — corpus version (`FS-GAP-005`) | Due before 4.3, not D0. Phase 3 §4.3's **binding do-not-invent instruction stands** until jointly decided | Rohith + `T-2` |
 | `DS-DEC-004` — authorise RF2 to modify three analysis scripts | Due before 4.6, not D0 | Rohith |
-| `DS-DEC-006` — retro-binding the 70 historical ledger runs | `ADR-I012` R9 puts it explicitly out of Phase 4 scope | Rohith |
+| `DS-DEC-006` — retro-binding the 70 historical ledger runs | `ADR-I012` R9 puts it explicitly out of Phase 4 scope | ✅ **FORMALLY DEFERRED 2026-08-08** (`OD-2`) — revisit at evaluation-pipeline wiring, not before |
 | ~~Phase 3 formal closure — 13 unsigned records, `LS-DEC-003/004/005/007/008/009`~~ ✅ **DISCHARGED 2026-08-07** | Entry criterion `E2`, independent of these four | Rohith |
 
 ---

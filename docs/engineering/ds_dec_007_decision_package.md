@@ -5,8 +5,9 @@
 | **Decision** | Amendment of Phase 4 exit criterion `P4-9` |
 | **Raised by** | Phase 4 Governance Closure Report §12 (2026-08-08) |
 | **Decision owner** | Rohith |
-| **Status** | ⬜ **PREPARED — NOT RATIFIED.** No document in this repository treats `P4-9` as amended |
+| **Status** | ✅ **RATIFIED 2026-08-08.** Applied to `phase_4_dataset_builder_roadmap.md` §8.2 (v1.0.3) and `phase-4-governance-closure-report.md` §12 |
 | **Prepared** | 2026-08-08 |
+| **Ratified** | 2026-08-08, by Rohith — exact wording per §8, unmodified |
 | **Blocking** | Phase 4 formal closure; Phase 5 entry gate `E2` |
 
 ---
@@ -108,13 +109,15 @@ does not apply it.*
 > receipt re-issued, no chain re-verified differently, no other exit criterion
 > affected. The original wording remains in the roadmap changelog.
 
-## 9. On ratification, update
+## 9. On ratification, update — DONE 2026-08-08
 
-| File | Change |
-|---|---|
-| `phase_4_dataset_builder_roadmap.md` | `P4-9` row amended; original preserved in the changelog |
-| `phase-4-governance-closure-report.md` | §12 status `AMENDMENT REQUIRED` → ratified |
-| `phase-4-governance-completion-package.md` | §2 status; §5.6 gate `E2` |
-| This package | Status → **RATIFIED**, with date |
+| File | Change | Status |
+|---|---|---|
+| `phase_4_dataset_builder_roadmap.md` | `P4-9` row amended (§8.2, v1.0.3); original wording preserved inline, not deleted | ✅ |
+| `phase-4-governance-closure-report.md` | §12 status `AMENDMENT REQUIRED` → ratified; §8 table, §14, §15 line items updated | ✅ |
+| `phase-4-governance-completion-package.md` | §2 status; §5.6 gate `E2` | ✅ |
+| This package | Status → **RATIFIED**, with date | ✅ |
 
-**Nothing above has been done.** `DS-DEC-007` remains open.
+**`DS-DEC-007` is ratified and applied exactly as written in §8** — wording
+only, no implementation change, no receipt re-issued, no chain re-verified
+differently, no other exit criterion affected.

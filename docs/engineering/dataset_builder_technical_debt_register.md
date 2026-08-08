@@ -34,7 +34,7 @@ Severities are as recorded by the owning milestone: 🔴 High · 🟡 Medium · 
 | `TD-4.3-4` | `_MATURITY_DEMANDING` is a fixed vocabulary | 🟢 | `wbs-4.3` |
 | `TD-4.4-1` | TB1 unreachable through the normal path — Tier A refuses first | 🟡 | `wbs-4.4` |
 | `TD-4.4-2` | Tier D thresholds are module constants | 🟡 | `wbs-4.4` |
-| **`TD-4.4-3`** | **`InputAdmissibility` is caller-supplied; nothing derives it from resolved references** | 🟡 | `wbs-4.4` |
+| **`TD-4.4-3`** | **`InputAdmissibility` is caller-supplied; nothing derives it from resolved references.** ⛔ *2026-08-08 — accepted with a binding condition ([`OD-6`](verification/records/owner-decision-pack-2026-08-08.md)): MUST resolve before any Phase 5 code path invokes the Dataset Builder | 🟡 | `wbs-4.4` |
 | `TD-4.4-4` | `check_tier_a` re-runs registry Tier A, so findings all carry `TA1` | 🟢 | `wbs-4.4` |
 | **`TD-4.5-1`** | **Seal receipt and sealed row are in different databases — not one transaction** | 🔴 | `wbs-4.5` |
 | `TD-4.5-2` | Already-sealed check unreachable — the phase guard fires first | 🟢 | `wbs-4.5` |
@@ -71,7 +71,10 @@ Severities are as recorded by the owning milestone: 🔴 High · 🟡 Medium · 
 
 **Eight High-severity items open.** One ordering constraint: **`TD-4.4-3` must be
 resolved before `TD-4.10-1`** — making `computed_meet` mandatory requires the
-meet to be derivable rather than supplied.
+meet to be derivable rather than supplied. **`TD-4.4-3` additionally carries a
+binding Phase 5 entry pre-condition since 2026-08-08** ([`OD-6`](verification/records/owner-decision-pack-2026-08-08.md)):
+it must resolve before any Phase 5 code path invokes the Dataset Builder,
+independent of the `TD-4.10-1` ordering constraint.
 
 ## 3. Hazards — 19 items
 

@@ -154,6 +154,18 @@ proof), `RC5` (pre-existing defects out of scope), `4.0-D0b` (2),
 Its provenance is "canonical as this platform computes it", not "as the
 exchange served it".
 
+### Groups A–H — ACCEPTED 2026-08-08
+
+Rohith accepted all eight groups (55 decision-bearing items) via the
+[Owner Decision Pack](owner-decision-pack-2026-08-08.md), `OD-3`–`OD-8`:
+Groups F, G and H-minus-`RC3` (23 items) alongside the 91 verifiable items as
+one bulk mechanical confirmation (`OD-3`); Group A (`OD-4`); Group B (`OD-5`);
+**Group C accepted on a binding condition** — `TD-4.4-3` must resolve before
+any Phase 5 code path invokes the Dataset Builder (`OD-6`); Groups D+E
+(`OD-7`); `4.0-D0a/RC3` (`OD-8`). **This is group-level acceptance of the
+readings, not the 146 individual RC-item signatures** — those remain
+unsigned; see §5.2 `GC1`.
+
 ## 1.4 Recommended sign-off sequence
 
 1. **Fix the three 4.0 sign-off blocks first** (`TD-4.12-5`) — otherwise those
@@ -255,7 +267,15 @@ platform that was deliberately not built.
 >
 > **Scope of this amendment:** wording only. No implementation changes, no
 > receipt is re-issued, no chain is re-verified differently, and no other exit
-> criterion is affected. The original wording remains in the roadmap changelog.
+> criterion is affected. The original wording is preserved inline in the
+> roadmap's amended `P4-9` row, not deleted.
+
+### Ratified — 2026-08-08
+
+Rohith ratified `DS-DEC-007` with the exact wording above, unmodified. Applied
+to `phase_4_dataset_builder_roadmap.md` §8.2 (v1.0.3) and
+`phase-4-governance-closure-report.md` §12. `P4-9` is now **MET**. `E2` below
+(§5.6) is closed.
 
 ---
 
@@ -501,11 +521,11 @@ delivered what it specified.
 | # | Item | Status |
 |---|---|---|
 | GC1 | 146 RC items across 14 records signed | ❌ **0 signed** |
-| GC2 | 55 decision-bearing items accepted | ❌ |
+| GC2 | 55 decision-bearing items accepted | ✅ **ACCEPTED 2026-08-08**, group-by-group (§1.3), one with a binding condition |
 | GC3 | Three 4.0 records given a sign-off block (`TD-4.12-5`) | ❌ |
-| GC4 | `DS-DEC-007` decided (§2) | ❌ |
-| GC5 | `T-2`, `T-4`, `T-5`, `T-6` ratified or closed | ❌ |
-| GC6 | `DS-DEC-006` decided | ❌ Owed |
+| GC4 | `DS-DEC-007` decided (§2) | ✅ **RATIFIED 2026-08-08** |
+| GC5 | `T-2`, `T-4`, `T-5`, `T-6` ratified or closed | ✅ **RATIFIED 2026-08-08** |
+| GC6 | `DS-DEC-006` decided | ✅ **FORMALLY DEFERRED 2026-08-08** |
 | GC7 | All ratified decisions applied consistently | ✅ |
 | GC8 | Every refusal and rejection permanently recorded | ✅ |
 
@@ -558,7 +578,7 @@ was not performed.
 | # | Gate | Blocking? | Status |
 |---|---|---|---|
 | E1 | 14 records signed (146 items) | ✅ **Blocking** | ❌ |
-| E2 | `DS-DEC-007` decided | ✅ **Blocking** | ❌ |
+| E2 | `DS-DEC-007` decided | ✅ **Blocking** | ✅ **CLOSED 2026-08-08** |
 | E3 | Sign-off names **fourteen** records | ✅ **Blocking** | ❌ |
 | E4 | 4.0 sign-off blocks added | ✅ **Blocking** (E1 impossible without it) | ❌ |
 | E5 | `feature_store` backup exists (DR1) | ✅ **Blocking** | ❌ |
@@ -570,9 +590,13 @@ was not performed.
 | E11 | BK2 drill performed | ⬜ Non-blocking, strongly advised | ❌ |
 | E12 | Full-suite baseline re-established at entry | ⬜ Non-blocking | ❌ |
 
-**Seven blocking gates. `E5` is new and non-negotiable:** starting Phase 5 on
-a Feature Store with no backup would compound an already-single-homed
-governance layer.
+**Six of seven originally-blocking gates remain — `E2` closed 2026-08-08**
+(`DS-DEC-007` ratified). This section is not otherwise re-audited here: `E4`,
+`E5` and others may have moved since 18:08 2026-08-08 for reasons unrelated to
+`DS-DEC-007`/`AF-2` (see later session work) but are not re-verified in this
+edit, which is scoped only to recording the two decisions above. **`E5` remains
+significant if still open:** starting Phase 5 on a Feature Store with no backup
+would compound an already-single-homed governance layer.
 
 ## 5.7 Verdict
 
@@ -583,7 +607,7 @@ governance layer.
 | Operational readiness | ⚠️ **CANONICAL HOST ONLY** |
 | Disaster-recovery readiness | 🔴 **NOT READY** |
 | Production deployment readiness | ✅ **READY, NOT AUTHORISED** |
-| Phase 5 entry readiness | ❌ **NOT READY** — 7 blocking gates |
+| Phase 5 entry readiness | ❌ **NOT READY** — 6 of 7 originally-blocking gates remain (`E2` closed 2026-08-08) |
 
 **Phase 4 built what it promised and proved it on real data. What stands
 between it and closure is signature and durability — not engineering.**

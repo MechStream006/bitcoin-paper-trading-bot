@@ -66,9 +66,9 @@ Nine blockers, none of them engineering.
 | # | Blocker | State |
 |---|---|---|
 | G1 | 146 RC items across 14 records | **0 signed** |
-| G2 | `DS-DEC-007` (`P4-9` wording) | [package prepared](../../ds_dec_007_decision_package.md), **not ratified** |
-| G3 | `AF-2` — rollback levers / `dataset_policy.yaml` | [deviation record open](af-2-rollback-lever-deviation.md), awaiting an owner option |
-| G4 | `DS-DEC-006`, `T-2`, `T-4`, `T-5`, `T-6` | open |
+| G2 | `DS-DEC-007` (`P4-9` wording) | ✅ **RATIFIED 2026-08-08** — [package](../../ds_dec_007_decision_package.md), roadmap §8.2 v1.0.3 |
+| G3 | `AF-2` — rollback levers / `dataset_policy.yaml` | ✅ **RESOLVED 2026-08-08** — Option A accepted, [deviation record](af-2-rollback-lever-deviation.md), roadmap §10/§13.1 v1.0.3 |
+| G4 | `DS-DEC-006`, `T-2`, `T-4`, `T-5`, `T-6` | ✅ **CLOSED 2026-08-08** — see [Owner Decision Pack](owner-decision-pack-2026-08-08.md) |
 
 ### Operational
 
@@ -96,7 +96,7 @@ Every §13.1 and §13.3 deliverable, checked at the freeze commit:
 | Sealed-region policy | `sealed_regions.py` | ✅ |
 | Materialiser | declared `materialise.py` | ⚠️ built as **`materialisation.py`** — name deviation, recorded here |
 | Experiment / Training | declared `experiment.py`, `training.py` | ⚠️ built as **`experiments.py`**, `training.py` |
-| Rollout config | `dataset_policy.yaml` | ❌ **absent** — [`AF-2` deviation record](af-2-rollback-lever-deviation.md) |
+| Rollout config | `dataset_policy.yaml` | ✅ **dropped from scope 2026-08-08** — `AF-2` Option A, [deviation record](af-2-rollback-lever-deviation.md), roadmap §13.1 v1.0.3 |
 | *(undeclared, delivered)* | `lanes.py` (4.7), `history.py` (4.11) | ℹ️ §13.1 has no row for either |
 | Verification record per milestone | `wbs-4.<n>-*.md` | ✅ 14 records |
 | Corpus backfill transcript | `docs/ops/corpus-conformance-backfill-*.md` | ✅ created 2026-08-08 |
@@ -105,9 +105,10 @@ Every §13.1 and §13.3 deliverable, checked at the freeze commit:
 | Closure Review | `phase-4-closure-review.md` | ✅ |
 | Closeout | this file | ✅ created 2026-08-08 |
 
-**One deliverable remains absent** (`dataset_policy.yaml`), with a deviation
-record open against it. Two file-name deviations and two undeclared-but-delivered
-modules are recorded above rather than left for a future reader to discover.
+**One deliverable was dropped from scope by owner decision** (`dataset_policy.yaml`
+— `AF-2` Option A, resolved 2026-08-08). Two file-name deviations and two
+undeclared-but-delivered modules are recorded above rather than left for a
+future reader to discover.
 
 ## 6. Carried into Phase 5
 
@@ -120,9 +121,15 @@ alerting — the latter being one pattern behind four separate hazards.
 
 ## 7. Closure condition
 
-Phase 4 closes when **G1–G4** are discharged. **O1–O4** are operational
-readiness for Phase 5 rather than Phase 4 closure conditions, but O2 and O3
-grow more consequential with every artifact Phase 5 adds to a governance layer
-that exists in one place.
+Phase 4 closes when **G1–G4** are discharged. **`G2`, `G3` and `G4` are now
+closed** (2026-08-08 — `DS-DEC-007` ratified, `AF-2` resolved by Option A,
+`DS-DEC-006`/`T-2`/`T-4`/`T-5`/`T-6` all decided via the
+[Owner Decision Pack](owner-decision-pack-2026-08-08.md)). **`G1` (146 unsigned
+RC items) is the only remaining governance blocker to Phase 4 closure** — its
+substance is now group-accepted (`OD-3`–`OD-8`), but no individual RC item has
+been signed. **O1–O4** are operational readiness for Phase 5 rather than
+Phase 4 closure conditions, but O2 and O3 grow more consequential with every
+artifact Phase 5 adds to a governance layer that exists in one place.
 
-**Nothing in this document marks Phase 4 closed.** That is the owner's act.
+**Nothing in this document marks Phase 4 closed.** That is the owner's act, and
+one governance blocker — signature, not substance — remains open.
