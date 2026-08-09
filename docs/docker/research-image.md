@@ -48,7 +48,7 @@ docker run --rm btcbot-research:local id
 
 ```
 docker run --rm btcbot-research:local sh -c \
-  'find /app \( -iname "*.db" -o -iname ".env" -o -path "*/evidence_library*" -o -path "*/research/data*" \)'
+  'find /app \( -iname "*.db" -o -iname ".env" -o -path "*/evidence_library*" -o -path "*/research/data/*" \)'
 # expect: no output
 ```
 

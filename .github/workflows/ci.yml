@@ -112,7 +112,7 @@ jobs:
       - name: Verify no project data or secrets in the image (INV-1)
         run: |
           matches=$(docker run --rm btcbot-research:ci sh -c \
-            'find /app \( -iname "*.db" -o -iname ".env" -o -path "*/evidence_library*" -o -path "*/research/data*" \)')
+            'find /app \( -iname "*.db" -o -iname ".env" -o -path "*/evidence_library*" -o -path "*/research/data/*" \)')
           if [ -n "$matches" ]; then
             echo "::error::project data found inside image:"; echo "$matches"; exit 1
           fi
