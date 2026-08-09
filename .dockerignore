@@ -4,20 +4,28 @@
 # COPY step, not by loosening this file.
 
 # Secrets — never in any image (ADR-0001 §5.4, §9 S1/S4)
-.env
-.env.*
-!.env.example
-!.env.*.example
+# Bare patterns match only at the build-context root under this repo's
+# BuildKit, not recursively (same gotcha the Python-artifacts section below
+# already documents for **/__pycache__/) -- verified empirically via a
+# disposable Docker build context with nested secrets/data files, both
+# with and without the **/ prefix (docs/ops audit, 2026-08-09). The
+# allow-list negations must be equally recursive or a real nested template
+# (deploy/compose/.env.example) is wrongly excluded once the secret pattern
+# above it is corrected.
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
 
 # Project data / governance ledgers — INV-1: no container touches project data
 data/
 research/data/
 research/evidence_library/
-*.db
-*.db-wal
-*.db-shm
-*.sqlite
-*.sqlite3
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
 
 # VCS / CI / editor
 .git/
