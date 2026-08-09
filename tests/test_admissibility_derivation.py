@@ -183,6 +183,7 @@ class TestDeriveFeatureCeiling:
             assert c1 == c2
             assert d1 == d2
 
+    @requires_real_stores
     def test_raises_for_unknown_spec_hash(self):
         with pytest.raises(ad.DerivationError):
             ad.derive_feature_ceiling(
