@@ -1,0 +1,13 @@
+[Unit]
+Description=BTC Bot encrypted off-host ledger backup (one-shot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+ExecStart=/opt/btcbot/venv/bin/python scripts/backup.py --ledger --encrypt
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-ledger-backup

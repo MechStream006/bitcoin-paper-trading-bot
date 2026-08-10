@@ -1,0 +1,15 @@
+[Unit]
+Description=BTC Bot encrypted off-host ledger backup — 02:20 UTC
+Documentation=file:/opt/btcbot/docs/runbook.md
+Requires=btcbot-ledger-backup.service
+
+[Timer]
+# 02:20 UTC — after the 02:00 --all backup completes (observed <=62s duration)
+OnCalendar=*-*-* 02:20:00 UTC
+# Up to 5 min random spread to avoid simultaneous disk I/O with other jobs
+RandomizedDelaySec=300
+# Run immediately on next start if the last scheduled run was missed
+Persistent=true
+
+[Install]
+WantedBy=timers.target
