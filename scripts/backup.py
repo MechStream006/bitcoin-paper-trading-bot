@@ -330,9 +330,13 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
             _apply_retention(backup_dir, now, dry_run=False, db_label=db_label)
             return 1
 
-    # Optional off-host transfer (non-fatal if it fails)
+    # Optional off-host transfer (non-fatal if it fails). Only attempted when
+    # encryption was actually requested and succeeded -- BACKUP_OFFHOST_CMD
+    # being configured is not sufficient on its own; that alone previously
+    # let an unencrypted run (e.g. the real --all unit) ship plaintext,
+    # exactly what BK3 exists to prevent.
     offhost_cmd = _load_env_var("BACKUP_OFFHOST_CMD")
-    if offhost_cmd:
+    if offhost_cmd and encrypt:
         cmd = offhost_cmd.format(file=xfer_file, manifest=xfer_manifest)
         print(f"[backup] off-host: {cmd}")
         result = subprocess.run(cmd, shell=True, timeout=300)

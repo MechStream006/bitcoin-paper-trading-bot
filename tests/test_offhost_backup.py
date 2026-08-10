@@ -351,14 +351,17 @@ class TestOffhostStatusSidecar:
         assert payload["status"] == "not_configured"
         assert payload["last_success_at"] is None
 
+    @requires_age
     def test_successful_transfer_writes_ok_status_and_hash(self, tmp_path, monkeypatch):
+        """Off-host transfer only ever runs when encrypt=True -- exercise the
+        real (encrypted) path, matching what actually happens in production."""
         _make_db(tmp_path / "src.db")
         bdir = tmp_path / "b"
-        monkeypatch.setattr(
-            backup, "_load_env_var",
-            lambda k: "echo OK {file}" if k == "BACKUP_OFFHOST_CMD" else "",
-        )
-        rc = backup.run_backup(tmp_path / "src.db", bdir, dry_run=False, db_label="ledger")
+        recipient, _ = _keypair(tmp_path)
+        env = {"BACKUP_AGE_RECIPIENT": recipient, "BACKUP_OFFHOST_CMD": "echo OK {file}"}
+        monkeypatch.setattr(backup, "_load_env_var", lambda k: env.get(k, ""))
+        rc = backup.run_backup(tmp_path / "src.db", bdir, dry_run=False,
+                               db_label="ledger", encrypt=True)
         assert rc == 0
         payload = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
         assert payload["configured"] is True
@@ -367,6 +370,29 @@ class TestOffhostStatusSidecar:
         assert payload["last_success_at"] == payload["attempted_at"]
         assert payload["artifact_sha256"] is not None
 
+    def test_unencrypted_run_with_offhost_cmd_configured_does_not_transfer(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """The exact bug this fix closes: BACKUP_OFFHOST_CMD being set must
+        never be sufficient on its own -- only encrypt=True may trigger a
+        transfer. An unencrypted run (e.g. the real --all unit, which never
+        passes --encrypt) must ship nothing off-host, ever."""
+        _make_db(tmp_path / "src.db")
+        bdir = tmp_path / "b"
+        monkeypatch.setattr(
+            backup, "_load_env_var",
+            lambda k: "echo SHOULD_NOT_RUN {file}" if k == "BACKUP_OFFHOST_CMD" else "",
+        )
+        rc = backup.run_backup(tmp_path / "src.db", bdir, dry_run=False,
+                               db_label="ledger")  # encrypt defaults to False
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "SHOULD_NOT_RUN" not in out
+        payload = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
+        assert payload["configured"] is False
+        assert payload["status"] == "not_configured"
+
+    @requires_age
     def test_failed_transfer_writes_failed_status_but_run_backup_still_returns_0(
         self, tmp_path, monkeypatch,
     ):
@@ -374,11 +400,11 @@ class TestOffhostStatusSidecar:
         visible via the sidecar instead of only a stderr line."""
         _make_db(tmp_path / "src.db")
         bdir = tmp_path / "b"
-        monkeypatch.setattr(
-            backup, "_load_env_var",
-            lambda k: "exit 1" if k == "BACKUP_OFFHOST_CMD" else "",
-        )
-        rc = backup.run_backup(tmp_path / "src.db", bdir, dry_run=False, db_label="ledger")
+        recipient, _ = _keypair(tmp_path)
+        env = {"BACKUP_AGE_RECIPIENT": recipient, "BACKUP_OFFHOST_CMD": "exit 1"}
+        monkeypatch.setattr(backup, "_load_env_var", lambda k: env.get(k, ""))
+        rc = backup.run_backup(tmp_path / "src.db", bdir, dry_run=False,
+                               db_label="ledger", encrypt=True)
         assert rc == 0  # existing non-fatal behaviour preserved
         payload = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
         assert payload["status"] == "failed"
