@@ -375,10 +375,25 @@ class TestOffhostStatusSidecar:
     ):
         """The exact bug this fix closes: BACKUP_OFFHOST_CMD being set must
         never be sufficient on its own -- only encrypt=True may trigger a
-        transfer. An unencrypted run (e.g. the real --all unit, which never
-        passes --encrypt) must ship nothing off-host, ever."""
+        transfer. An unencrypted run (e.g. the real --all unit's ledger leg,
+        which never passes --encrypt) must ship nothing off-host, ever, AND
+        must not overwrite whatever a real encrypted run already recorded --
+        otherwise a broken/missing encrypted timer would be silently reset
+        to a harmless "not_configured" every day and its staleness would
+        never escalate (the shared-sidecar blind spot)."""
         _make_db(tmp_path / "src.db")
         bdir = tmp_path / "b"
+        bdir.mkdir()
+
+        # Seed the sidecar with a real encrypted success, as the dedicated
+        # ledger-encryption timer would already have written.
+        from datetime import datetime, timezone
+        backup._write_offhost_status(
+            bdir, "ledger", datetime.now(timezone.utc), configured=True,
+            encrypted=True, status="ok", exit_code=0, artifact=None,
+        )
+        before = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
+
         monkeypatch.setattr(
             backup, "_load_env_var",
             lambda k: "echo SHOULD_NOT_RUN {file}" if k == "BACKUP_OFFHOST_CMD" else "",
@@ -387,10 +402,10 @@ class TestOffhostStatusSidecar:
                                db_label="ledger")  # encrypt defaults to False
         assert rc == 0
         out = capsys.readouterr().out
-        assert "SHOULD_NOT_RUN" not in out
-        payload = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
-        assert payload["configured"] is False
-        assert payload["status"] == "not_configured"
+        assert "SHOULD_NOT_RUN" not in out          # no transfer attempted
+
+        after = json.loads((bdir / backup.OFFHOST_STATUS_FILENAME).read_text())
+        assert after == before                      # sidecar byte-for-byte untouched
 
     @requires_age
     def test_failed_transfer_writes_failed_status_but_run_backup_still_returns_0(

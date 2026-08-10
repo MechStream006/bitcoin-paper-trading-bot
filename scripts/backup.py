@@ -352,6 +352,16 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
             exit_code=result.returncode,
             artifact=xfer_file,
         )
+    elif offhost_cmd:
+        # Configured, but this invocation was unencrypted (e.g. the real
+        # --all unit's ledger leg once a dedicated encrypted timer also
+        # exists for the same db_label/backup_dir) -- it made no transfer
+        # attempt, so it has nothing to report. Do NOT overwrite whatever a
+        # real encrypted attempt already recorded here; that would defeat
+        # the staleness escalation the sidecar exists for (a broken/missing
+        # encrypted run would otherwise be reset to a harmless-looking
+        # "not_configured" every day and never escalate).
+        pass
     else:
         _write_offhost_status(
             backup_dir, db_label, now,
