@@ -43,12 +43,15 @@ Failure isolation
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 from src.alerts import forward_status as _forward_status
+from src.alerts import h6_status as _h6_status
 from src.alerts import storage_status as _storage_status
 from src.alerts.delta_tracker import DeltaTracker
 from src.alerts.rate_limiter import RateLimiter
@@ -78,6 +81,47 @@ _JOB_ALIASES = {
     "daily_summary":   "daily",
     "expiry_cycle_eod": "eod",
 }
+
+# EVIDENCE block (research-evidence collection/accumulation status).
+# H6's db lives alongside evidence_forward.db in the same directory -- the
+# same sibling-derivation convention already established in
+# src/api/services.py::runtime_health(); no new constructor arg needed.
+_H6_DB_FILENAME = "forward_evidence.db"
+
+# Short display labels + fixed display order for the 5 canonical signals
+# (mirrors scripts/healthcheck.py's _FWD_SIG_ALIASES; kept local rather than
+# imported -- see src/alerts/h6_status.py's module docstring for why the
+# heartbeat never imports the healthcheck CLI script).
+_EVIDENCE_SIG_ORDER = [
+    "g1_market_regime_sma200",
+    "g3_momentum_tsmom",
+    "h5_vol_regime",
+    "ivrv_vrp_spread",
+    "g3_atr_expansion",
+]
+_EVIDENCE_SIG_ALIASES = {
+    "h5_vol_regime":            "h5",
+    "g1_market_regime_sma200":  "g1",
+    "g3_momentum_tsmom":        "g3",
+    "ivrv_vrp_spread":          "ivrv",
+    "g3_atr_expansion":         "atr",
+}
+
+# Documented historical live-forward collection gap in evidence_forward.db
+# (the 5-signal run_daily.py pipeline). A STATIC, one-time recorded fact --
+# NOT recomputed each cycle. Recomputing a full gap scan every 30 minutes
+# would violate the heartbeat's "no expensive research calculations"
+# contract. See docs/research/evidence_accumulation_baseline_2026-08-11.md.
+# Update these constants only if a NEW, separately-confirmed gap is
+# documented there -- never infer or compute a gap here.
+_KNOWN_GAP_DAYS = 19
+_KNOWN_GAP_RANGE = "2026-07-18..08-05"
+
+# Fixed, non-conditional label. Never derive this from any count -- row and
+# trade totals describe collection volume, not statistical sufficiency
+# (see docs/governance/ discussion this session: no project-defined minimum
+# live-forward sample size exists, and none should be implied here).
+_EVIDENCE_STATUS_LABEL = "ACCUMULATING -- NOT VALIDATED"
 
 
 class HeartbeatService:
@@ -319,8 +363,10 @@ class HeartbeatService:
         universe_stale = self._universe_stale()
         job_ages = self._get_job_ages()
         jobs_stalled = self._jobs_stalled(job_ages)
+        h6 = self._h6_summary()
         level = self._overall_level(
             fwd, disk, universe_stale=universe_stale, jobs_stalled=jobs_stalled,
+            h6_severity=(h6.severity if h6 is not None else "ok"),
         )
         as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -348,6 +394,9 @@ class HeartbeatService:
 
         if fwd is not None:
             lines.append(_forward_status.render_line(fwd))
+
+        for line in self._evidence_block(fwd, h6):
+            lines.append(line)
 
         for line in self._format_expiry_block():
             lines.append(line)
@@ -419,7 +468,10 @@ class HeartbeatService:
 
     def _read_delta_counters(self) -> dict:
         """Snapshot the cumulative counters used for deltas (None where unread)."""
-        counters: dict = {"msgs": None, "reconnects": None, "rows": None}
+        counters: dict = {
+            "msgs": None, "reconnects": None, "rows": None,
+            "evidence_rows": None, "evidence_closed": None,
+        }
         try:
             d = self._ws_manager.health().details
             counters["msgs"] = _safe_int(_extract_kv(d, "msgs"))
@@ -429,6 +481,13 @@ class HeartbeatService:
         try:
             d = self._snapshot_writer.health().details
             counters["rows"] = _safe_int(_extract_kv(d, "total_rows"))
+        except Exception:
+            pass
+        try:
+            ev = self._read_evidence_counts()
+            if ev is not None:
+                counters["evidence_rows"] = ev["total_rows"]
+                counters["evidence_closed"] = ev["total_closed"]
         except Exception:
             pass
         return counters
@@ -660,6 +719,200 @@ class HeartbeatService:
         """
         return self._last_forward_status
 
+    def _h6_summary(self) -> Optional["_h6_status.H6Status"]:
+        """Read the H6 daily corpus-refresh cycle READ-ONLY, or None if not
+        configured.
+
+        H6's db path is derived as a sibling of forward_status_path (same
+        convention already established in
+        src.api.services.runtime_health()). Never raises: h6_status.summarize()
+        is total, and any unexpected error is folded into an "error" H6Status
+        so the heartbeat still renders.
+        """
+        if not self._forward_status_path:
+            return None
+        try:
+            h6_path = str(Path(self._forward_status_path).parent / _H6_DB_FILENAME)
+            return _h6_status.summarize(h6_path)
+        except Exception as exc:  # defensive; summarize is designed not to raise
+            return _h6_status.H6Status.read_error(
+                _h6_status.expected_date().isoformat(),
+                f"{type(exc).__name__}: {exc}",
+            )
+
+    def _read_evidence_counts(self) -> Optional[Dict[str, object]]:
+        """Read row + trade counts from evidence_forward.db, READ-ONLY.
+
+        Returns None on any failure (missing file, locked DB, unexpected
+        schema) so callers can degrade gracefully. Never raises. Two small,
+        indexed-scale queries (the 5-signal run_log and trade_entries tables
+        are tens to low hundreds of rows) -- cheap enough for a 30-minute
+        heartbeat cadence.
+        """
+        if not self._forward_status_path:
+            return None
+        conn = None
+        try:
+            uri = Path(self._forward_status_path).resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+
+            per_signal_rows: Dict[str, int] = dict(
+                conn.execute(
+                    "SELECT signal_id, COUNT(*) FROM run_log GROUP BY signal_id"
+                ).fetchall()
+            )
+            total_rows = sum(per_signal_rows.values())
+
+            per_signal_trades: Dict[str, Tuple[int, int]] = {}
+            for sid, closed, open_ in conn.execute(
+                "SELECT signal_id, SUM(1 - open), SUM(open) "
+                "FROM trade_entries GROUP BY signal_id"
+            ).fetchall():
+                per_signal_trades[sid] = (int(closed or 0), int(open_ or 0))
+            total_closed = sum(c for c, _ in per_signal_trades.values())
+            total_open = sum(o for _, o in per_signal_trades.values())
+
+            return {
+                "total_rows": total_rows,
+                "per_signal_rows": per_signal_rows,
+                "per_signal_trades": per_signal_trades,
+                "total_entries": total_closed + total_open,
+                "total_closed": total_closed,
+                "total_open": total_open,
+            }
+        except Exception:
+            return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _evidence_block(
+        self,
+        fwd: Optional["_forward_status.ForwardStatus"],
+        h6: Optional["_h6_status.H6Status"],
+    ) -> List[str]:
+        """Compact EVIDENCE section: research-evidence collection/accumulation
+        status for the 5 canonical live-forward signals + H6.
+
+        READ-ONLY, purely additive -- the existing 'fwd-evid' line and every
+        other section are unchanged. Every line here is independently
+        guarded; a failure in one line falls back to a safe placeholder
+        without dropping any other line or breaking the rest of the
+        heartbeat. Row/trade counts, deltas, gaps, and the fixed status
+        label are DISPLAY-ONLY and never affect _overall_level() -- only
+        fwd.severity() and h6.severity (already folded in by the caller)
+        do that. Omitted entirely when forward_status_path is not
+        configured, mirroring the existing fwd-evid line's own gating.
+        """
+        if not self._forward_status_path:
+            return []
+
+        lines: List[str] = ["EVIDENCE"]
+
+        try:
+            if fwd is not None and fwd.state not in ("missing", "error"):
+                freshness = "fresh" if fwd.state == "ok" else fwd.state
+                lines.append(
+                    f"  live-fwd : {fwd.latest_run_date or 'none'} | "
+                    f"{fwd.n_ok}/{fwd.n_logged} healthy | {freshness}"
+                )
+            else:
+                lines.append("  live-fwd : [unavailable]")
+        except Exception:
+            lines.append("  live-fwd : [error]")
+
+        counts = self._read_evidence_counts()
+
+        try:
+            if counts is not None:
+                rows_str = f"{counts['total_rows']} total"
+                if self._emit_deltas:
+                    delta_suffix = self._evidence_rows_delta()
+                    rows_str += f" {delta_suffix}"
+                lines.append(f"  rows     : {rows_str}")
+            else:
+                lines.append("  rows     : [unavailable]")
+        except Exception:
+            lines.append("  rows     : [error]")
+
+        try:
+            if counts is not None:
+                lines.append(
+                    f"  trades   : {counts['total_entries']} entries | "
+                    f"{counts['total_closed']} closed | {counts['total_open']} open"
+                )
+            else:
+                lines.append("  trades   : [unavailable]")
+        except Exception:
+            lines.append("  trades   : [error]")
+
+        try:
+            if counts is not None:
+                per_signal_trades = counts["per_signal_trades"]
+                parts = [
+                    f"{_EVIDENCE_SIG_ALIASES.get(sid, sid)} "
+                    f"{per_signal_trades[sid][0]}/{per_signal_trades[sid][1]}"
+                    for sid in _EVIDENCE_SIG_ORDER
+                    if sid in per_signal_trades
+                ]
+                lines.append("  signals  : " + (" | ".join(parts) if parts else "none yet"))
+            else:
+                lines.append("  signals  : [unavailable]")
+        except Exception:
+            lines.append("  signals  : [error]")
+
+        try:
+            if h6 is None or h6.state == "missing":
+                lines.append("  H6       : [unavailable]")
+            elif h6.state == "error":
+                lines.append("  H6       : [error]")
+            else:
+                lines.append(
+                    f"  H6       : {h6.latest_date or 'none'} | "
+                    f"{h6.state.upper()} | no-new-data={h6.no_new_data_streak}"
+                )
+        except Exception:
+            lines.append("  H6       : [error]")
+
+        try:
+            if fwd is not None and fwd.state not in ("missing", "error") and fwd.signals:
+                gov_ok = not any(st == "error" for st in fwd.signals.values())
+                lines.append(f"  gov      : gov={'OK' if gov_ok else 'FAIL'}")
+            else:
+                lines.append("  gov      : gov=n/a")
+        except Exception:
+            lines.append("  gov      : [error]")
+
+        lines.append(
+            f"  gaps     : {_KNOWN_GAP_DAYS} missing days "
+            f"({_KNOWN_GAP_RANGE}, documented)"
+        )
+        lines.append(f"  status   : {_EVIDENCE_STATUS_LABEL}")
+
+        return lines
+
+    def _evidence_rows_delta(self) -> str:
+        """Render '(+N since last)' / '(first sample)' for the rows line.
+
+        Reads the delta baseline for display only -- never writes
+        _pending_delta itself (see _format_deltas_line, the sole writer,
+        which is always called earlier in _compose_heartbeat()). Never
+        raises.
+        """
+        try:
+            now = time.monotonic()
+            current = self._read_delta_counters()
+            deltas, elapsed = self._delta_tracker.compute(current, now)
+            val = deltas.get("evidence_rows")
+            if val is None:
+                return "(first sample)" if elapsed is None else "(n/a)"
+            return f"(+{val} since last)"
+        except Exception:
+            return "(n/a)"
+
     def _disk_info(self) -> Optional["_storage_status.DiskInfo"]:
         """Free-disk info for the collector data volume, or None if not configured."""
         if not self._data_db_path:
@@ -711,17 +964,25 @@ class HeartbeatService:
         disk: Optional["_storage_status.DiskInfo"] = None,
         universe_stale: bool = False,
         jobs_stalled: bool = False,
+        h6_severity: str = "ok",
     ) -> str:
-        """Roll component health + forward + disk + D1/D2 into OK/DEGRADED/CRITICAL.
+        """Roll component health + forward + disk + D1/D2 + H6 into
+        OK/DEGRADED/CRITICAL.
 
-        CRITICAL: any component fatal, forward fn_hash_violation, or disk
-                  below DISK_CRITICAL_PCT.
+        CRITICAL: any component fatal, forward fn_hash_violation, disk
+                  below DISK_CRITICAL_PCT, or h6_severity == "critical"
+                  (never-run / >=2 days stale / fn_hash tamper --
+                  see h6_status.summarize(), same semantics as
+                  scripts/healthcheck.py::check_h6_cycle()).
         DEGRADED: any component unhealthy (non-fatal), forward
                   stale / signal error / DB unreadable, disk below
-                  DISK_DEGRADED_PCT, a stale universe (D1), or a stalled
-                  scheduler job (D2).
+                  DISK_DEGRADED_PCT, a stale universe (D1), a stalled
+                  scheduler job (D2), or h6_severity == "degraded" (1 day
+                  stale / >=2 consecutive no_new_data / signal warning).
         OK:       everything healthy (or not configured).
-        A 'missing' forward DB and an unknown disk are status-neutral.
+        A 'missing' forward DB, a 'missing'/'ok' H6 read, and an unknown
+        disk are status-neutral. Evidence row/trade counts and deltas
+        (rendered by _evidence_block()) NEVER affect this roll-up.
         """
         any_fatal = False
         any_unhealthy = False
@@ -742,10 +1003,11 @@ class HeartbeatService:
 
         fwd_sev = fwd.severity() if fwd is not None else "ok"
         disk_sev = disk.severity() if disk is not None else "ok"
-        if any_fatal or fwd_sev == "critical" or disk_sev == "critical":
+        if (any_fatal or fwd_sev == "critical" or disk_sev == "critical"
+                or h6_severity == "critical"):
             return "CRITICAL"
         if (any_unhealthy or fwd_sev == "degraded" or disk_sev == "degraded"
-                or universe_stale or jobs_stalled):
+                or universe_stale or jobs_stalled or h6_severity == "degraded"):
             return "DEGRADED"
         return "OK"
 
