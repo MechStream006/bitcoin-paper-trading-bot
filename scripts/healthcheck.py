@@ -24,7 +24,7 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -68,6 +68,32 @@ OFFHOST_STATUS_FILENAME = ".offhost-status.json"
 # Forward-cycle dead-man (D3a): days behind expected run_date -> severity.
 FORWARD_WARN_DAYS     = 1   # 1 day stale  -> WARNING
 FORWARD_CRIT_DAYS     = 2   # 2 days stale -> CRITICAL
+
+# H6 daily-corpus dead-man: reuses FORWARD_WARN_DAYS/FORWARD_CRIT_DAYS for the
+# "did the process run at all" liveness ladder (same semantics, same numbers).
+# H6_GRACE_HOUR_UTC mirrors src.alerts.forward_status._GRACE_HOUR_UTC rather
+# than inventing a new number -- conservative, since daily_job.py fires at
+# ~00:05 UTC and every observed production run completes by ~00:06 UTC.
+H6_GRACE_HOUR_UTC = 2
+
+# A single status='no_new_data' row is proven benign: 2026-07-01 and
+# 2026-08-01 are both confirmed via journalctl to be a fully successful
+# ingest with a genuinely unchanged corpus, both self-recovering the very
+# next cycle. There is no historical precedent -- benign or otherwise -- for
+# 2 or more consecutive no_new_data rows, so that is the line where the
+# collector's demonstrated liveness (it ran, it wrote a valid row) is no
+# longer enough and the condition becomes WARNING-worthy.
+H6_NO_NEW_DATA_WARN_STREAK = 2
+
+# NOT a severity threshold and NOT evidence-derived like the constants above
+# -- the severity decision is governed solely by H6_NO_NEW_DATA_WARN_STREAK.
+# This is only how many trailing rows check_h6_cycle() reads to REPORT an
+# accurate streak length in its message/detail once the threshold is already
+# met (e.g. "3 consecutive" instead of capping the count at 2). Bounded and
+# cheap at daily cadence; the exact value is an arbitrary-but-safe diagnostic
+# depth, chosen generously (two weeks), not a tuned or historically-derived
+# number.
+_H6_STREAK_LOOKBACK = 14
 
 # Short display labels for forward signal ids (Telegram alert readability).
 _FWD_SIG_ALIASES = {
@@ -548,6 +574,113 @@ def check_forward_cycle(forward_db_path: Path) -> CheckResult:
 
 
 # ---------------------------------------------------------------------------
+# H6 daily-corpus dead-man
+# ---------------------------------------------------------------------------
+
+def _h6_expected_date(now: Optional[datetime] = None) -> date:
+    """Most recent calendar date daily_job.py's run_log should show a row for.
+
+    Mirrors src.alerts.forward_status.expected_run_date()'s grace-hour shape,
+    but daily_job.py's own run_log stamps run_ts on the SAME calendar date it
+    executes on (unlike H5's run_date, which is "yesterday" by convention) --
+    so the expected date is simply "today" once past the grace hour, else
+    "yesterday", with no extra day offset.
+    """
+    d = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return d.date() if d.hour >= H6_GRACE_HOUR_UTC else (d.date() - timedelta(days=1))
+
+
+def check_h6_cycle(h6_db_path: Path, now: Optional[datetime] = None) -> CheckResult:
+    """Dead-man / continuity check for the H6 daily corpus-refresh cycle
+    (daily_job.py -> forward_evidence.db run_log).
+
+    A deliberately separate implementation from check_forward_cycle(), not an
+    extension of it: H6's run_log schema (run_ts-keyed, one row per
+    invocation) and status vocabulary (ok/warning/error/no_new_data) genuinely
+    differ from H5's (signal_id+run_date-keyed, ok/error/fn_hash_violation),
+    so this reads forward_evidence.db's run_log directly rather than forcing
+    it through src.alerts.forward_status. The severity *philosophy* still
+    mirrors check_forward_cycle() exactly: liveness staleness reuses
+    FORWARD_WARN_DAYS/FORWARD_CRIT_DAYS unmodified; status='error' (fn_hash
+    tamper) mirrors fn_hash_violation -> CRITICAL; status='warning' mirrors
+    the degraded/signal-error -> WARNING branch.
+
+    Severity (evidence-backed, see docs/ops H6 monitoring design audit):
+      DB not present                                  -> INFO (skip)
+      DB unreadable / run_log empty (never ran)        -> CRITICAL
+      latest row status == 'error' (fn_hash tamper)    -> CRITICAL
+      no row for expected day, >= FORWARD_CRIT_DAYS     -> CRITICAL
+      no row for expected day, 1 day behind             -> WARNING
+      >= H6_NO_NEW_DATA_WARN_STREAK consecutive
+        no_new_data rows                                -> WARNING
+      latest row status == 'warning'                   -> WARNING
+      exactly 1 (isolated) no_new_data row              -> OK  (proven benign)
+      fresh, status == 'ok'                             -> OK
+    """
+    if not h6_db_path.exists():
+        return CheckResult(
+            "h6_cycle", INFO,
+            f"H6 DB not present ({h6_db_path.name}) — skipping", {},
+        )
+
+    try:
+        uri = h6_db_path.resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT run_ts, status FROM run_log ORDER BY run_ts DESC LIMIT ?",
+            (_H6_STREAK_LOOKBACK,),
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        return CheckResult("h6_cycle", CRITICAL, f"H6 run_log unreadable: {exc}", {})
+
+    if not rows:
+        return CheckResult("h6_cycle", CRITICAL, "H6 cycle has never run", {})
+
+    latest = rows[0]
+    latest_date = datetime.fromtimestamp(
+        latest["run_ts"] / 1000, tz=timezone.utc
+    ).date()
+    expected = _h6_expected_date(now)
+    days = _days_behind(latest_date.isoformat(), expected.isoformat())
+
+    streak = 0
+    for r in rows:
+        if r["status"] == "no_new_data":
+            streak += 1
+        else:
+            break
+
+    detail = {
+        "expected_date":      expected.isoformat(),
+        "latest_run_date":    latest_date.isoformat(),
+        "days_behind":        days,
+        "latest_status":      latest["status"],
+        "no_new_data_streak": streak,
+    }
+    base = (
+        f"expected {expected}, latest {latest_date} ({days} days behind), "
+        f"status={latest['status']}, no_new_data_streak={streak}"
+    )
+
+    if latest["status"] == "error":
+        return CheckResult("h6_cycle", CRITICAL, f"H6 fn_hash violation | {base}", detail)
+    if days >= FORWARD_CRIT_DAYS:
+        return CheckResult("h6_cycle", CRITICAL, f"H6 cycle stale | {base}", detail)
+    if days >= FORWARD_WARN_DAYS:
+        return CheckResult("h6_cycle", WARNING, f"H6 cycle stale | {base}", detail)
+    if streak >= H6_NO_NEW_DATA_WARN_STREAK:
+        return CheckResult(
+            "h6_cycle", WARNING,
+            f"H6 no new data for {streak} consecutive runs | {base}", detail,
+        )
+    if latest["status"] == "warning":
+        return CheckResult("h6_cycle", WARNING, f"H6 signal error, cycle ran | {base}", detail)
+    return CheckResult("h6_cycle", OK, f"H6 cycle fresh | {base}", detail)
+
+
+# ---------------------------------------------------------------------------
 # Alert formatting
 # ---------------------------------------------------------------------------
 
@@ -628,6 +761,15 @@ def main() -> int:
         "--no-forward-check", action="store_true",
         help="Skip the forward-cycle dead-man check",
     )
+    parser.add_argument(
+        "--h6-db-path", type=Path,
+        default=ROOT / "research" / "data" / "forward_evidence.db",
+        help="Path to forward_evidence.db for the H6 daily-corpus dead-man",
+    )
+    parser.add_argument(
+        "--no-h6-check", action="store_true",
+        help="Skip the H6 daily-corpus dead-man check (opt-out; enabled by default)",
+    )
     parser.add_argument("--service-name", default="btcbot")
     args = parser.parse_args()
 
@@ -663,6 +805,8 @@ def main() -> int:
     ]
     if not args.no_forward_check:
         results.append(check_forward_cycle(args.forward_db_path))
+    if not args.no_h6_check:
+        results.append(check_h6_cycle(args.h6_db_path))
     if args.full_integrity:
         results.append(check_integrity(db_path))
 

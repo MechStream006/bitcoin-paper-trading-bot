@@ -139,6 +139,10 @@ def runtime_health(settings) -> dict:
             settings.ledger_backup_dir, check_name="ledger_offhost_backup"
         ),
         hc.check_forward_cycle(settings.forward_db_path),
+        # H6 lives alongside evidence_forward.db in the same research/data
+        # directory -- no new ApiSettings field needed, matching
+        # scripts/healthcheck.py's own default derivation.
+        hc.check_h6_cycle(settings.forward_db_path.parent / "forward_evidence.db"),
     ]
 
     overall = hc.OK

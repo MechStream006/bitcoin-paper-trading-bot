@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -752,3 +753,276 @@ def test_af4_applies_to_every_labelled_store(tmp_path: Path):
         r = hc.check_backup_freshness(bdir, label=label, check_name=f"{label}_backup")
         assert r.severity == hc.INFO, label
         assert r.detail["rows"] == 0, label
+
+
+# ---------------------------------------------------------------------------
+# H6 daily-corpus dead-man (check_h6_cycle)
+#
+# Severity is evidence-backed, not invented: 2026-07-01 and 2026-08-01 are
+# real production no_new_data days, confirmed via journalctl to be a fully
+# successful ingest with a genuinely unchanged corpus, both self-recovering
+# the next cycle -- so a single isolated no_new_data row must stay OK
+# (test_h6_single_no_new_data_day_is_ok_20260701 /
+# _20260801 lock this in directly). There is no historical precedent for 2+
+# consecutive no_new_data rows, so that is where it becomes WARNING-worthy.
+# Liveness staleness (no row at all for the expected day) reuses
+# FORWARD_WARN_DAYS/FORWARD_CRIT_DAYS unmodified, mirroring
+# check_forward_cycle()'s own ladder.
+# ---------------------------------------------------------------------------
+
+
+def _write_h6_run_log(db_path: Path, rows: list[tuple[int, str]]) -> None:
+    """rows: list of (run_ts_ms, status), any order. Creates a minimal but
+    schema-faithful run_log table (run_ts INTEGER PRIMARY KEY, status TEXT)."""
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "CREATE TABLE run_log (run_ts INTEGER PRIMARY KEY, status TEXT NOT NULL)"
+    )
+    con.executemany("INSERT INTO run_log (run_ts, status) VALUES (?, ?)", rows)
+    con.commit()
+    con.close()
+
+
+def _ms(dt: datetime) -> int:
+    return int(dt.timestamp() * 1000)
+
+
+def test_h6_missing_db_is_info(tmp_path: Path):
+    r = hc.check_h6_cycle(tmp_path / "forward_evidence.db")
+    assert r.severity == hc.INFO
+    assert "not present" in r.message
+
+
+def test_h6_never_ran_empty_run_log_is_critical(tmp_path: Path):
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [])
+    r = hc.check_h6_cycle(db_path)
+    assert r.severity == hc.CRITICAL
+    assert "never run" in r.message
+
+
+def test_h6_unreadable_db_is_critical(tmp_path: Path):
+    db_path = tmp_path / "forward_evidence.db"
+    db_path.write_bytes(b"not a sqlite database at all")
+    r = hc.check_h6_cycle(db_path)
+    assert r.severity == hc.CRITICAL
+    assert "unreadable" in r.message
+
+
+def test_h6_fresh_ok_is_ok(tmp_path: Path):
+    now = datetime(2026, 8, 11, 14, 0, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [(_ms(now), "ok")])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.OK
+    assert r.detail["days_behind"] == 0
+    assert r.detail["no_new_data_streak"] == 0
+
+
+def test_h6_one_day_stale_no_row_is_warning(tmp_path: Path):
+    now = datetime(2026, 8, 11, 14, 0, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [(_ms(now - timedelta(days=1)), "ok")])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.WARNING
+    assert "stale" in r.message
+    assert r.detail["days_behind"] == 1
+
+
+def test_h6_two_days_stale_no_row_is_critical(tmp_path: Path):
+    now = datetime(2026, 8, 11, 14, 0, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [(_ms(now - timedelta(days=2)), "ok")])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.CRITICAL
+    assert "stale" in r.message
+    assert r.detail["days_behind"] == 2
+
+
+def test_h6_single_no_new_data_day_is_ok_20260701(tmp_path: Path):
+    """Regression lock: 2026-07-01 was a fully successful ingest with a
+    genuinely unchanged corpus (confirmed via journalctl), self-recovering
+    the next cycle. An isolated no_new_data row must never alert."""
+    now = datetime(2026, 7, 1, 0, 6, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [
+        (_ms(datetime(2026, 6, 30, 0, 5, 0, tzinfo=timezone.utc)), "ok"),
+        (_ms(now), "no_new_data"),
+    ])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.OK
+    assert r.detail["no_new_data_streak"] == 1
+
+
+def test_h6_single_no_new_data_day_is_ok_20260801(tmp_path: Path):
+    """Regression lock: the second real occurrence, same shape as 07-01."""
+    now = datetime(2026, 8, 1, 0, 6, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [
+        (_ms(datetime(2026, 7, 31, 0, 6, 0, tzinfo=timezone.utc)), "ok"),
+        (_ms(now), "no_new_data"),
+    ])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.OK
+    assert r.detail["no_new_data_streak"] == 1
+
+
+def test_h6_two_consecutive_no_new_data_is_warning(tmp_path: Path):
+    """No historical precedent for 2+ consecutive no_new_data days -- unlike
+    a single occurrence, this must alert."""
+    now = datetime(2026, 8, 11, 0, 6, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [
+        (_ms(datetime(2026, 8, 9, 0, 6, 0, tzinfo=timezone.utc)), "ok"),
+        (_ms(datetime(2026, 8, 10, 0, 6, 0, tzinfo=timezone.utc)), "no_new_data"),
+        (_ms(now), "no_new_data"),
+    ])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.WARNING
+    assert "no new data" in r.message
+    assert r.detail["no_new_data_streak"] == 2
+
+
+def test_h6_three_consecutive_no_new_data_streak_is_reported_accurately(tmp_path: Path):
+    now = datetime(2026, 8, 11, 0, 6, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [
+        (_ms(datetime(2026, 8, 8, 0, 6, 0, tzinfo=timezone.utc)), "ok"),
+        (_ms(datetime(2026, 8, 9, 0, 6, 0, tzinfo=timezone.utc)), "no_new_data"),
+        (_ms(datetime(2026, 8, 10, 0, 6, 0, tzinfo=timezone.utc)), "no_new_data"),
+        (_ms(now), "no_new_data"),
+    ])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.WARNING
+    assert r.detail["no_new_data_streak"] == 3
+
+
+def test_h6_warning_status_is_warning(tmp_path: Path):
+    """Mirrors check_forward_cycle()'s degraded/signal-error -> WARNING."""
+    now = datetime(2026, 8, 11, 14, 0, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [(_ms(now), "warning")])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.WARNING
+    assert "signal error" in r.message
+
+
+def test_h6_error_status_is_critical_regardless_of_freshness(tmp_path: Path):
+    """Mirrors check_forward_cycle()'s fn_hash_violation -> CRITICAL. Must
+    win even though the row is perfectly fresh (0 days behind)."""
+    now = datetime(2026, 8, 11, 14, 0, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [(_ms(now), "error")])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.CRITICAL
+    assert "fn_hash violation" in r.message
+
+
+def test_h6_error_status_outranks_no_new_data_streak(tmp_path: Path):
+    """status='error' must be reported even if it also happens to be preceded
+    by a no_new_data run -- the tamper signal is strictly more informative."""
+    now = datetime(2026, 8, 11, 14, 0, 0, tzinfo=timezone.utc)
+    db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(db_path, [
+        (_ms(datetime(2026, 8, 10, 14, 0, 0, tzinfo=timezone.utc)), "no_new_data"),
+        (_ms(now), "error"),
+    ])
+    r = hc.check_h6_cycle(db_path, now=now)
+    assert r.severity == hc.CRITICAL
+    assert "fn_hash violation" in r.message
+
+
+def test_h6_check_is_registered_in_the_cli(tmp_path: Path):
+    """The check must be wired into main(), not merely available."""
+    import inspect
+
+    src = inspect.getsource(hc.main)
+    assert "check_h6_cycle" in src
+    assert "h6_db_path" in src
+
+
+def test_h6_cli_flag_exists_with_expected_default():
+    import inspect
+
+    src = inspect.getsource(hc.main)
+    assert "--h6-db-path" in src
+    assert "forward_evidence.db" in src
+
+
+def test_h6_no_check_flag_is_an_explicit_opt_out(tmp_path: Path):
+    """Default behavior must ENABLE the H6 check; --no-h6-check is the only
+    way to skip it, mirroring --no-forward-check's existing shape exactly."""
+    import inspect
+
+    src = inspect.getsource(hc.main)
+    assert "--no-h6-check" in src
+    assert "if not args.no_h6_check:" in src
+
+
+def test_runtime_health_includes_h6_check(tmp_path: Path):
+    """CLI/API parity: the H6 check must also be reachable from the
+    read-only API, exactly like check_forward_cycle. No new ApiSettings
+    field is introduced -- the H6 db is derived as a sibling of
+    forward_db_path, matching scripts/healthcheck.py's own default."""
+    from src.api.config import ApiSettings
+    from src.api import services
+
+    now = datetime.now(timezone.utc)
+    forward_db_path = tmp_path / "evidence_forward.db"
+    h6_db_path = tmp_path / "forward_evidence.db"
+    _write_h6_run_log(h6_db_path, [(_ms(now), "ok")])
+
+    settings = ApiSettings(
+        host="127.0.0.1",
+        port=9109,
+        token="t" * 40,
+        trading_db_path=tmp_path / "btc_trading.db",
+        forward_db_path=forward_db_path,
+        ledger_db_path=tmp_path / "ledger.db",
+        registry_path=tmp_path / "registry.yaml",
+        thresholds_path=tmp_path / "thresholds.yaml",
+        backup_dir=tmp_path / "backups",
+        ledger_backup_dir=tmp_path / "ledger-backups",
+        label_store_backup_dir=tmp_path / "label-store-backups",
+        dataset_builder_backup_dir=tmp_path / "dataset-builder-backups",
+        feature_store_backup_dir=tmp_path / "feature-store-backups",
+        service_name="btcbot.service",
+        log_level="INFO",
+        cache_ttl_seconds=0.0,
+    )
+
+    result = services.runtime_health(settings)
+    names = [c["name"] for c in result["checks"]]
+    assert "h6_cycle" in names
+
+    h6_check = next(c for c in result["checks"] if c["name"] == "h6_cycle")
+    assert h6_check["severity"] == hc.OK
+
+
+def test_runtime_health_still_includes_forward_cycle_check_unchanged(tmp_path: Path):
+    """Adding H6 must not disturb the pre-existing forward_cycle check."""
+    from src.api.config import ApiSettings
+    from src.api import services
+
+    settings = ApiSettings(
+        host="127.0.0.1",
+        port=9109,
+        token="t" * 40,
+        trading_db_path=tmp_path / "btc_trading.db",
+        forward_db_path=tmp_path / "evidence_forward.db",
+        ledger_db_path=tmp_path / "ledger.db",
+        registry_path=tmp_path / "registry.yaml",
+        thresholds_path=tmp_path / "thresholds.yaml",
+        backup_dir=tmp_path / "backups",
+        ledger_backup_dir=tmp_path / "ledger-backups",
+        label_store_backup_dir=tmp_path / "label-store-backups",
+        dataset_builder_backup_dir=tmp_path / "dataset-builder-backups",
+        feature_store_backup_dir=tmp_path / "feature-store-backups",
+        service_name="btcbot.service",
+        log_level="INFO",
+        cache_ttl_seconds=0.0,
+    )
+
+    result = services.runtime_health(settings)
+    names = [c["name"] for c in result["checks"]]
+    assert "forward_cycle" in names
