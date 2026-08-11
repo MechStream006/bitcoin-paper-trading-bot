@@ -39,6 +39,8 @@ for _p in (str(_HERE), str(_RESEARCH_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import sqlite3
+
 from forward_evidence import runner_h5, runner_g1, runner_g3, runner_ivrv
 from forward_evidence import runner_atr_expansion as runner_atr
 from forward_evidence.init_forward_db import init_forward_db
@@ -71,11 +73,13 @@ def _derive_run_date() -> str:
     return (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
 
 
-def _check_governance(research_root: pathlib.Path) -> bool:
+def _check_governance(research_root: pathlib.Path) -> tuple[bool, str]:
     """
     Call evidence_library/report.py --check via subprocess.
 
-    Returns True if registry is clean (exit 0); False and logs all errors otherwise.
+    Returns (True, stdout) if registry is clean (exit 0); (False, detail) and
+    logs all errors otherwise. `detail` is the failure reason, suitable for
+    persisting into run_log's `note` column by the caller.
     Uses sys.executable so the check runs in the same Python environment as the
     caller — no env activation required.
     """
@@ -89,16 +93,83 @@ def _check_governance(research_root: pathlib.Path) -> bool:
         )
     except subprocess.TimeoutExpired:
         log.error("GOVERNANCE CHECK TIMED OUT after 30s — aborting collection.")
-        return False
+        return False, "governance check subprocess timed out after 30s"
     if result.returncode == 0:
         log.info("GOVERNANCE: %s", result.stdout.strip())
-        return True
+        return True, result.stdout.strip()
     log.error(
         "GOVERNANCE CHECK FAILED:\nstdout: %s\nstderr: %s",
         result.stdout.strip(),
         result.stderr.strip(),
     )
-    return False
+    detail = (result.stdout.strip() + " " + result.stderr.strip()).strip()
+    return False, detail or f"report.py --check exited {result.returncode}"
+
+
+# fn_hash is a hex SHA-256 (64 chars); this placeholder is deliberately a
+# different shape so a future reader can never mistake it for a real one.
+_GOVERNANCE_FAILURE_FN_HASH = "N/A-GOVERNANCE-CHECK-FAILED"
+
+
+def _blocked_signal_ids(sigs: dict) -> list[str]:
+    """The signal_ids run_all() would have attempted for this config, mirroring
+    its own inclusion rules exactly (h5/g1/g3 always; ivrv whenever configured;
+    atr only when explicitly enabled) — so a governance-failure record never
+    claims a disabled signal was blocked when it was never going to run."""
+    ids = ['h5_vol_regime', 'g1_market_regime_sma200', 'g3_momentum_tsmom']
+    ids = [sid for sid in ids if sid in sigs]
+    if sigs.get('ivrv_vrp_spread') is not None:
+        ids.append('ivrv_vrp_spread')
+    atr_cfg = sigs.get('g3_atr_expansion')
+    if atr_cfg is not None and atr_cfg.get('enabled', False):
+        ids.append('g3_atr_expansion')
+    return ids
+
+
+def _record_governance_check_failure(
+    db_path: pathlib.Path,
+    run_date: str,
+    signal_ids: list[str],
+    detail: str,
+) -> None:
+    """
+    Persist a governance-check failure into evidence_forward.db's run_log.
+
+    Before this, a subprocess crash in _check_governance() aborted main()
+    with only a log line -- no queryable record survived in the evidence
+    DB itself, so a run of failures was invisible to anything but the
+    systemd journal (the exact gap the 2026-07-18..08-05 outage exposed).
+
+    Writes one status='error' row per tracked signal rather than a single
+    sentinel row: this is truthful (every signal really was blocked, none
+    ran), requires no schema change (status='error' is already a valid
+    run_log value), and needs no change to src/alerts/forward_status.py's
+    consumption logic -- MAX(run_date) advancing here correctly reflects
+    "an attempt happened and failed", which forward_status.py already
+    reports as state='degraded' (all signals in `errors`), not silently
+    masked as fresh and not misread as a missed cycle either.
+
+    INSERT OR IGNORE: idempotent under retry, per the schema's own stated
+    crash/recovery contract ("a crash before commit leaves no row here;
+    retries start clean") -- a second same-day invocation after an
+    already-recorded failure does not raise on the UNIQUE(signal_id,
+    run_date) constraint.
+    """
+    init_forward_db(db_path)
+    note = f"governance check failed: {detail[:500]}"
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("PRAGMA foreign_keys = ON")
+        con.executemany(
+            """
+            INSERT OR IGNORE INTO run_log (signal_id, run_date, fn_hash, status, note)
+            VALUES (?, ?, ?, 'error', ?)
+            """,
+            [(sid, run_date, _GOVERNANCE_FAILURE_FN_HASH, note) for sid in signal_ids],
+        )
+        con.commit()
+    finally:
+        con.close()
 
 
 def _run_dry(
@@ -332,8 +403,14 @@ def main() -> int:
     run_date = args.run_date or _derive_run_date()
     log.info("run_date=%s  db=%s  dry_run=%s", run_date, args.db_path, args.dry_run)
 
-    if not _check_governance(_RESEARCH_ROOT):
+    gov_ok, gov_detail = _check_governance(_RESEARCH_ROOT)
+    if not gov_ok:
         log.error("Aborting: fix registry errors and retry.")
+        if not args.dry_run:
+            cfg = yaml.safe_load(_CONFIG_PATH.read_text(encoding='utf-8'))
+            _record_governance_check_failure(
+                args.db_path, run_date, _blocked_signal_ids(cfg['signals']), gov_detail,
+            )
         return 1
 
     results = run_all(run_date, db_path=args.db_path, dry_run=args.dry_run)

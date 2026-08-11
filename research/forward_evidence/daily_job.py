@@ -459,6 +459,28 @@ def main() -> None:
 
     if not to_process:
         print("  Nothing new to process. DB is up to date.")
+        # Previously returned here with zero trace of the invocation: systemd
+        # saw a clean exit but no run_log row was ever written, making a
+        # genuine "already up to date" no-op indistinguishable from an
+        # upstream corpus refresh that silently hadn't advanced yet before
+        # this job ran (the exact ambiguity found on 2026-07-01 and 08-01).
+        # Recording status='no_new_data' here closes that gap without
+        # touching the normal-path run_log write below, which is unchanged.
+        if not args.dry_run:
+            latest_day_ts = int(corpus["day_ts"].iloc[-1])
+            con.execute("""
+                INSERT OR REPLACE INTO run_log
+                    (run_ts, data_day_ts, status, signals_computed,
+                     corpus_rows_loaded, fn_hash, day_features_hash,
+                     anomalies_json, runtime_ms, notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            """, (
+                now_ms, latest_day_ts, "no_new_data", 0,
+                len(corpus), _FN_HASH, None,
+                "[]", int((time.time() - t0) * 1000),
+                f"mode={mode}; corpus latest day already in corpus_daily",
+            ))
+            con.commit()
         con.close()
         return
 

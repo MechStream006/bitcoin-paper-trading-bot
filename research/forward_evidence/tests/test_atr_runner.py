@@ -202,24 +202,31 @@ class TestAtrRunner:
 
 class TestGovernanceCheck:
     def test_GC01_returns_true_when_report_exits_zero(self, monkeypatch) -> None:
-        """_check_governance() returns True when report.py --check exits 0."""
+        """_check_governance() returns (True, stdout) when report.py --check exits 0."""
         monkeypatch.setattr(_run_daily, 'subprocess', _sp_mock(0, 'Registry check: OK'))
-        assert _run_daily._check_governance(_run_daily._RESEARCH_ROOT) is True
+        ok, detail = _run_daily._check_governance(_run_daily._RESEARCH_ROOT)
+        assert ok is True
+        assert detail == 'Registry check: OK'
 
     def test_GC02_returns_false_when_report_exits_nonzero(self, monkeypatch) -> None:
-        """_check_governance() returns False and does not raise when exit code != 0."""
+        """_check_governance() returns (False, detail) and does not raise when exit code != 0."""
         monkeypatch.setattr(
             _run_daily, 'subprocess',
             _sp_mock(1, 'Registry check: 2 error(s)\n  some_family: pinned_run missing'),
         )
-        assert _run_daily._check_governance(_run_daily._RESEARCH_ROOT) is False
+        ok, detail = _run_daily._check_governance(_run_daily._RESEARCH_ROOT)
+        assert ok is False
+        assert 'pinned_run missing' in detail
 
     def test_GC03_main_aborts_before_collection_when_governance_fails(
-        self, monkeypatch,
+        self, monkeypatch, db_path: pathlib.Path,
     ) -> None:
         """main() returns 1 immediately and never calls run_all() if governance fails."""
-        monkeypatch.setattr(_run_daily, '_check_governance', lambda _: False)
-        monkeypatch.setattr(sys, 'argv', ['run_daily.py', '--run-date', '2026-01-01'])
+        monkeypatch.setattr(_run_daily, '_check_governance', lambda _: (False, 'forced test failure'))
+        monkeypatch.setattr(
+            sys, 'argv',
+            ['run_daily.py', '--run-date', '2026-01-01', '--db-path', str(db_path)],
+        )
 
         run_all_calls: list[tuple] = []
         monkeypatch.setattr(
@@ -232,9 +239,89 @@ class TestGovernanceCheck:
         assert run_all_calls == [], "run_all must not be called after governance failure"
 
     def test_GC04_returns_false_on_subprocess_timeout(self, monkeypatch) -> None:
-        """subprocess.TimeoutExpired during --check → _check_governance returns False without raising."""
+        """subprocess.TimeoutExpired during --check → _check_governance returns (False, detail) without raising."""
         monkeypatch.setattr(_run_daily, 'subprocess', _sp_timeout_mock())
-        assert _run_daily._check_governance(_run_daily._RESEARCH_ROOT) is False
+        ok, detail = _run_daily._check_governance(_run_daily._RESEARCH_ROOT)
+        assert ok is False
+        assert 'timed out' in detail
+
+    def test_GC05_governance_failure_writes_error_row_per_signal(
+        self, monkeypatch, db_path: pathlib.Path,
+    ) -> None:
+        """main() persists a status='error' run_log row for every tracked signal
+        when governance fails — the exact gap the 2026-07-18..08-05 outage
+        exposed (18 failed runs left zero trace in any evidence-DB table)."""
+        monkeypatch.setattr(_run_daily, '_check_governance', lambda _: (False, 'forced test failure'))
+        monkeypatch.setattr(
+            sys, 'argv',
+            ['run_daily.py', '--run-date', '2026-01-01', '--db-path', str(db_path)],
+        )
+        monkeypatch.setattr(_run_daily, 'run_all', lambda *a, **kw: {})
+
+        rc = _run_daily.main()
+        assert rc == 1
+
+        cfg = yaml.safe_load(_run_daily._CONFIG_PATH.read_text(encoding='utf-8'))
+        expected_signals = set(cfg['signals'].keys())
+
+        con = sqlite3.connect(db_path)
+        rows = con.execute(
+            "SELECT signal_id, status, note FROM run_log WHERE run_date = ?",
+            ('2026-01-01',),
+        ).fetchall()
+        con.close()
+
+        recorded = {sid: (status, note) for sid, status, note in rows}
+        assert set(recorded.keys()) == expected_signals, (
+            f"expected a run_log row for every tracked signal, got {set(recorded.keys())}"
+        )
+        for sid, (status, note) in recorded.items():
+            assert status == 'error'
+            assert 'governance check failed' in note
+            assert 'forced test failure' in note
+
+    def test_GC06_governance_failure_recording_is_idempotent_under_retry(
+        self, monkeypatch, db_path: pathlib.Path,
+    ) -> None:
+        """A second same-day invocation after an already-recorded failure must not
+        raise on the UNIQUE(signal_id, run_date) constraint (schema's own stated
+        crash/recovery contract: retries start clean)."""
+        monkeypatch.setattr(_run_daily, '_check_governance', lambda _: (False, 'forced test failure'))
+        monkeypatch.setattr(
+            sys, 'argv',
+            ['run_daily.py', '--run-date', '2026-01-01', '--db-path', str(db_path)],
+        )
+        monkeypatch.setattr(_run_daily, 'run_all', lambda *a, **kw: {})
+
+        rc1 = _run_daily.main()
+        rc2 = _run_daily.main()
+        assert rc1 == 1 and rc2 == 1
+
+        con = sqlite3.connect(db_path)
+        n = con.execute(
+            "SELECT COUNT(*) FROM run_log WHERE run_date = ?", ('2026-01-01',),
+        ).fetchone()[0]
+        con.close()
+        cfg = yaml.safe_load(_run_daily._CONFIG_PATH.read_text(encoding='utf-8'))
+        assert n == len(cfg['signals']), "second invocation must not duplicate rows"
+
+    def test_GC07_dry_run_does_not_write_governance_failure_rows(
+        self, monkeypatch, db_path: pathlib.Path,
+    ) -> None:
+        """--dry-run must never write to the DB, including on governance failure."""
+        monkeypatch.setattr(_run_daily, '_check_governance', lambda _: (False, 'forced test failure'))
+        monkeypatch.setattr(
+            sys, 'argv',
+            ['run_daily.py', '--run-date', '2026-01-01', '--db-path', str(db_path), '--dry-run'],
+        )
+
+        rc = _run_daily.main()
+        assert rc == 1
+
+        con = sqlite3.connect(db_path)
+        n = con.execute("SELECT COUNT(*) FROM run_log").fetchone()[0]
+        con.close()
+        assert n == 0
 
 
 # ===========================================================================
