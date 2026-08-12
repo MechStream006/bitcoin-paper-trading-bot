@@ -1,0 +1,24 @@
+# Weekly, not daily. The bundle only changes when `main` advances, and the
+# unit itself skips when HEAD matches the sentinel -- so a daily timer would
+# almost always be a no-op, while a genuine code change is picked up within a
+# week regardless. Object Lock COMPLIANCE (90 days) makes every PUT permanent,
+# which is the other reason not to fire this more often than necessary.
+#
+# Sunday 03:00 UTC: clear of the 02:00 --all backup, the 02:20 encrypted
+# ledger backup, the 00:05/01:00/01:30 evidence jobs, and well clear of the
+# 11:58-12:06 UTC settlement dead zone (CLAUDE.md §14).
+#
+# Persistent=true so a missed week runs on the next boot -- a stale recovery
+# bundle is exactly the condition this exists to prevent.
+[Unit]
+Description=BTC Bot recovery-code bundle — weekly, Sunday 03:00 UTC
+Documentation=file:/opt/btcbot/docs/ops/offhost-backup.md
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00 UTC
+RandomizedDelaySec=300
+Persistent=true
+Unit=btcbot-code-bundle.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,52 @@
+# BTC Bot — encrypted recovery-code bundle (BK2 Phase 2).
+#
+# Ships a full-history, age-encrypted `git bundle` of `main` to the `code/`
+# prefix of the existing off-host bucket, so disaster recovery needs two
+# credentials (S3 read + age identity) instead of three. The 2026-08-12 BK2
+# drill found the documented recovery procedure cannot complete on a clean
+# host, because `git clone` of a PRIVATE repository needs a GitHub credential
+# that was never designed, documented, or given a custody plan.
+#
+# Deliberately a SEPARATE unit from btcbot-ledger-backup.service: a bundle
+# failure must never be able to perturb the ledger backup leg, which is the
+# only path protecting the one irreplaceable artifact (ADR-0001 BK1).
+#
+# BUNDLE_OFFHOST_CMD lives here rather than in /opt/btcbot/.env on purpose --
+# it is not a secret (the bucket name is already in git), it is specific to
+# this unit, and keeping it out of .env means activating this feature does not
+# require editing the file that holds the Delta and Telegram credentials.
+# `offhost_backup.load_env_var()` reads os.environ first, so this wins.
+# BACKUP_AGE_RECIPIENT is still read from .env, unchanged and unduplicated.
+#
+# Uploads only when HEAD differs from data/code-backups/.last-bundled-sha.
+# The bucket applies Object Lock COMPLIANCE for 90 days to every PUT, so a
+# daily unconditional upload would accumulate 90 undeletable versions per
+# quarter for no benefit.
+[Unit]
+Description=BTC Bot encrypted recovery-code bundle (BK2)
+Documentation=file:/opt/btcbot/docs/ops/offhost-backup.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment="BUNDLE_OFFHOST_CMD=aws s3 cp {file} s3://btcbot-offhost-backup-a71f9c2e/code/ --region ap-southeast-1 && aws s3 cp {manifest} s3://btcbot-offhost-backup-a71f9c2e/code/ --region ap-southeast-1"
+ExecStart=/opt/btcbot/venv/bin/python scripts/bundle_backup.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-code-bundle
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Only the bundle output directory is writable. `git bundle create` needs no
+# write access to .git -- verified by a systemd-run probe under exactly these
+# properties before this unit was installed.
+ReadWritePaths=/opt/btcbot/data
+
+[Install]
+WantedBy=multi-user.target
