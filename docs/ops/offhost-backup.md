@@ -313,20 +313,24 @@ three production stores have no off-host artifact to recover from.
 **Scenario: the VPS is gone.** You have the off-host backup target and the
 private identity.
 
-**Recovery requires THREE independent credentials.** This was established by
-the BK2 drill of 2026-08-12; an earlier revision of this procedure listed only
-the first two, and the third caused the drill to fail at step 0 on a clean host:
+**Recovery requires TWO independent credentials.** No GitHub access is needed.
 
 | # | Credential | Why | Where it lives |
 |---|---|---|---|
 | 1 | An AWS principal with `s3:GetObject` + `s3:ListBucket` on the backup bucket | The production instance profile is write-only and **cannot** read the backups | Operator's own IAM user |
-| 2 | The `age` private identity | Decryption. Lost key = permanently unrecoverable (§3.4) | Password manager + paper, never on any host |
-| 3 | **GitHub read access to the private repository** | `offhost_backup.py`, `receipt_ledger.py`, `report.py`, `registry.yaml` and `thresholds.yaml` exist **only** in the private repo. Without this, recovery stalls before it starts | Operator's GitHub token or SSH key |
+| 2 | The `age` private identity | Decryption — of both the ledger **and** the code bundle. Lost key = permanently unrecoverable (§3.4) | Password manager + paper, never on any host |
 
-**Credential 3 is the weak link and is being designed out — see §6.2.**
-Status as of 2026-08-12: the mechanism is **IMPLEMENTED, NOT YET ACTIVATED,
-and NOT YET RECOVERY-DRILL PROVEN.** Until a drill proves otherwise, plan
-recovery on **three** credentials and keep GitHub access available.
+**This was three credentials until 2026-08-12.** The first BK2 drill
+(`bk2-offhost-drill-2026-08-12.md` §6) found that step 0's `git clone` fails on
+a clean host, because the repository is private and the verification code
+(`offhost_backup.py`, `receipt_ledger.py`, `report.py`, `registry.yaml`,
+`thresholds.yaml`) exists nowhere else. A GitHub token was therefore a silent
+third requirement with no custody plan.
+
+**That dependency is closed and drill-proven.** The `code/` bundle (§6.2)
+supplies the repository from S3 under the same two credentials. Verified on a
+clean host with `github.com` blackholed in `/etc/hosts` and proven unreachable:
+`docs/ops/bk2-code-bundle-drill-2026-08-12.md`.
 
 ```bash
 # --- 0. Prerequisites on the recovery machine ---------------------------
@@ -336,16 +340,36 @@ recovery on **three** credentials and keep GitHub access available.
 sudo apt-get update && sudo apt-get install -y age sqlite3 git
 python3 -c "import yaml; print(yaml.__version__)"   # expect 6.0.1, preinstalled
 
-# Requires GitHub credential (3) above -- this is a PRIVATE repository.
-git clone https://github.com/MechStream006/bitcoin-paper-trading-bot btcbot && cd btcbot
-git checkout <git_sha from the .age-manifest.json>   # pin to the code that made the backup
+# NO GitHub access is required. Do not clone -- the repository comes from S3
+# in step 1b, under the same two credentials.
 
-# --- 1. Retrieve artifacts from the off-host target ---------------------
+# --- 1a. Retrieve the LEDGER from the off-host target -------------------
 # Requires AWS credential (1) above. NOT the production instance profile.
 mkdir -p ./recover
 aws s3 cp s3://btcbot-offhost-backup-a71f9c2e/prod/ledger_<ts>.db.age            ./recover/ --region ap-southeast-1
 aws s3 cp s3://btcbot-offhost-backup-a71f9c2e/prod/ledger_<ts>.db.age-manifest.json ./recover/ --region ap-southeast-1
 # List available generations:  aws s3 ls s3://btcbot-offhost-backup-a71f9c2e/prod/ --region ap-southeast-1
+
+# --- 1b. Retrieve and open the CODE BUNDLE (§6.2) -----------------------
+# Newest bundle; its history contains every retained ledger generation's sha.
+aws s3 ls s3://btcbot-offhost-backup-a71f9c2e/code/ --region ap-southeast-1
+aws s3 cp s3://btcbot-offhost-backup-a71f9c2e/code/btcbot-<sha>.bundle.age            ./recover/ --region ap-southeast-1
+aws s3 cp s3://btcbot-offhost-backup-a71f9c2e/code/btcbot-<sha>.bundle.age-manifest.json ./recover/ --region ap-southeast-1
+
+# Decrypt with the STOCK age binary -- no repo code is needed to open the
+# thing that contains the repo code.
+age --decrypt --identity identity.txt --output ./recover/btcbot.bundle \
+    ./recover/btcbot-<sha>.bundle.age
+sha256sum ./recover/btcbot.bundle    # must equal plaintext_sha256 in the manifest
+
+# `git bundle verify` refuses to run outside a repository, so verify from a
+# throwaway one. Expect "records a complete history".
+mkdir -p /tmp/v && (cd /tmp/v && git init -q . && git bundle verify ~/recover/btcbot.bundle)
+
+git clone -b main ./recover/btcbot.bundle btcbot && cd btcbot
+git checkout <git_sha from the LEDGER .age-manifest.json>   # an ancestor: pins
+                                                            # the exact code that
+                                                            # made that backup
 
 # --- 2. Verify BEFORE using the key (works without it) ------------------
 python scripts/offhost_backup.py verify ./recover/ledger_<ts>.db.age
@@ -425,14 +449,23 @@ and is never present on the production host.
 
 ### 6.2 Recovery-code bundle — removing the GitHub dependency
 
-> **Status: IMPLEMENTED, NOT YET ACTIVATED, NOT YET RECOVERY-DRILL PROVEN.**
-> `scripts/bundle_backup.py` exists and is tested. No systemd timer runs it,
-> `BUNDLE_OFFHOST_CMD` is unset in production, and **no bundle has been
-> uploaded**. Recovery today still needs credential 3 (GitHub). This section
-> describes the mechanism, not an established capability. It does **not**
-> change the BK2/BK3 verdict, and it does **not** make `btc_trading.db`, the
-> evidence databases, the Parquet corpus, `.env`, or full service
-> restoration recoverable — a bundle carries code, never data.
+> **Status: IMPLEMENTED, ACTIVATED, and RECOVERY-DRILL PROVEN** as of
+> 2026-08-12. A production bundle is in S3 under `code/`, and
+> `docs/ops/bk2-code-bundle-drill-2026-08-12.md` recovered the repository from
+> it on a clean host with `github.com` blackholed and proven unreachable —
+> then decrypted and verified the governance ledger using the bundle-supplied
+> code. Recovery needs **two** credentials.
+>
+> **Two things are activated, one is not.** `scripts/bundle_backup.py` and
+> `btcbot-code-bundle.service` are installed and a bundle has been uploaded;
+> **the weekly timer is deliberately NOT enabled**, so the bundle will go
+> stale as `main` advances until an operator enables it or re-runs the unit.
+> Bundle freshness over time is therefore **NOT ESTABLISHED**.
+>
+> This does **not** change the BK2/BK3 verdict, and it does **not** make
+> `btc_trading.db`, the evidence databases, the Parquet corpus, `.env`, or
+> full service restoration recoverable — **a bundle carries code, never
+> data.**
 
 **Mechanism.** `scripts/bundle_backup.py` creates a **full-history**
 `git bundle` of `main`, verifies it locally, encrypts it to the **same** age
@@ -487,11 +520,18 @@ any kind**. INFO until activated; WARNING if configured-but-never-uploaded or
 if HEAD has moved past the last bundled SHA; CRITICAL on artifact hash
 mismatch; OK when in sync.
 
-**Remaining activation steps (host-side, not performed):** set
-`BUNDLE_OFFHOST_CMD` in `.env`, add and enable a `btcbot-code-bundle` timer,
-run one upload, then perform a second clean-host drill **with GitHub
-deliberately unavailable**. Only that drill converts this from implemented to
-proven.
+**Activation history.** `BUNDLE_OFFHOST_CMD` is set in
+`btcbot-code-bundle.service` (not `.env` — it is not a secret, and activating
+this must not require editing the file holding the Delta and Telegram
+credentials). The IAM policy `btcbot-offhost-backup-policy` was extended to
+**v2**, adding `s3:PutObject` on `code/*` alongside `prod/*`; it remains
+PutObject-only, and v1 is retained for rollback. One bundle was uploaded
+2026-08-12 09:19 UTC, then drill-proven the same day.
+
+**Still not done:** the weekly timer is **not enabled**. Until it is, a new
+bundle is produced only by running the unit by hand, and
+`healthcheck.py::check_code_bundle()` will report WARNING once HEAD moves past
+the last bundled SHA.
 
 ---
 

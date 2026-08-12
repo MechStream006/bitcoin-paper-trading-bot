@@ -439,14 +439,20 @@ transfer). **This ADR extends its operational envelope; it does not redesign it.
   established because no off-host artifacts exist.** See
   `docs/governance/p1_assurance_declaration.md` claim 8 and
   `docs/ops/offhost-backup.md` §9.
-  **Recovery-code bundle (2026-08-12): IMPLEMENTED, NOT YET ACTIVATED, NOT YET
+  **Recovery-code bundle (2026-08-12): IMPLEMENTED, ACTIVATED, and
   RECOVERY-DRILL PROVEN.** `scripts/bundle_backup.py` ships an encrypted
-  full-history `git bundle` to a `code/` prefix so recovery needs two
-  credentials (S3 read + `age` identity) rather than three — the BK2 drill
-  found the documented procedure cannot complete on a clean host because the
-  repository is private. No timer runs it, `BUNDLE_OFFHOST_CMD` is unset, and
-  no bundle has been uploaded. It carries **code, never data**, and therefore
-  cannot broaden the BK2/BK3 verdict above by a single store. See
+  full-history `git bundle` to a `code/` prefix, so recovery needs **two**
+  credentials (S3 read + `age` identity) rather than three — the first BK2
+  drill found the documented procedure could not complete on a clean host
+  because the repository is private. A production bundle is in S3 and
+  `docs/ops/bk2-code-bundle-drill-2026-08-12.md` restored the repository from
+  it with `github.com` blackholed and proven unreachable, then verified the
+  ledger using the bundle-supplied code (`verify_chain` `ok=True, n=26`;
+  `report.py --check` exit 0). Policy `btcbot-offhost-backup-policy` v2 adds
+  `s3:PutObject` on `code/*`, still PutObject-only.
+  **Not established:** the weekly timer is not enabled, so **bundle freshness
+  over time** is unproven. The bundle carries **code, never data**, and
+  therefore cannot broaden the BK2/BK3 verdict above by a single store. See
   `docs/ops/offhost-backup.md` §6.2.
 - **BK4.** Backup integrity is verified via the existing SHA-256 manifest, not
   assumed from exit code 0.
