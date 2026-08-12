@@ -155,8 +155,26 @@ This is Tier 1 of the three-tier model in §7 — it proves the transfer
 
 ```bash
 age-keygen -o btcbot-backup-identity.txt
-# Public key: age1m882un7hzz30ht090urm07t2zwr6x6qhs63fx3n08mzs4jmme9tqyr4tkp
+# Public key: age1... (the recipient; see below for the live production value)
 ```
+
+**The live production recipient is:**
+
+```
+age10npeurzd3643wqjkwl0c4rem7w9zsrmwrvp5cwanyzg79ydpsyyqtfthsd
+```
+
+This is the value in `/opt/btcbot/.env` and in every `.age-manifest.json`
+produced on the production host, confirmed against both sources and
+successfully decrypted in the BK2 drill of 2026-08-12
+(`bk2-offhost-drill-2026-08-12.md`). It is a **public** recipient — recording
+it here is safe and is what makes the manifest's `recipient` field checkable.
+
+**Earlier revisions of this document showed a different recipient
+(`age1m882un7…`), which was a placeholder written before the production key
+existed.** It never encrypted a production artifact. If you are holding an
+identity that derives to that value, it is not the production key — verify
+with `age-keygen -y <identity>` before assuming any artifact is recoverable.
 
 The file contains the **private identity** (`AGE-SECRET-KEY-1...`). The
 comment line contains the **public recipient** (`age1...`).
@@ -180,10 +198,20 @@ merely documented.
 ### 3.3 Host configuration
 
 ```bash
-# /opt/btcbot/.env
-BACKUP_AGE_RECIPIENT=age1m882un7hzz30ht090urm07t2zwr6x6qhs63fx3n08mzs4jmme9tqyr4tkp
-BACKUP_OFFHOST_CMD=rsync -az --timeout=120 {file} {manifest} backup@target:/srv/btcbot-backups/
+# /opt/btcbot/.env  — the deployed production values
+BACKUP_AGE_RECIPIENT=age10npeurzd3643wqjkwl0c4rem7w9zsrmwrvp5cwanyzg79ydpsyyqtfthsd
+BACKUP_OFFHOST_CMD=aws s3 cp {file} s3://btcbot-offhost-backup-a71f9c2e/prod/ --region ap-southeast-1 && aws s3 cp {manifest} s3://btcbot-offhost-backup-a71f9c2e/prod/ --region ap-southeast-1
 ```
+
+The off-host target is an S3 bucket in **ap-southeast-1**, deliberately a
+different region from the ap-south-1 host. The instance profile
+(`btcbot-offhost-backup-role`) is **write-only**: `s3:ListBucket`,
+`s3:GetBucketVersioning` and `HeadObject` are all denied to it. That is the
+intended design — a compromised host cannot enumerate or read back its own
+backups — and it means **recovery must use a different principal** (§6).
+Objects are stored with versioning enabled and **Object Lock in COMPLIANCE
+mode for 90 days**, so an artifact cannot be deleted or overwritten by anyone,
+including the account root, within that window.
 
 `{file}` and `{manifest}` resolve to the **ciphertext** and its
 `.age-manifest.json` when `--encrypt` is used — never the plaintext DB
@@ -269,6 +297,15 @@ The last two rows are the ones that matter: **BK2's exact criteria pass on a
 ledger that was encrypted, shipped, and decrypted** — and a wrong key fails
 closed.
 
+**Superseded as the authoritative drill.** The table above was a *local* drill:
+the artifact never left the machine and no off-host target existed at the time.
+The authoritative evidence is now `bk2-offhost-drill-2026-08-12.md` — a real
+production ciphertext retrieved from S3 onto a clean Ubuntu host with no AWS
+credentials and no prior project state, decrypted, SHA-verified, chain-verified
+(`ok=True, n_receipts=26`) and passed through `report.py --check` (exit 0).
+**That drill proves off-host recovery of the governance ledger only.** The other
+three production stores have no off-host artifact to recover from.
+
 ---
 
 ## 6. Disaster recovery procedure
@@ -276,14 +313,44 @@ closed.
 **Scenario: the VPS is gone.** You have the off-host backup target and the
 private identity.
 
+**Recovery requires THREE independent credentials.** This was established by
+the BK2 drill of 2026-08-12; an earlier revision of this procedure listed only
+the first two, and the third caused the drill to fail at step 0 on a clean host:
+
+| # | Credential | Why | Where it lives |
+|---|---|---|---|
+| 1 | An AWS principal with `s3:GetObject` + `s3:ListBucket` on the backup bucket | The production instance profile is write-only and **cannot** read the backups | Operator's own IAM user |
+| 2 | The `age` private identity | Decryption. Lost key = permanently unrecoverable (§3.4) | Password manager + paper, never on any host |
+| 3 | **GitHub read access to the private repository** | `offhost_backup.py`, `receipt_ledger.py`, `report.py`, `registry.yaml` and `thresholds.yaml` exist **only** in the private repo. Without this, recovery stalls before it starts | Operator's GitHub token or SSH key |
+
+**Credential 3 is the weak link and should be designed out.** The BK2 drill
+worked around it with a `git bundle` of `main` created on a machine that
+already had the repo — which proves the code can be carried alongside the
+ciphertext, but does not help an operator whose only machine is gone.
+**Recommended (designed, NOT yet implemented):** publish a
+recovery-critical `git bundle` into the same S3 prefix as the ciphertext, so
+recovery needs two credentials instead of three and the verification code is
+recovered by the same path as the data it verifies. Do not treat this as
+existing — it does not.
+
 ```bash
 # --- 0. Prerequisites on the recovery machine ---------------------------
-sudo apt-get install -y age sqlite3
-git clone <repo> btcbot && cd btcbot
+# Ubuntu 24.04: age, sqlite3 and git are stock apt packages; Python 3.12 and
+# PyYAML 6.0.1 are preinstalled on the cloud image. NO pip install is needed
+# or possible -- PEP 668 (/usr/lib/python3.12/EXTERNALLY-MANAGED) blocks it.
+sudo apt-get update && sudo apt-get install -y age sqlite3 git
+python3 -c "import yaml; print(yaml.__version__)"   # expect 6.0.1, preinstalled
+
+# Requires GitHub credential (3) above -- this is a PRIVATE repository.
+git clone https://github.com/MechStream006/bitcoin-paper-trading-bot btcbot && cd btcbot
+git checkout <git_sha from the .age-manifest.json>   # pin to the code that made the backup
 
 # --- 1. Retrieve artifacts from the off-host target ---------------------
-rsync -az backup@target:/srv/btcbot-backups/ledger_*.db.age            ./recover/
-rsync -az backup@target:/srv/btcbot-backups/ledger_*.age-manifest.json ./recover/
+# Requires AWS credential (1) above. NOT the production instance profile.
+mkdir -p ./recover
+aws s3 cp s3://btcbot-offhost-backup-a71f9c2e/prod/ledger_<ts>.db.age            ./recover/ --region ap-southeast-1
+aws s3 cp s3://btcbot-offhost-backup-a71f9c2e/prod/ledger_<ts>.db.age-manifest.json ./recover/ --region ap-southeast-1
+# List available generations:  aws s3 ls s3://btcbot-offhost-backup-a71f9c2e/prod/ --region ap-southeast-1
 
 # --- 2. Verify BEFORE using the key (works without it) ------------------
 python scripts/offhost_backup.py verify ./recover/ledger_<ts>.db.age
@@ -414,18 +481,25 @@ Enabling is a deliberate host-side sequence, **in this order**:
 
 ## 9. Open items
 
-1. **Off-host target not yet provisioned** — ADR §20.1. This implementation
-   is target-agnostic (`BACKUP_OFFHOST_CMD` is any shell command: rsync, S3
-   CLI, rclone), so the choice does not block the code. **Still open** —
-   this is Rohith's host-side decision (Program P1 Increment 6 recommends
-   append-only-key object storage; see the Increment 6 plan/report).
+1. **Off-host target not yet provisioned** — ADR §20.1. **RESOLVED.** An S3
+   bucket (`btcbot-offhost-backup-a71f9c2e`, ap-southeast-1) is provisioned
+   with versioning and 90-day Object Lock COMPLIANCE, written daily at 02:20
+   UTC by `btcbot-ledger-backup.service` via a write-only instance profile
+   (§3.3). **Scope: the governance ledger only.** `btc_trading.db`,
+   `evidence_forward.db` and `forward_evidence.db` are backed up locally but
+   ship nothing off-host — the 02:00 `--all` unit runs without `--encrypt`,
+   and `backup.py` requires both an off-host command *and* `--encrypt` before
+   it will transfer anything. Extending coverage to the two evidence DBs
+   (both under 150 KB) remains open.
 2. **`.env` disaster recovery** — ADR §20.3. **Resolved (Program P1
    Increment 7, 2026-07-26)**: documented at §6.1 above. Deliberately
    remains a manual, low-frequency procedure — not folded into
    `scripts/backup.py`'s automated path; see §6.1 for why.
 3. **Retention for `.age` artifacts** — resolved, §7 (P1 Increment 6).
-4. **Drill cadence** — quarterly proposed (ADR §20.4, still unconfirmed);
-   fold the decrypt drill into the same session as the BK2 restore drill.
+4. **Drill cadence** — quarterly proposed (ADR §20.4, still unconfirmed). The
+   first combined decrypt + BK2 drill was executed 2026-08-12
+   (`bk2-offhost-drill-2026-08-12.md`); the next is due by 2026-11-12, before
+   the current artifacts' Object Lock window expires.
 5. **Remote `verify` on a schedule (Tier 2 of the monitoring model, §7)** —
    the `verify` subcommand needs no private key and could run weekly against
    the off-host target with no code change, but no timer invokes it yet.

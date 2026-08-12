@@ -1325,13 +1325,34 @@ All seven increments are complete. The program's output was committed as
 pushed to `origin/main`, closing the last durability gap in the durability
 program itself — its own output no longer exists only on one machine.
 
-**Not part of Program P1, and still open:** Increment 6's host-side
-off-host-backup activation (target provisioning, key generation/custody,
-`--encrypt` deployment, decrypt drill) is host-side operator work, not a
-queued engineering increment — BK3 remains **NOT ESTABLISHED**. A BK2
-production restore drill has still never been run. Ongoing technical debt
-is tracked in §19. See `docs/governance/p1_assurance_declaration.md` for
-the bounded, per-claim statement of what is and is not established.
+**Not part of Program P1, completed afterwards (status as of 2026-08-12):**
+Increment 6's host-side off-host-backup activation was carried out by the
+operator, and BK2/BK3 are no longer wholly unestablished. Precise status:
+
+- **BK3 — partially established.** An S3 target
+  (`btcbot-offhost-backup-a71f9c2e`, ap-southeast-1, versioned, 90-day Object
+  Lock COMPLIANCE) is provisioned, the `age` keypair exists with the private
+  identity held off-host, and `btcbot-ledger-backup.service` ships an
+  encrypted ledger copy daily at 02:20 UTC. **This covers the governance
+  ledger only.** `btc_trading.db`, `evidence_forward.db` and
+  `forward_evidence.db` have **no off-host artifact** — the 02:00 `--all`
+  unit runs without `--encrypt`, so its transfer leg never fires.
+- **BK2 — governance-ledger recovery is PROVEN.** The drill of 2026-08-12
+  (`docs/ops/bk2-offhost-drill-2026-08-12.md`) retrieved a real production
+  ciphertext from S3 onto a clean Ubuntu 24.04 host with no AWS credentials
+  and no prior project state, verified it without the key, decrypted it,
+  matched the plaintext SHA-256 exactly, and passed both governance gates —
+  `verify_chain()` `ok=True, n_receipts=26` and `report.py --check` exit 0,
+  35 families. Wrong-key decryption failed closed with no partial output;
+  all drill infrastructure was destroyed.
+
+**The scope boundary matters and must be preserved wherever this is
+restated: governance-ledger recoverability is proven; recovery of the other
+production stores is NOT established, because no off-host artifact exists
+for them.** Full-service restoration (runtime environment, `.env`, corpus)
+also remains unproven. Ongoing technical debt is tracked in §19. See
+`docs/governance/p1_assurance_declaration.md` for the bounded, per-claim
+statement of what is and is not established.
 
 ---
 

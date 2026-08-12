@@ -750,12 +750,25 @@ def run_check(
     # historical --check --as-of run rather than silently misapplied.
     if check_evidence_governance and as_of_norm is None:
         import evidence_governance
-        # Idempotent schema-ensure (CREATE TABLE IF NOT EXISTS only, no ALTER)
-        # -- report.py has never called init_db() before (it is a read-only
-        # consumer of an already-seeded ledger.db); a ledger that predates
-        # this PR, or a fresh test fixture, must not crash --check with
-        # "no such table: governance_receipts" just because nothing has
-        # written a receipt into it yet.
+        # Idempotent schema-ensure -- report.py has never called init_db()
+        # before (it is a read-only consumer of an already-seeded ledger.db);
+        # a ledger that predates this PR, or a fresh test fixture, must not
+        # crash --check with "no such table: governance_receipts" just
+        # because nothing has written a receipt into it yet.
+        #
+        # This opens the ledger READ-WRITE. Mostly CREATE TABLE IF NOT EXISTS,
+        # but record.init_db() also carries one guarded
+        # `ALTER TABLE runs ADD COLUMN run_kind TEXT` (record.py:194-197),
+        # which fires only on a pre-PR-5 ledger missing that column. An
+        # earlier revision of this comment claimed "no ALTER"; that was
+        # wrong. On a migrated ledger the ALTER never fires and --check is
+        # byte-non-mutating in practice -- verified in the BK2 drill of
+        # 2026-08-12, where a restored production ledger was byte-identical
+        # (same SHA-256, no -wal/-shm created) after run_check returned 0,
+        # since VACUUM INTO output is journal_mode=delete, not WAL.
+        # "Assert, never repair" (ADR-P1-1) still holds for the schema
+        # FINGERPRINT check above, which is genuinely read-only; this
+        # seeding step is a separate, pre-existing concern.
         evidence_governance.init_db(ledger_path)
         errors = errors + evidence_governance.validate_evidence_governance(ledger_path, registry)
 

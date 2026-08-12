@@ -41,7 +41,7 @@ repeat that narrative — it states bounded claims and points at the evidence.
 | 5 | Ledger backup freshness (local, on-host) is monitored, CLI and API in parity | **DEMONSTRATED** | `scripts/healthcheck.py::check_backup_freshness()`; `tests/test_healthcheck.py` (Increment 1) | Repository |
 | 6 | The restore path (`scripts/restore.py`) is regression-covered against real SQLite artifacts | **DEMONSTRATED** | `tests/test_restore.py`, 21 tests (Increment 2) | Repository |
 | 7 | Off-host transfer failure is no longer silent — a persisted signal exists and is monitored | **DEMONSTRATED** | `scripts/backup.py::_write_offhost_status()`; `scripts/healthcheck.py::check_offhost_freshness()`; `tests/test_offhost_backup.py`, `tests/test_healthcheck.py` (Increment 6) | Repository |
-| 8 | **Off-host backup is active and durable (BK3, ADR-0001 §12)** | **NOT ESTABLISHED** | Increment 6 shipped monitoring code only | **No off-host target is provisioned, no key exists, `--encrypt` is not in the deployed unit, and no decrypt drill has ever been run against a real production artifact.** |
+| 8 | **Off-host backup is active and durable (BK3, ADR-0001 §12) — GOVERNANCE LEDGER ONLY** | **DEMONSTRATED (ledger)** / **NOT ESTABLISHED (all other stores)** | Post-P1 operator activation + `docs/ops/bk2-offhost-drill-2026-08-12.md`: production ciphertext retrieved from S3 to a clean host, decrypted, SHA-256 identical, `verify_chain()` `ok=True, n_receipts=26`, `report.py --check` exit 0, wrong-key control failed closed | **Ledger only.** Target provisioned (S3 ap-southeast-1, versioned, 90-day Object Lock COMPLIANCE), key exists with the private identity held off-host, `--encrypt` deployed in `btcbot-ledger-backup.service`. **`btc_trading.db`, `evidence_forward.db` and `forward_evidence.db` have no off-host artifact and are therefore NOT recoverable after host loss.** Corpus and `.env` likewise uncovered. |
 | 9 | The encryption/decryption mechanism itself (`age`, asymmetric recipient) is correct | **DEMONSTRATED (LOCAL)** | `docs/ops/offhost-backup.md` §5 — a full local DR drill against a real ledger backup: recovered SHA-256 identical, `verify_chain` ok, `report.py --check` exit 0 | Local drill only, not a production artifact |
 
 ---
@@ -120,7 +120,21 @@ tolerated, that the known migration sequence works cleanly and idempotently
 against a disposable copy, and that off-host backup failures are no longer
 invisible. The production migration (Increment 5) has been executed on the
 attestation of the operator, with no execution transcript committed here.
-The program has not provisioned or activated any off-host durability target,
-and has not conducted a live disaster-recovery drill in production. Treat
-BK3 (ADR-0001 §12) as open until Increment 6's host-side activation says
-otherwise, and BK2 as open until a production restore drill is performed.**
+The program itself did not provision or activate any off-host durability
+target, and conducted no live disaster-recovery drill.
+
+**Updated 2026-08-12, after program closure.** Both gaps have since been
+partially closed by operator action and a live drill
+(`docs/ops/bk2-offhost-drill-2026-08-12.md`). **BK2 off-host recovery of the
+governance ledger is PROVEN**: a real production ciphertext was recovered onto
+a clean host, cryptographically verified, chain-verified, and passed through
+the project's own governance checker, with the wrong-key negative control
+failing closed. **BK3 is established for the governance ledger only.**
+
+**This does not mean the platform is recoverable.** The other three production
+stores — `btc_trading.db`, `evidence_forward.db`, `forward_evidence.db` — have
+no off-host artifact, so their recovery after host loss is **NOT ESTABLISHED**;
+the same is true of the Parquet corpus and `.env`. Full-service restoration
+(rebuilding the runtime environment and bringing the bot back up) has never
+been attempted. Treat the proven claim as exactly what it is: the single
+irreplaceable asset under BK1 is recoverable, and nothing broader.**

@@ -415,16 +415,30 @@ transfer). **This ADR extends its operational envelope; it does not redesign it.
   quarterly drill on a clean host is mandatory: restore, then verify
   `receipt_ledger.verify_chain()` valid and `report.py --check` clean. A
   backup that has never been restored is an untested assumption.
+  **Status (2026-08-12):** **SATISFIED for the governance ledger.**
+  `docs/ops/bk2-offhost-drill-2026-08-12.md` recovered a real production
+  ciphertext from S3 onto a clean Ubuntu 24.04 host holding no AWS credentials
+  and no prior project state: SHA-256 identical, `verify_chain()`
+  `ok=True, n_receipts=26`, `report.py --check` exit 0, wrong-key control
+  failed closed. **Not satisfied for any other store** — see BK3. Next drill
+  due 2026-11-12.
 - **BK3.** `BACKUP_OFFHOST_CMD` must be configured. Local-only backups do not
   survive VPS loss, which is the scenario backups exist for.
-  **Status (Program P1 Increment 6, 2026-07-26):** repository-side
-  monitoring for the off-host transfer leg is implemented and tested
-  (`scripts/healthcheck.py::check_offhost_freshness()`) — a broken transfer
-  is no longer silent. **BK3 itself remains open**: no off-host target is
-  provisioned, no key exists, `--encrypt` is not in the deployed unit, and
-  no decrypt drill has run against a production artifact. See
+  **Status (2026-08-12): established for the governance ledger only.** An S3
+  target (`btcbot-offhost-backup-a71f9c2e`, ap-southeast-1, versioned, 90-day
+  Object Lock COMPLIANCE) is provisioned and written daily at 02:20 UTC by
+  `btcbot-ledger-backup.service` through a write-only instance profile; the
+  `age` keypair exists with the private identity held off-host, and it has been
+  proven to decrypt a production artifact (BK2 above). Repository-side transfer
+  monitoring (`scripts/healthcheck.py::check_offhost_freshness()`) landed at
+  Program P1 Increment 6. **Still open:** `btc_trading.db`,
+  `evidence_forward.db` and `forward_evidence.db` ship nothing off-host — the
+  02:00 `--all` unit runs without `--encrypt`, so its transfer leg never
+  fires — and neither the Parquet corpus nor `.env` is covered. **Governance-
+  ledger recoverability is proven; other production-store recovery is not
+  established because no off-host artifacts exist.** See
   `docs/governance/p1_assurance_declaration.md` claim 8 and
-  `docs/ops/offhost-backup.md` §8 for the gated activation sequence.
+  `docs/ops/offhost-backup.md` §9.
 - **BK4.** Backup integrity is verified via the existing SHA-256 manifest, not
   assumed from exit code 0.
 - **BK5.** 02:00 UTC scheduling is preserved — clear of the 11:58–12:06 UTC
@@ -708,12 +722,16 @@ an explicit gate from Rohith before implementation begins.**
 
 ## 20. Open Questions
 
-1. Off-host backup target — not yet provisioned. **Blocks BK3**, and BK3 is
-   what makes backups survive the scenario they exist for. **Still open**
-   as of Program P1 Increment 7 (2026-07-26) — target selection and key
-   generation are host-side operator steps; see
-   `docs/ops/offhost-backup.md` §8 and
-   `docs/governance/p1_assurance_declaration.md` claim 8.
+1. Off-host backup target. **Provisioned 2026-08-10; partially resolved.**
+   Target selection and key generation — the host-side operator steps that
+   were open as of Program P1 Increment 7 (2026-07-26) — are done, and BK2
+   has since **proven** off-host recovery of the governance ledger
+   (§12 BK2/BK3, `docs/ops/bk2-offhost-drill-2026-08-12.md`). **What remains
+   open is coverage, not provisioning:** `btc_trading.db`,
+   `evidence_forward.db`, `forward_evidence.db`, the Parquet corpus and
+   `.env` still have no off-host artifact, so full production-store
+   recovery is **not established**. See `docs/ops/offhost-backup.md` §9
+   item 1 and `docs/governance/p1_assurance_declaration.md` claim 8.
 2. Alert routing: single Telegram channel for both heartbeat and Prometheus
    alerts, or a second channel to separate trend from state? Recommend a
    second channel.
