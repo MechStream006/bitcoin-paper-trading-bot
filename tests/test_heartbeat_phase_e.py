@@ -30,10 +30,27 @@ from pathlib import Path
 
 import pytest
 
+from src.alerts.forward_status import expected_run_date
 from src.alerts.heartbeat import HeartbeatService
 from src.alerts.rate_limiter import RateLimiter
 from src.runtime.health import HealthStatus
 from src.state.market_state import MarketState
+
+
+def _fresh_run_date() -> str:
+    """The run_date the heartbeat considers CURRENT at the real clock.
+
+    Derived, never hardcoded. ``forward_status.expected_run_date()`` moves with
+    the calendar (yesterday, or the day before that inside the 02:00 UTC grace
+    window), so a literal fixture date silently goes stale at the next UTC
+    midnight: ``fwd-evid`` flips to STALE, that escalates the roll-up to
+    DEGRADED, and every test asserting a fresh/[OK] heartbeat starts failing on
+    a day nobody changed any code. That is exactly what happened on
+    2026-08-12 to the three tests this helper now feeds.
+
+    Tests that want a STALE fixture must pass ``latest_date`` explicitly.
+    """
+    return expected_run_date()
 
 
 # ---------------------------------------------------------------------------
@@ -86,14 +103,18 @@ _SIG_COUNTS = {
 }
 
 
-def _build_evidence_db(path: Path, sig_counts=None, latest_date="2026-08-10", statuses=None):
+def _build_evidence_db(path: Path, sig_counts=None, latest_date=None, statuses=None):
     """Build a schema-faithful evidence_forward.db (run_log + trade_entries).
 
-    sig_counts: {signal_id: (rows, closed, open)}, defaults to _SIG_COUNTS.
-    statuses:   optional {signal_id: status} override for the latest row of
-                that signal (e.g. to inject a governance-failure 'error' row).
+    sig_counts:  {signal_id: (rows, closed, open)}, defaults to _SIG_COUNTS.
+    latest_date: newest run_date, default = _fresh_run_date() so the fixture is
+                 CURRENT at whatever the real clock is. Pass an explicit date
+                 only when a test deliberately wants a stale corpus.
+    statuses:    optional {signal_id: status} override for the latest row of
+                 that signal (e.g. to inject a governance-failure 'error' row).
     """
     sig_counts = sig_counts if sig_counts is not None else _SIG_COUNTS
+    latest_date = latest_date if latest_date is not None else _fresh_run_date()
     statuses = statuses or {}
     con = sqlite3.connect(str(path))
     con.execute(
@@ -506,4 +527,4 @@ class TestEvidenceBackCompat:
         _build_evidence_db(ev)
         hb = _make_hb(forward_status_path=str(ev))
         text = hb._compose_heartbeat()
-        assert "fwd-evid     : 2026-08-10  ok=5/5  fn_hash=ok  gov=ok" in text
+        assert f"fwd-evid     : {_fresh_run_date()}  ok=5/5  fn_hash=ok  gov=ok" in text
