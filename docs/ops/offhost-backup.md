@@ -323,15 +323,10 @@ the first two, and the third caused the drill to fail at step 0 on a clean host:
 | 2 | The `age` private identity | Decryption. Lost key = permanently unrecoverable (§3.4) | Password manager + paper, never on any host |
 | 3 | **GitHub read access to the private repository** | `offhost_backup.py`, `receipt_ledger.py`, `report.py`, `registry.yaml` and `thresholds.yaml` exist **only** in the private repo. Without this, recovery stalls before it starts | Operator's GitHub token or SSH key |
 
-**Credential 3 is the weak link and should be designed out.** The BK2 drill
-worked around it with a `git bundle` of `main` created on a machine that
-already had the repo — which proves the code can be carried alongside the
-ciphertext, but does not help an operator whose only machine is gone.
-**Recommended (designed, NOT yet implemented):** publish a
-recovery-critical `git bundle` into the same S3 prefix as the ciphertext, so
-recovery needs two credentials instead of three and the verification code is
-recovered by the same path as the data it verifies. Do not treat this as
-existing — it does not.
+**Credential 3 is the weak link and is being designed out — see §6.2.**
+Status as of 2026-08-12: the mechanism is **IMPLEMENTED, NOT YET ACTIVATED,
+and NOT YET RECOVERY-DRILL PROVEN.** Until a drill proves otherwise, plan
+recovery on **three** credentials and keep GitHub access available.
 
 ```bash
 # --- 0. Prerequisites on the recovery machine ---------------------------
@@ -427,6 +422,76 @@ chown btcbot:btcbot .env
 This procedure uses the same key custody rules as §3: the identity that
 decrypts `env.age` is the same one that decrypts ledger/database backups,
 and is never present on the production host.
+
+### 6.2 Recovery-code bundle — removing the GitHub dependency
+
+> **Status: IMPLEMENTED, NOT YET ACTIVATED, NOT YET RECOVERY-DRILL PROVEN.**
+> `scripts/bundle_backup.py` exists and is tested. No systemd timer runs it,
+> `BUNDLE_OFFHOST_CMD` is unset in production, and **no bundle has been
+> uploaded**. Recovery today still needs credential 3 (GitHub). This section
+> describes the mechanism, not an established capability. It does **not**
+> change the BK2/BK3 verdict, and it does **not** make `btc_trading.db`, the
+> evidence databases, the Parquet corpus, `.env`, or full service
+> restoration recoverable — a bundle carries code, never data.
+
+**Mechanism.** `scripts/bundle_backup.py` creates a **full-history**
+`git bundle` of `main`, verifies it locally, encrypts it to the **same** age
+recipient as the ledger, and uploads it to a separate `code/` prefix:
+
+```
+s3://btcbot-offhost-backup-a71f9c2e/code/
+    btcbot-<full-40-char-sha>.bundle.age
+    btcbot-<full-40-char-sha>.bundle.age-manifest.json
+```
+
+**Why encrypted.** Today `s3:GetObject` yields ciphertext and a hashes-only
+manifest — worthless without the identity. A *plaintext* bundle would make one
+credential valuable on its own (full source, `registry.yaml`, `thresholds.yaml`).
+Encrypting to the same recipient keeps the blast radius exactly where it is and
+costs recovery nothing, because recovery already needs that identity.
+
+**No bootstrap paradox.** The bundle is opened with the stock `age` binary
+alone — no code from this repository is required to decrypt the thing that
+contains the code:
+
+```bash
+age --decrypt --identity identity.txt --output btcbot.bundle btcbot-<sha>.bundle.age
+git clone -b main btcbot.bundle btcbot && cd btcbot
+git checkout <git_sha from the ledger .age-manifest.json>
+```
+
+**One bundle serves every retained ledger generation.** The bundle carries full
+history, so any ledger whose recorded `git_sha` is an ancestor of the bundled
+ref can be checked out from the current bundle. Verified empirically, and
+regression-locked by `tests/test_bundle_backup.py`. **Constraint:** this holds
+only while history is append-only — a force-push or rebase on `main` breaks the
+ancestor relationship and requires a fresh bundle.
+
+**Upload on SHA change only, never daily.** The bucket applies
+`DefaultRetention: COMPLIANCE, 90 days` to every PUT, so an object cannot be
+deleted or overwritten for 90 days; daily upload would accumulate 90
+undeletable versions per quarter for nothing. The write-only production role
+cannot query S3 for existence, so "already bundled" is decided from a host-side
+sentinel (`data/code-backups/.last-bundled-sha`), never from S3.
+
+**Verification before upload, never after.** Object Lock makes a PUT
+irreversible for 90 days. `verify_bundle()` therefore runs two stages before
+anything is encrypted: `git bundle verify` + `list-heads` for structure and SHA
+binding, then a **real `git clone`**, because `git bundle verify` validates the
+header and refs but does **not** walk the packfile — a bundle corrupted
+mid-stream passes verify and fails only at clone time.
+
+**Monitoring.** `healthcheck.py::check_code_bundle()` reads the local
+`.bundle-status.json` sidecar and the deployed HEAD. It makes **no S3 call of
+any kind**. INFO until activated; WARNING if configured-but-never-uploaded or
+if HEAD has moved past the last bundled SHA; CRITICAL on artifact hash
+mismatch; OK when in sync.
+
+**Remaining activation steps (host-side, not performed):** set
+`BUNDLE_OFFHOST_CMD` in `.env`, add and enable a `btcbot-code-bundle` timer,
+run one upload, then perform a second clean-host drill **with GitHub
+deliberately unavailable**. Only that drill converts this from implemented to
+proven.
 
 ---
 

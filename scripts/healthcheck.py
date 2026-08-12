@@ -16,6 +16,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -64,6 +65,9 @@ BACKUP_WARN_HOURS     = 48
 OFFHOST_WARN_HOURS    = 48
 OFFHOST_CRIT_HOURS    = 24 * 7
 OFFHOST_STATUS_FILENAME = ".offhost-status.json"
+
+# Recovery-code bundle (BK2 Phase 1, scripts/bundle_backup.py).
+BUNDLE_STATUS_FILENAME = ".bundle-status.json"
 
 # Forward-cycle dead-man (D3a): days behind expected run_date -> severity.
 FORWARD_WARN_DAYS     = 1   # 1 day stale  -> WARNING
@@ -364,6 +368,125 @@ def _manifest_row_total(backup_file: Path) -> int | None:
     if not isinstance(counts, dict):
         return None
     return sum(v for v in counts.values() if isinstance(v, int))
+
+
+def check_code_bundle(
+    bundle_dir: Path, repo_root: Path = ROOT, check_name: str = "code_bundle"
+) -> CheckResult:
+    """Recovery-code bundle status (BK2 Phase 1, `scripts/bundle_backup.py`).
+
+    Read-only and entirely local: this reads the `.bundle-status.json` sidecar
+    and the deployed git HEAD. It makes **no S3 call of any kind** — the
+    production instance profile is write-only and could not read the bucket
+    anyway, and a monitoring check must never be the thing that discovers it
+    has no permission.
+
+    Severity model, matching the four states the design calls out:
+
+      INFO      not configured / never run  -- silent until opted in, exactly
+                like check_offhost_freshness, so this cannot generate noise on
+                a host that has not activated it
+      WARNING   configured but never succeeded, OR deployed HEAD has moved past
+                the last bundled SHA. Recovery is *degraded* (falls back to the
+                GitHub credential), not *lost* -- the ledger is unaffected, so
+                this is deliberately not CRITICAL
+      CRITICAL  recorded artifact hash does not match the artifact on disk --
+                an active integrity failure, not a staleness problem
+      OK        bundled SHA == deployed HEAD, hash verified
+    """
+    status_file = bundle_dir / BUNDLE_STATUS_FILENAME
+    if not status_file.exists():
+        return CheckResult(
+            check_name, INFO,
+            "recovery-code bundle not configured or not yet run", {},
+        )
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return CheckResult(
+            check_name, WARNING, f"bundle status file unreadable: {exc}", {}
+        )
+
+    if not payload.get("configured"):
+        return CheckResult(
+            check_name, INFO, "recovery-code bundle not configured", {}
+        )
+
+    last_success_sha = payload.get("last_success_sha")
+    detail = {
+        "status": payload.get("status"),
+        "last_success_at": payload.get("last_success_at"),
+        "last_success_sha": last_success_sha,
+        "head_sha": payload.get("head_sha"),
+    }
+
+    if not last_success_sha:
+        return CheckResult(
+            check_name, WARNING,
+            "recovery-code bundle configured but has never been uploaded", detail,
+        )
+
+    # Integrity of the local artifact, when it is still on disk. A recorded
+    # hash that no longer matches is an integrity failure, not staleness.
+    artifact = payload.get("artifact")
+    recorded = payload.get("artifact_sha256")
+    if artifact and recorded:
+        artifact_path = bundle_dir / artifact
+        if artifact_path.exists():
+            try:
+                actual = _sha256_file(artifact_path)
+            except Exception as exc:
+                return CheckResult(
+                    check_name, WARNING,
+                    f"bundle artifact unreadable: {exc}", detail,
+                )
+            if actual != recorded:
+                detail["recorded_sha256"] = recorded
+                detail["actual_sha256"] = actual
+                return CheckResult(
+                    check_name, CRITICAL,
+                    f"bundle artifact hash mismatch for {artifact} "
+                    "— recorded manifest does not match the file on disk",
+                    detail,
+                )
+
+    current_head = _git_head(repo_root)
+    detail["deployed_head"] = current_head
+    if current_head and current_head != last_success_sha:
+        return CheckResult(
+            check_name, WARNING,
+            f"recovery-code bundle stale: deployed HEAD {current_head[:7]} "
+            f"!= last bundled {last_success_sha[:7]}",
+            detail,
+        )
+
+    return CheckResult(
+        check_name, OK,
+        f"recovery-code bundle in sync at {last_success_sha[:7]}", detail,
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git_head(repo_root: Path) -> Optional[str]:
+    """Deployed HEAD, or None when git is unavailable. Never raises."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(repo_root),
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return None
+        sha = r.stdout.strip()
+        return sha if len(sha) == 40 else None
+    except Exception:
+        return None
 
 
 def check_offhost_freshness(
@@ -770,6 +893,12 @@ def main() -> int:
         "--no-h6-check", action="store_true",
         help="Skip the H6 daily-corpus dead-man check (opt-out; enabled by default)",
     )
+    parser.add_argument(
+        "--code-bundle-dir", type=Path,
+        default=ROOT / "data" / "code-backups",
+        help="Directory holding the recovery-code bundle status sidecar "
+             "(scripts/bundle_backup.py). Reported INFO until activated.",
+    )
     parser.add_argument("--service-name", default="btcbot")
     args = parser.parse_args()
 
@@ -802,6 +931,7 @@ def main() -> int:
         check_offhost_freshness(
             args.ledger_backup_dir, check_name="ledger_offhost_backup"
         ),
+        check_code_bundle(args.code_bundle_dir),
     ]
     if not args.no_forward_check:
         results.append(check_forward_cycle(args.forward_db_path))
