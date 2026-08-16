@@ -516,9 +516,35 @@ mid-stream passes verify and fails only at clone time.
 
 **Monitoring.** `healthcheck.py::check_code_bundle()` reads the local
 `.bundle-status.json` sidecar and the deployed HEAD. It makes **no S3 call of
-any kind**. INFO until activated; WARNING if configured-but-never-uploaded or
-if HEAD has moved past the last bundled SHA; CRITICAL on artifact hash
-mismatch; OK when in sync.
+any kind**. State machine, in evaluation order:
+
+| Condition | Severity |
+|---|---|
+| no sidecar / `configured: false` | **INFO** — silent until opted in |
+| sidecar unreadable | WARNING |
+| configured but never successfully uploaded | WARNING |
+| recorded artifact hash ≠ file on disk | **CRITICAL** — integrity, outranks all below |
+| last run `status: "failed"` | **WARNING** — immediately, regardless of age or SHA |
+| HEAD ≠ last bundled SHA, **< 9 days** since last success | **INFO** — "pending", the weekly timer has not had its turn |
+| HEAD ≠ last bundled SHA, **≥ 9 days** (`CODE_BUNDLE_STALE_WARN_DAYS`) | WARNING — the timer failed to catch up |
+| `last_success_at` unparsable on a divergence | WARNING — cannot age it, so do not downgrade |
+| HEAD == last bundled SHA | OK |
+
+**Why divergence is INFO and not WARNING.** Every ordinary deployment advances
+HEAD ahead of the last bundle. Until 2026-08-16 this check went straight to
+WARNING, and because `healthcheck.py` exits 1 on WARNING while
+`btcbot-healthcheck.service` is a `Type=oneshot` unit with no
+`SuccessExitStatus=`, the unit *failed* and alerted to Telegram every 10
+minutes — for a condition the weekly timer resolves by itself. Observed live
+after a docs-only fast-forward on 2026-08-12. The 9-day boundary is one full
+weekly period (`Sun 03:00 UTC`) plus two days' grace, so WARNING now means the
+timer genuinely did not catch up.
+
+**This does not weaken failure detection.** A run that actually fails is caught
+by the explicit `status: "failed"` branch, which fires WARNING immediately and
+is evaluated *before* the grace window — previously that case was only caught
+indirectly via divergence, and would have been masked. The CRITICAL integrity
+check is evaluated before both.
 
 **Activation history.** `BUNDLE_OFFHOST_CMD` is set in
 `btcbot-code-bundle.service` (not `.env` — it is not a secret, and activating
@@ -528,10 +554,13 @@ credentials). The IAM policy `btcbot-offhost-backup-policy` was extended to
 PutObject-only, and v1 is retained for rollback. One bundle was uploaded
 2026-08-12 09:19 UTC, then drill-proven the same day.
 
-**Still not done:** the weekly timer is **not enabled**. Until it is, a new
-bundle is produced only by running the unit by hand, and
-`healthcheck.py::check_code_bundle()` will report WARNING once HEAD moves past
-the last bundled SHA.
+**Timer enabled 2026-08-12 and proven 2026-08-16.** `btcbot-code-bundle.timer`
+is `enabled`/`active` on `Sun *-*-* 03:00:00 UTC`. Its first natural fire
+(`LastTriggerUSec = Sun 2026-08-16 03:04:55 UTC`) invoked the service, which
+correctly took the **skip-on-unchanged** path — HEAD equalled the sentinel, so
+no bundle was built and no S3 object was created, exit 0. Both branches of the
+control flow are therefore exercised in production: upload (2026-08-12) and
+skip (2026-08-16).
 
 ---
 

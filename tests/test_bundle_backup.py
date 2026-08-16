@@ -24,9 +24,19 @@ import json
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
+
+def _iso_days_ago(days: float) -> str:
+    """An ISO-8601 UTC timestamp `days` in the past.
+
+    Derived from the real clock rather than hardcoded, so these fixtures cannot
+    rot the way the Phase E heartbeat ones did on 2026-08-12.
+    """
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -451,15 +461,92 @@ class TestHealthcheckCodeBundle:
         assert r.severity == hc.WARNING
         assert "never been uploaded" in r.message
 
-    def test_head_ahead_of_bundle_is_warning(self, tmp_path: Path):
+    def test_head_ahead_of_bundle_beyond_boundary_is_warning(self, tmp_path: Path):
+        """Divergence that OUTLIVED the boundary: the weekly timer has had its
+        turn and did not catch up, so this is a real staleness condition."""
         repo = tmp_path / "repo"
         shas = _make_repo(repo, commits=2)
+        stale = _iso_days_ago(hc.CODE_BUNDLE_STALE_WARN_DAYS + 1)
         (tmp_path / hc.BUNDLE_STATUS_FILENAME).write_text(
-            json.dumps({"configured": True, "last_success_sha": shas[0]}),
+            json.dumps({"configured": True, "last_success_sha": shas[0],
+                        "last_success_at": stale}),
             encoding="utf-8")
         r = hc.check_code_bundle(tmp_path, repo)
         assert r.severity == hc.WARNING
         assert "stale" in r.message
+
+    def test_head_ahead_of_bundle_within_boundary_is_info(self, tmp_path: Path):
+        """Regression lock for the 2026-08-12 alert loop: an ordinary
+        deployment advances HEAD ahead of the last bundle, and that must NOT
+        page every 10 minutes while the weekly timer is still pending."""
+        repo = tmp_path / "repo"
+        shas = _make_repo(repo, commits=2)
+        fresh = _iso_days_ago(0.01)
+        (tmp_path / hc.BUNDLE_STATUS_FILENAME).write_text(
+            json.dumps({"configured": True, "last_success_sha": shas[0],
+                        "last_success_at": fresh}),
+            encoding="utf-8")
+        r = hc.check_code_bundle(tmp_path, repo)
+        assert r.severity == hc.INFO
+        assert "pending" in r.message
+
+    def test_divergence_just_under_boundary_is_still_info(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        shas = _make_repo(repo, commits=2)
+        (tmp_path / hc.BUNDLE_STATUS_FILENAME).write_text(
+            json.dumps({"configured": True, "last_success_sha": shas[0],
+                        "last_success_at": _iso_days_ago(
+                            hc.CODE_BUNDLE_STALE_WARN_DAYS - 0.5)}),
+            encoding="utf-8")
+        assert hc.check_code_bundle(tmp_path, repo).severity == hc.INFO
+
+    def test_failed_status_is_warning_even_when_fresh(self, tmp_path: Path):
+        """A real failure must never be masked by the grace window."""
+        repo = tmp_path / "repo"
+        shas = _make_repo(repo, commits=2)
+        (tmp_path / hc.BUNDLE_STATUS_FILENAME).write_text(
+            json.dumps({"configured": True, "last_success_sha": shas[0],
+                        "last_success_at": _iso_days_ago(0.01),
+                        "status": "failed", "exit_code": 1}),
+            encoding="utf-8")
+        r = hc.check_code_bundle(tmp_path, repo)
+        assert r.severity == hc.WARNING
+        assert "FAILED" in r.message
+
+    def test_failed_status_is_warning_even_when_sha_matches(self, tmp_path: Path):
+        """The latent gap the old code had: a failed run whose last success
+        happens to be at the current HEAD returned OK."""
+        repo = tmp_path / "repo"
+        shas = _make_repo(repo)
+        (tmp_path / hc.BUNDLE_STATUS_FILENAME).write_text(
+            json.dumps({"configured": True, "last_success_sha": shas[-1],
+                        "last_success_at": _iso_days_ago(0.01),
+                        "status": "failed", "exit_code": 1}),
+            encoding="utf-8")
+        assert hc.check_code_bundle(tmp_path, repo).severity == hc.WARNING
+
+    def test_unparsable_last_success_at_on_divergence_is_warning(self, tmp_path: Path):
+        """Cannot age the divergence -> must not silently downgrade to INFO."""
+        repo = tmp_path / "repo"
+        shas = _make_repo(repo, commits=2)
+        (tmp_path / hc.BUNDLE_STATUS_FILENAME).write_text(
+            json.dumps({"configured": True, "last_success_sha": shas[0],
+                        "last_success_at": "not-a-timestamp"}),
+            encoding="utf-8")
+        r = hc.check_code_bundle(tmp_path, repo)
+        assert r.severity == hc.WARNING
+        assert "unparsable" in r.message
+
+    def test_skipped_unchanged_in_sync_is_ok(self, tmp_path: Path):
+        """The steady state after a timer skip run — must stay OK."""
+        repo = tmp_path / "repo"
+        shas = _make_repo(repo)
+        (tmp_path / hc.BUNDLE_STATUS_FILENAME).write_text(
+            json.dumps({"configured": True, "last_success_sha": shas[-1],
+                        "last_success_at": _iso_days_ago(4),
+                        "status": "skipped_unchanged"}),
+            encoding="utf-8")
+        assert hc.check_code_bundle(tmp_path, repo).severity == hc.OK
 
     def test_in_sync_is_ok(self, tmp_path: Path):
         repo = tmp_path / "repo"

@@ -69,6 +69,13 @@ OFFHOST_STATUS_FILENAME = ".offhost-status.json"
 # Recovery-code bundle (BK2 Phase 1, scripts/bundle_backup.py).
 BUNDLE_STATUS_FILENAME = ".bundle-status.json"
 
+# How long a HEAD/bundle SHA divergence may persist before it stops being
+# "the weekly timer has not had its turn yet" and becomes "the timer failed to
+# catch up". btcbot-code-bundle.timer runs Sun 03:00 UTC, so a deploy landing
+# just after a Sunday run legitimately waits up to 7 days; 9 = one full period
+# plus two days' grace. Below this, divergence is INFO; at or above it, WARNING.
+CODE_BUNDLE_STALE_WARN_DAYS = 9
+
 # Forward-cycle dead-man (D3a): days behind expected run_date -> severity.
 FORWARD_WARN_DAYS     = 1   # 1 day stale  -> WARNING
 FORWARD_CRIT_DAYS     = 2   # 2 days stale -> CRITICAL
@@ -381,18 +388,40 @@ def check_code_bundle(
     anyway, and a monitoring check must never be the thing that discovers it
     has no permission.
 
-    Severity model, matching the four states the design calls out:
+    Severity model:
 
-      INFO      not configured / never run  -- silent until opted in, exactly
+      INFO      not configured / never run -- silent until opted in, exactly
                 like check_offhost_freshness, so this cannot generate noise on
-                a host that has not activated it
-      WARNING   configured but never succeeded, OR deployed HEAD has moved past
-                the last bundled SHA. Recovery is *degraded* (falls back to the
-                GitHub credential), not *lost* -- the ledger is unaffected, so
-                this is deliberately not CRITICAL
+                a host that has not activated it.
+                ALSO: deployed HEAD has moved past the last bundled SHA but
+                the divergence is younger than CODE_BUNDLE_STALE_WARN_DAYS --
+                the weekly timer simply has not had its turn yet.
+      WARNING   configured but never succeeded; OR the last bundle attempt
+                FAILED; OR the divergence has outlived the boundary, meaning
+                the timer did not catch up. Recovery is *degraded* (falls back
+                to the GitHub credential), not *lost* -- the ledger is
+                unaffected, so this is deliberately not CRITICAL
       CRITICAL  recorded artifact hash does not match the artifact on disk --
                 an active integrity failure, not a staleness problem
       OK        bundled SHA == deployed HEAD, hash verified
+
+    Why divergence is not WARNING on sight
+    --------------------------------------
+    It used to be, and that was wrong. Any ordinary deployment advances HEAD
+    ahead of the last bundle, so a docs-only fast-forward on 2026-08-12 put
+    this check into WARNING immediately. `healthcheck.py` returns exit 1 on
+    WARNING and `btcbot-healthcheck.service` is a `Type=oneshot` unit with no
+    `SuccessExitStatus=`, so the unit *failed* every 10 minutes and alerted to
+    Telegram each time -- for a condition the weekly timer was going to fix on
+    its own. Alert fatigue on a dead-man is a real cost, so divergence is now
+    INFO until the timer has provably failed to catch up.
+
+    **This does not weaken failure detection.** A genuinely failed bundle run
+    is caught by the explicit `status == "failed"` branch below, which fires
+    WARNING immediately regardless of age or SHA -- previously that case was
+    only caught *indirectly*, via the divergence branch, and would have been
+    masked by the grace window. The CRITICAL integrity check is evaluated
+    before it, so an integrity failure still outranks both.
     """
     status_file = bundle_dir / BUNDLE_STATUS_FILENAME
     if not status_file.exists():
@@ -450,13 +479,50 @@ def check_code_bundle(
                     detail,
                 )
 
+    # An actually-failed run alerts immediately -- evaluated AFTER the CRITICAL
+    # integrity check above so integrity still outranks it, and BEFORE the
+    # divergence grace window below so the grace can never mask a real failure.
+    if payload.get("status") == "failed":
+        return CheckResult(
+            check_name, WARNING,
+            "recovery-code bundle: last run FAILED "
+            f"(exit {payload.get('exit_code')}); last success "
+            f"{last_success_sha[:7]} at {payload.get('last_success_at')}",
+            detail,
+        )
+
     current_head = _git_head(repo_root)
     detail["deployed_head"] = current_head
     if current_head and current_head != last_success_sha:
+        last_success_at = payload.get("last_success_at")
+        try:
+            age_days = (
+                datetime.now(timezone.utc) - datetime.fromisoformat(last_success_at)
+            ).total_seconds() / 86400
+        except Exception:
+            return CheckResult(
+                check_name, WARNING,
+                "recovery-code bundle: last_success_at unparsable, cannot "
+                f"age a divergence from {current_head[:7]}",
+                detail,
+            )
+        detail["age_days"] = round(age_days, 1)
+
+        if age_days >= CODE_BUNDLE_STALE_WARN_DAYS:
+            return CheckResult(
+                check_name, WARNING,
+                f"recovery-code bundle stale: deployed HEAD {current_head[:7]} "
+                f"!= last bundled {last_success_sha[:7]}, "
+                f"{age_days:.0f}d since last success "
+                f"(>= {CODE_BUNDLE_STALE_WARN_DAYS}d)",
+                detail,
+            )
         return CheckResult(
-            check_name, WARNING,
-            f"recovery-code bundle stale: deployed HEAD {current_head[:7]} "
-            f"!= last bundled {last_success_sha[:7]}",
+            check_name, INFO,
+            f"recovery-code bundle pending: deployed HEAD {current_head[:7]} "
+            f"!= last bundled {last_success_sha[:7]}, "
+            f"{age_days:.1f}d since last success — next scheduled run will "
+            "catch up",
             detail,
         )
 
