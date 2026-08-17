@@ -276,11 +276,35 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
         conn = sqlite3.connect(str(db_path), check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"VACUUM INTO '{backup_file}'")
-        counts   = _row_counts(conn)
-        ts_range = _ts_range(conn)
         conn.close()
+
+        # Manifest metadata is read from the SNAPSHOT, never from the live
+        # database. VACUUM INTO freezes the artifact at time T; reading counts
+        # from the live connection afterwards describes time T+duration, and on
+        # a large continuously-written database that gap spans real writes. The
+        # 2026-08-17 btc_trading.db backup recorded 66 option_quotes and 1
+        # collection_metrics row more than the artifact actually contained --
+        # exactly one 1-minute collection cycle at a 66-symbol universe, with
+        # ts_range.max 60s ahead of the snapshot's true max. The artifact was
+        # sound; the manifest describing it was not.
+        #
+        # mode=ro is load-bearing, not stylistic: _sha256(backup_file) runs
+        # immediately after this block, so the artifact's bytes must be
+        # provably untouched by the inspection. A read-write open could update
+        # the header or create -wal/-shm siblings and invalidate the hash the
+        # manifest is about to record.
+        snap_uri = backup_file.resolve().as_uri() + "?mode=ro"
+        snap = sqlite3.connect(snap_uri, uri=True)
+        try:
+            counts   = _row_counts(snap)
+            ts_range = _ts_range(snap)
+        finally:
+            snap.close()
     except Exception as exc:
-        print(f"[error] VACUUM INTO failed: {exc}", file=sys.stderr)
+        # Covers both stages: creating the snapshot and opening it to describe
+        # it. Fail-closed -- an artifact that cannot be opened is never hashed,
+        # encrypted, or shipped off-host.
+        print(f"[error] snapshot creation or inspection failed: {exc}", file=sys.stderr)
         return 1
 
     sha       = _sha256(backup_file)

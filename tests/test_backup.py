@@ -901,3 +901,168 @@ def test_feature_store_only_exit_code_is_its_own(tmp_path, monkeypatch):
     monkeypatch.setattr(backup, "run_backup", failing)
     monkeypatch.setattr(sys, "argv", ["backup.py", "--feature-store"])
     assert backup.main() == 1
+
+
+# ---------------------------------------------------------------------------
+# Manifest snapshot-consistency (2026-08-17 defect)
+#
+# VACUUM INTO freezes the artifact at time T. Reading row counts from the LIVE
+# connection afterwards describes time T+duration, and on a large continuously
+# written database that gap spans real writes: the production btc_trading.db
+# backup recorded 66 option_quotes + 1 collection_metrics row MORE than the
+# artifact contained -- exactly one 1-minute cycle at a 66-symbol universe.
+# The manifest must describe the artifact, exactly, with no tolerance.
+# ---------------------------------------------------------------------------
+
+def _sha256_of(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def test_manifest_describes_snapshot_not_rows_added_after_vacuum(tmp_path, monkeypatch):
+    """Deterministic reproduction of the race, with no large fixture.
+
+    A writer commits to the SOURCE database at the exact moment the metadata
+    read begins -- i.e. after VACUUM INTO has already frozen the artifact.
+    Under the old code (counts read from the live connection) the manifest
+    reported 15; the artifact held 10. This asserts it reports 10.
+    """
+    src = _make_db(tmp_path / "source.db", {"option_quotes": 10})
+    bdir = tmp_path / "backups"
+
+    real_counts = backup._row_counts
+    state = {"injected": False}
+
+    def _inject_then_count(conn):
+        if not state["injected"]:
+            state["injected"] = True          # simulate one collection cycle
+            w = sqlite3.connect(str(src))
+            for _ in range(5):
+                w.execute('INSERT INTO "option_quotes" VALUES (NULL)')
+            w.commit()
+            w.close()
+        return real_counts(conn)
+
+    monkeypatch.setattr(backup, "_row_counts", _inject_then_count)
+    assert backup.run_backup(src, bdir, dry_run=False, db_label="test") == 0
+    assert state["injected"], "writer never ran — test would be vacuous"
+
+    bfile = _latest_backup(bdir, "test")
+    manifest = json.loads((bfile.parent / (bfile.stem + ".manifest.json")).read_text())
+
+    # The live DB now holds 15; the artifact holds 10. The manifest must say 10.
+    live = sqlite3.connect(str(src))
+    assert live.execute("SELECT COUNT(*) FROM option_quotes").fetchone()[0] == 15
+    live.close()
+
+    snap = sqlite3.connect(str(bfile))
+    assert snap.execute("SELECT COUNT(*) FROM option_quotes").fetchone()[0] == 10
+    snap.close()
+
+    assert manifest["row_counts"]["option_quotes"] == 10
+
+
+def test_manifest_row_counts_match_the_artifact_exactly(tmp_path):
+    """Every table in the manifest equals the artifact's own count."""
+    src = _make_db(tmp_path / "source.db",
+                   {"option_quotes": 7, "collection_metrics": 3, "instruments": 2})
+    bdir = tmp_path / "backups"
+    assert backup.run_backup(src, bdir, dry_run=False, db_label="test") == 0
+
+    bfile = _latest_backup(bdir, "test")
+    manifest = json.loads((bfile.parent / (bfile.stem + ".manifest.json")).read_text())
+
+    snap = sqlite3.connect(str(bfile))
+    try:
+        for tbl, expected in manifest["row_counts"].items():
+            actual = snap.execute(f'SELECT COUNT(*) FROM "{tbl}"').fetchone()[0]
+            assert actual == expected, f"{tbl}: manifest={expected} artifact={actual}"
+    finally:
+        snap.close()
+
+
+def test_manifest_ts_range_matches_the_artifact(tmp_path, monkeypatch):
+    """ts_range describes the snapshot, even when the live DB gains later rows."""
+    src = tmp_path / "source.db"
+    conn = sqlite3.connect(str(src))
+    conn.execute("CREATE TABLE option_quotes (id INTEGER PRIMARY KEY, ts TEXT)")
+    for t in ("2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"):
+        conn.execute("INSERT INTO option_quotes (ts) VALUES (?)", (t,))
+    conn.commit()
+    conn.close()
+
+    bdir = tmp_path / "backups"
+    real_ts = backup._ts_range
+    state = {"injected": False}
+
+    def _inject_then_ts(c):
+        if not state["injected"]:
+            state["injected"] = True
+            w = sqlite3.connect(str(src))
+            w.execute("INSERT INTO option_quotes (ts) VALUES (?)",
+                      ("2099-12-31T23:59:59+00:00",))
+            w.commit()
+            w.close()
+        return real_ts(c)
+
+    monkeypatch.setattr(backup, "_ts_range", _inject_then_ts)
+    assert backup.run_backup(src, bdir, dry_run=False, db_label="test") == 0
+
+    bfile = _latest_backup(bdir, "test")
+    manifest = json.loads((bfile.parent / (bfile.stem + ".manifest.json")).read_text())
+
+    snap = sqlite3.connect(str(bfile))
+    lo, hi = snap.execute("SELECT min(ts), max(ts) FROM option_quotes").fetchone()
+    snap.close()
+
+    assert manifest["ts_range"] == {"min": lo, "max": hi}
+    assert manifest["ts_range"]["max"] == "2026-01-02T00:00:00+00:00"
+    assert "2099" not in str(manifest["ts_range"]), "live-DB row leaked into manifest"
+
+
+def test_metadata_inspection_leaves_the_artifact_byte_identical(tmp_path):
+    """mode=ro is load-bearing: _sha256 runs after the inspection, so the read
+    must not touch the header or create -wal/-shm siblings."""
+    src = _make_db(tmp_path / "source.db", {"option_quotes": 4})
+    bdir = tmp_path / "backups"
+    assert backup.run_backup(src, bdir, dry_run=False, db_label="test") == 0
+
+    bfile = _latest_backup(bdir, "test")
+    manifest = json.loads((bfile.parent / (bfile.stem + ".manifest.json")).read_text())
+
+    assert _sha256_of(bfile) == manifest["sha256"]
+    assert manifest["file_size_bytes"] == bfile.stat().st_size
+    assert not (bfile.parent / (bfile.name + "-wal")).exists()
+    assert not (bfile.parent / (bfile.name + "-shm")).exists()
+
+
+def test_snapshot_open_failure_is_fail_closed(tmp_path, monkeypatch, capsys):
+    """If the artifact cannot be opened for inspection, abort before hashing,
+    encryption or upload -- never ship something we could not even read."""
+    src = _make_db(tmp_path / "source.db", {"option_quotes": 3})
+    bdir = tmp_path / "backups"
+
+    real_connect = sqlite3.connect
+
+    def _fail_on_readonly_open(target, *a, **kw):
+        if isinstance(target, str) and "mode=ro" in target:
+            raise sqlite3.OperationalError("simulated: unable to open snapshot")
+        return real_connect(target, *a, **kw)
+
+    monkeypatch.setattr(sqlite3, "connect", _fail_on_readonly_open)
+    monkeypatch.setattr(backup, "_load_env_var",
+                        lambda k: "age1xxx" if k == "BACKUP_AGE_RECIPIENT"
+                        else "echo SHIPPED {file}")
+
+    rc = backup.run_backup(src, bdir, dry_run=False, db_label="test", encrypt=True)
+    out = capsys.readouterr()
+
+    assert rc == 1
+    assert "snapshot creation or inspection failed" in out.err
+    assert "SHIPPED" not in out.out                 # upload never ran
+    assert list(bdir.glob("*.age")) == []           # nothing encrypted
+    assert list(bdir.glob("*.manifest.json")) == [] # no manifest written
