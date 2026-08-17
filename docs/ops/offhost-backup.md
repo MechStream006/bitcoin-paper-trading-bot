@@ -562,6 +562,55 @@ no bundle was built and no S3 object was created, exit 0. Both branches of the
 control flow are therefore exercised in production: upload (2026-08-12) and
 skip (2026-08-16).
 
+### 6.3 Trading-DB off-host backup (`btc_trading.db`)
+
+> **Status as of 2026-08-17: IMPLEMENTED and UPLOAD-PROVEN. Recurring timer
+> NOT yet enabled.** Scope is `btc_trading.db` only — this does **not**
+> establish BK3 for the evidence DBs, the Parquet corpus, `.env`, or full
+> service recovery.
+
+**Why this database specifically.** Delta serves no historical option-chain
+API, so the ~1.4 GiB of 1-minute option quotes in `btc_trading.db` **cannot be
+re-collected** after host loss. Unlike the Parquet corpus (re-ingestable from
+public Binance/Deribit endpoints), losing it is permanent. Until 2026-08-17 it
+was protected only by local backups on the same EBS volume.
+
+**Mechanism — no change to `backup.py` was required or made.**
+`btcbot-trading-backup.service` runs `scripts/backup.py --encrypt`. With no
+dataset flag, `backup.py` operates on `data/btc_trading.db` by default
+(`db_label="btc_trading"`), so `--encrypt` alone is the whole invocation. It
+reuses the identical, already-proven path as the ledger: `VACUUM INTO`
+snapshot → SHA-256 manifest → `age` encryption → `aws s3 cp` to `prod/` →
+Object Lock COMPLIANCE 90 days.
+
+**Consistency under load.** The snapshot uses SQLite `VACUUM INTO`
+(`backup.py:278`), which is transactionally consistent against a live WAL
+database with an active writer. `btcbot.service` is never stopped; collection
+continues throughout. A plain `cp` of a WAL database would **not** be safe and
+is not used anywhere in this path.
+
+**Scheduling.** 02:40 UTC, after the other two backup units so the three never
+overlap:
+
+| Time | Unit | Work |
+|---|---|---|
+| 02:00 | `btcbot-backup` `--all` | ~70 s, local plaintext only |
+| 02:20 | `btcbot-ledger-backup` `--ledger --encrypt` | ~2 s, 176 KB |
+| **02:40** | **`btcbot-trading-backup` `--encrypt`** | **~7–9 min, ~1.4 GiB** |
+
+**Disk consequence, accepted deliberately.** Like the ledger unit, this
+produces a *second* daily plaintext generation (the 02:00 `--all` run already
+makes one), plus a ciphertext. At 7-day daily retention that is roughly
+14 plaintext + 7 ciphertext ≈ 29 GB in `data/backups`. The EBS volume was
+expanded 30 → 60 GB on 2026-08-17 specifically to absorb this; post-change
+free space is ~36 GB. **No retention change and no post-upload cleanup were
+made** — the local plaintext remains the fast on-host restore path.
+
+**S3 cost, irreversible by design.** ~1.4 GiB/day into a COMPLIANCE-locked
+bucket reaches a steady state of roughly **126 GB permanently undeletable**
+(90-day lock), about **$2.90/month**. Object Lock cannot be shortened
+retroactively; this was accepted before the first upload, not after.
+
 ---
 
 ## 7. Operational impact
@@ -619,12 +668,13 @@ Enabling is a deliberate host-side sequence, **in this order**:
    bucket (`btcbot-offhost-backup-a71f9c2e`, ap-southeast-1) is provisioned
    with versioning and 90-day Object Lock COMPLIANCE, written daily at 02:20
    UTC by `btcbot-ledger-backup.service` via a write-only instance profile
-   (§3.3). **Scope: the governance ledger only.** `btc_trading.db`,
-   `evidence_forward.db` and `forward_evidence.db` are backed up locally but
-   ship nothing off-host — the 02:00 `--all` unit runs without `--encrypt`,
-   and `backup.py` requires both an off-host command *and* `--encrypt` before
-   it will transfer anything. Extending coverage to the two evidence DBs
-   (both under 150 KB) remains open.
+   (§3.3). **Scope: the governance ledger and the trading DB.**
+   `btcbot-trading-backup.service` (02:40 UTC, `backup.py --encrypt`) ships
+   `btc_trading.db` — see §6.3. **`evidence_forward.db` and
+   `forward_evidence.db` still ship nothing off-host**: the 02:00 `--all`
+   unit runs without `--encrypt`, and `backup.py` requires both an off-host
+   command *and* `--encrypt` before it will transfer anything. Extending
+   coverage to those two evidence DBs (both under 150 KB) remains open.
 2. **`.env` disaster recovery** — ADR §20.3. **Resolved (Program P1
    Increment 7, 2026-07-26)**: documented at §6.1 above. Deliberately
    remains a manual, low-frequency procedure — not folded into

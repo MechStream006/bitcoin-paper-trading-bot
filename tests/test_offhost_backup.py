@@ -276,6 +276,29 @@ class TestManifest:
 # ---------------------------------------------------------------------------
 
 class TestBackupIntegration:
+    def test_bare_encrypt_routes_to_the_trading_db_with_encrypt_on(self, tmp_path, monkeypatch):
+        """`backup.py --encrypt` with no dataset flag is the exact invocation of
+        btcbot-trading-backup.service (BK3, trading DB).
+
+        Every other encrypt test drives run_backup() directly with
+        db_label="ledger"; this covers the one link they do not -- that main()
+        routes a bare --encrypt to the DEFAULT btc_trading path with
+        encrypt=True, and does not silently drop the flag or pick up an
+        unintended dataset.
+        """
+        seen = {}
+
+        def _capture(db_path, backup_dir, dry_run, db_label="btc_trading", encrypt=False):
+            seen[db_label] = {"encrypt": encrypt, "db_path": db_path}
+            return 0
+
+        monkeypatch.setattr(backup, "run_backup", _capture)
+        monkeypatch.setattr(sys, "argv", ["backup.py", "--encrypt"])
+        assert backup.main() == 0
+        assert list(seen) == ["btc_trading"], f"unexpected datasets: {list(seen)}"
+        assert seen["btc_trading"]["encrypt"] is True
+        assert seen["btc_trading"]["db_path"].name == "btc_trading.db"
+
     def test_encrypt_defaults_off_so_existing_behaviour_is_unchanged(self, tmp_path):
         """Regression: --encrypt must be opt-in. A deploy of this code must not
         change what the existing btcbot-backup.service does."""

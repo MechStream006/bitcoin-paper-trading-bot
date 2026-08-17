@@ -1,0 +1,42 @@
+# BTC Bot — encrypted off-host backup of data/btc_trading.db (BK3, trading DB).
+#
+# Mirrors btcbot-ledger-backup.service exactly, for the one production store
+# that is genuinely irreplaceable in a different way from the ledger: Delta
+# serves no historical option-chain API, so the ~1.4 GiB of 1-minute option
+# quotes in btc_trading.db cannot be re-collected after host loss. Until this
+# unit existed it was protected only by local backups on the same EBS volume.
+#
+# `backup.py` with no dataset flag operates on data/btc_trading.db by default
+# (db_label="btc_trading"), so `--encrypt` alone is the whole invocation --
+# no change to backup.py was required or made.
+#
+# Deliberately a SEPARATE unit from btcbot-backup.service (`--all`, 02:00,
+# unencrypted): that unit's off-host leg is inert by design, and adding
+# `--encrypt` to it would also start shipping every other database, which is
+# outside this change's scope. Separation also means a failure here can never
+# perturb the `--all` local backup or the ledger's encrypted leg.
+#
+# Consistency: the snapshot is taken with SQLite `VACUUM INTO` (backup.py:278),
+# which is transactionally consistent against a live WAL database with an
+# active writer. btcbot.service keeps running throughout; nothing is stopped.
+#
+# Fail-closed: if encryption fails the off-host transfer is skipped entirely
+# rather than falling back to shipping plaintext, and no success state is
+# advanced (backup.py:326-331).
+[Unit]
+Description=BTC Bot encrypted off-host trading-DB backup (one-shot)
+Documentation=file:/opt/btcbot/docs/ops/offhost-backup.md
+After=network.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+ExecStart=/opt/btcbot/venv/bin/python scripts/backup.py --encrypt
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-trading-backup
+
+[Install]
+WantedBy=multi-user.target

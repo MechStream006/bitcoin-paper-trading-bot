@@ -1,0 +1,27 @@
+# 02:40 UTC daily — deliberately after the other two backup units so the three
+# never overlap on disk or CPU:
+#
+#   02:00  btcbot-backup           --all              (~70 s)
+#   02:20  btcbot-ledger-backup    --ledger --encrypt (~2 s, 176 KB)
+#   02:40  btcbot-trading-backup   --encrypt          (~7-9 min, ~1.4 GiB)
+#
+# This unit is by far the heaviest: a 1.4 GiB VACUUM INTO, an age encryption
+# of the same size, then a multipart upload. A 20-minute margin after the
+# ledger leaves ample room without crowding it, and the whole window stays
+# clear of the 11:58-12:06 UTC settlement dead zone (CLAUDE.md §14) and of
+# the 00:05/01:00/01:30 evidence jobs.
+#
+# Persistent=true so a missed day runs on next boot -- consistent with every
+# other backup timer here, and a skipped day is an unprotected day.
+[Unit]
+Description=BTC Bot encrypted off-host trading-DB backup — daily 02:40 UTC
+Documentation=file:/opt/btcbot/docs/ops/offhost-backup.md
+
+[Timer]
+OnCalendar=*-*-* 02:40:00 UTC
+RandomizedDelaySec=300
+Persistent=true
+Unit=btcbot-trading-backup.service
+
+[Install]
+WantedBy=timers.target
