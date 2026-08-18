@@ -126,6 +126,7 @@ class RiskManager:
         halted: bool = False,
         halt_reason: str = "",
         halt_provider: "Callable[[], tuple[bool, str]] | None" = None,
+        counters_provider: "Callable[[], tuple[float, int]] | None" = None,
     ) -> None:
         self.kill_switch_engaged = kill_switch_engaged
         self.platform = platform
@@ -139,6 +140,12 @@ class RiskManager:
         #: the next one, rather than at the next process restart. Must be pure:
         #: validate()'s network-free contract depends on it.
         self.halt_provider = halt_provider
+        #: Live daily counters, normally ``RiskStateStore.counters``. Consulted
+        #: on every validate() so a cap tripped between two calls binds on the
+        #: next one. If it raises -- corrupt persisted state -- validate()
+        #: REJECTS rather than falling back to the constructor values, which
+        #: would silently trade against counters known to be wrong.
+        self.counters_provider = counters_provider
 
     def validate(
         self,
@@ -192,16 +199,26 @@ class RiskManager:
                 f"{account.open_positions} open position(s), "
                 f"max {limits.MAX_OPEN_POSITIONS}")
 
+        # 6b. live daily counters -- fail closed if the state is unreadable
+        realised_pnl = self.daily_realised_pnl
+        orders_today = self.orders_placed_today
+        if self.counters_provider is not None:
+            try:
+                realised_pnl, orders_today = self.counters_provider()
+            except Exception as exc:
+                return Decision.reject(
+                    f"daily risk state unreadable ({type(exc).__name__}): {exc}")
+
         # 7. daily order budget
-        if self.orders_placed_today >= limits.MAX_ORDERS_PER_DAY:
+        if orders_today >= limits.MAX_ORDERS_PER_DAY:
             return Decision.reject(
-                f"{self.orders_placed_today} orders today, "
+                f"{orders_today} orders today, "
                 f"max {limits.MAX_ORDERS_PER_DAY}")
 
         # 8. daily loss cap
-        if self.daily_realised_pnl <= -limits.MAX_DAILY_LOSS_USD:
+        if realised_pnl <= -limits.MAX_DAILY_LOSS_USD:
             return Decision.reject(
-                f"daily loss {self.daily_realised_pnl:.2f} at or beyond cap "
+                f"daily loss {realised_pnl:.2f} at or beyond cap "
                 f"-{limits.MAX_DAILY_LOSS_USD:.2f}")
 
         # 9. settlement dead zone (CLAUDE.md section 14)

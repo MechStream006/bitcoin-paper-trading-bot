@@ -416,6 +416,15 @@ CREATE TABLE IF NOT EXISTS risk_state (
     halt_reason    TEXT,
     updated_ts     TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS risk_day_events (
+    utc_day  TEXT NOT NULL,
+    kind     TEXT NOT NULL CHECK (kind IN ('order', 'pnl')),
+    ref      TEXT NOT NULL,
+    amount   REAL NOT NULL DEFAULT 0.0,
+    ts       TEXT NOT NULL,
+    PRIMARY KEY (utc_day, kind, ref)
+);
 """
 
 

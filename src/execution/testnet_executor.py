@@ -42,11 +42,15 @@ class TestnetExecutor:
     # venue is Delta *testnet*. Without this, pytest tries to collect it.
     __test__ = False
 
-    def __init__(self, conn, client, risk: RiskManager, *, strategy: str = "manual") -> None:
+    def __init__(self, conn, client, risk: RiskManager, *, strategy: str = "manual",
+                 risk_state=None) -> None:
         self._conn = conn
         self._client = client
         self._risk = risk
         self._strategy = strategy
+        #: Optional RiskStateStore. When present, a submitted order consumes a
+        #: daily slot before the request leaves.
+        self._risk_state = risk_state
 
     # -- internal ----------------------------------------------------------
 
@@ -102,6 +106,14 @@ class TestnetExecutor:
         # Write-ahead: SUBMITTED is durable before the request leaves.
         state = transition(state, OrderState.SUBMITTED)
         self._persist(intent, state)
+
+        # Consume the daily slot BEFORE sending. An order that times out may
+        # exist on the exchange, so it must count; the alternative -- counting
+        # on success -- would let a string of ambiguous submits bypass the cap
+        # entirely. Idempotent per client_order_id, so a retry of this method
+        # cannot consume two slots.
+        if self._risk_state is not None:
+            self._risk_state.record_order_placed(intent.client_order_id, now)
 
         try:
             resp = self._client.place_order(

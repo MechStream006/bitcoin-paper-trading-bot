@@ -29,6 +29,9 @@ from src.execution.testnet_executor import (
     ExecutionBlocked, InstrumentMissing, TestnetExecutor,
 )
 from src.risk import limits
+from src.risk.state import (
+    MalformedRiskState, RiskStateStore, record_order_placed, utc_day_of,
+)
 from src.risk.manager import (
     AccountSnapshot, OrderIntent, RiskManager, compute_trade_risk_usd,
     required_margin_usd, round_trip_fees_usd,
@@ -702,6 +705,403 @@ class TestHaltPropagation:
 
     def test_no_provider_preserves_existing_behaviour(self):
         assert _risk().validate(_intent(), _account(), now=NOON).approved
+
+
+class TestDailyOrderCap:
+    """1 - MAX_ORDERS_PER_DAY, counted from persisted state."""
+
+    def _store(self, conn):
+        return RiskStateStore(conn)
+
+    def _rm(self, store, **kw):
+        return _risk(counters_provider=store.counters, **kw)
+
+    def test_first_and_second_order_increment_the_counter(self, conn):
+        store = self._store(conn)
+        assert store.state().orders_placed == 0
+        assert store.record_order_placed("coid-1").orders_placed == 1
+        assert store.record_order_placed("coid-2").orders_placed == 2
+
+    def test_third_order_is_rejected(self, conn):
+        store = self._store(conn)
+        rm = self._rm(store)
+        assert rm.validate(_intent(), _account(), now=NOON).approved
+
+        store.record_order_placed("coid-1")
+        assert rm.validate(_intent(), _account(), now=NOON).approved
+
+        store.record_order_placed("coid-2")
+        d = rm.validate(_intent(), _account(), now=NOON)
+        assert not d.approved
+        assert "orders today" in d.reason and "max 2" in d.reason
+
+    def test_rejected_order_does_not_consume_a_slot(self, conn):
+        """The cap must count sent orders, never refused intents."""
+        store = self._store(conn)
+        rm = self._rm(store)
+        ex = TestnetExecutor(conn, _NoNetworkClient(), rm, risk_state=store)
+
+        for i in range(5):
+            state, decision = ex.submit(
+                _intent(client_order_id=f"bad-{i}", size=9), _account(), now=NOON)
+            assert state is OrderState.BLOCKED
+        assert store.state().orders_placed == 0, "blocked intents consumed slots"
+
+    def test_submitted_order_consumes_exactly_one_slot(self, conn):
+        store = self._store(conn)
+        client = _FakeClient(place={"success": True, "result": {"id": 1}})
+        ex = TestnetExecutor(conn, client, self._rm(store), risk_state=store)
+        ex.submit(_intent(client_order_id="real-1"), _account(), now=NOON)
+        assert store.state().orders_placed == 1
+
+    def test_slot_is_consumed_even_when_the_submit_is_ambiguous(self, conn):
+        """An UNKNOWN order may exist on the exchange; it must count."""
+        store = self._store(conn)
+        client = _FakeClient(place=requests.exceptions.Timeout("t"))
+        ex = TestnetExecutor(conn, client, self._rm(store), risk_state=store)
+        state, _ = ex.submit(_intent(client_order_id="ambiguous-1"), _account(), now=NOON)
+        assert state is OrderState.UNKNOWN
+        assert store.state().orders_placed == 1
+
+    def test_cap_binds_through_the_executor(self, conn):
+        store = self._store(conn)
+        client = _FakeClient(place={"success": True, "result": {"id": 1}})
+        ex = TestnetExecutor(conn, client, self._rm(store), risk_state=store)
+        for i in (1, 2):
+            state, _ = ex.submit(_intent(client_order_id=f"ok-{i}"), _account(), now=NOON)
+            assert state is OrderState.ACKED
+        calls_before = len(client.calls)
+        state, decision = ex.submit(_intent(client_order_id="ok-3"), _account(), now=NOON)
+        assert state is OrderState.BLOCKED
+        assert "orders today" in decision.reason
+        assert len(client.calls) == calls_before, "third order reached the exchange"
+
+    def test_counter_persists_across_process_restart(self, tmp_path):
+        """A new connection is what a restarted process actually has."""
+        db = tmp_path / "persist.db"
+        c1 = storage.get_connection(db)
+        storage.init_schema(c1)
+        storage.init_execution_schema(c1)
+        RiskStateStore(c1).record_order_placed("coid-1")
+        RiskStateStore(c1).record_order_placed("coid-2")
+        c1.close()
+
+        c2 = storage.get_connection(db)
+        store = RiskStateStore(c2)
+        assert store.state().orders_placed == 2
+        d = _risk(counters_provider=store.counters).validate(
+            _intent(), _account(), now=NOON)
+        assert not d.approved and "orders today" in d.reason
+        c2.close()
+
+
+class TestDailyLossCap:
+    """2 - MAX_DAILY_LOSS_USD, from deterministic realised-loss fixtures."""
+
+    def test_below_the_limit_remains_permitted(self, conn):
+        store = RiskStateStore(conn)
+        store.record_realised_pnl("t1", -3.99)
+        rm = _risk(counters_provider=store.counters)
+        assert rm.validate(_intent(), _account(), now=NOON).approved
+
+    def test_reaching_the_limit_blocks(self, conn):
+        store = RiskStateStore(conn)
+        store.record_realised_pnl("t1", -4.00)
+        d = _risk(counters_provider=store.counters).validate(
+            _intent(), _account(), now=NOON)
+        assert not d.approved
+        assert "daily loss" in d.reason and "cap" in d.reason
+
+    def test_exceeding_the_limit_blocks(self, conn):
+        store = RiskStateStore(conn)
+        store.record_realised_pnl("t1", -4.01)
+        assert not _risk(counters_provider=store.counters).validate(
+            _intent(), _account(), now=NOON).approved
+
+    def test_losses_accumulate_across_several_trades(self, conn):
+        store = RiskStateStore(conn)
+        rm = _risk(counters_provider=store.counters)
+        for i, loss in enumerate([-1.50, -1.50]):
+            store.record_realised_pnl(f"t{i}", loss)
+            assert rm.validate(_intent(), _account(), now=NOON).approved
+        store.record_realised_pnl("t2", -1.20)
+        assert store.state().realised_pnl == pytest.approx(-4.20)
+        assert not rm.validate(_intent(), _account(), now=NOON).approved
+
+    def test_profit_offsets_loss(self, conn):
+        store = RiskStateStore(conn)
+        store.record_realised_pnl("loss", -4.50)
+        assert not _risk(counters_provider=store.counters).validate(
+            _intent(), _account(), now=NOON).approved
+        store.record_realised_pnl("gain", +1.00)
+        assert store.state().realised_pnl == pytest.approx(-3.50)
+        assert _risk(counters_provider=store.counters).validate(
+            _intent(), _account(), now=NOON).approved
+
+    def test_loss_persists_across_restart(self, tmp_path):
+        db = tmp_path / "loss.db"
+        c1 = storage.get_connection(db)
+        storage.init_schema(c1)
+        storage.init_execution_schema(c1)
+        RiskStateStore(c1).record_realised_pnl("t1", -4.25)
+        c1.close()
+
+        c2 = storage.get_connection(db)
+        store = RiskStateStore(c2)
+        assert store.state().realised_pnl == pytest.approx(-4.25)
+        assert not _risk(counters_provider=store.counters).validate(
+            _intent(), _account(), now=NOON).approved
+        c2.close()
+
+    def test_cap_checks_require_no_exchange_call(self, conn):
+        store = RiskStateStore(conn)
+        store.record_realised_pnl("t1", -5.00)
+        ex = TestnetExecutor(conn, _NoNetworkClient(),
+                             _risk(counters_provider=store.counters), risk_state=store)
+        state, decision = ex.submit(_intent(), _account(), now=NOON)
+        assert state is OrderState.BLOCKED
+        assert "daily loss" in decision.reason
+
+
+class TestUtcRollover:
+    """3 - yesterday's counters must not leak into today."""
+
+    DAY1 = datetime(2026, 8, 18, 23, 59, 0, tzinfo=timezone.utc)
+    DAY2 = datetime(2026, 8, 19, 0, 0, 30, tzinfo=timezone.utc)
+
+    def test_new_utc_day_starts_clean(self, conn):
+        store = RiskStateStore(conn)
+        store.record_order_placed("d1-a", now=self.DAY1)
+        store.record_order_placed("d1-b", now=self.DAY1)
+        store.record_realised_pnl("d1-loss", -4.50, now=self.DAY1)
+        assert store.state(self.DAY1).orders_placed == 2
+        assert store.state(self.DAY1).realised_pnl == pytest.approx(-4.50)
+
+        day2 = store.state(self.DAY2)
+        assert day2.utc_day == "2026-08-19"
+        assert day2.orders_placed == 0
+        assert day2.realised_pnl == 0.0
+
+    def test_caps_release_at_the_boundary(self, conn):
+        store = RiskStateStore(conn)
+        store.record_order_placed("d1-a", now=self.DAY1)
+        store.record_order_placed("d1-b", now=self.DAY1)
+
+        blocked = _risk(counters_provider=lambda: store.counters(self.DAY1))
+        assert not blocked.validate(_intent(), _account(), now=self.DAY1).approved
+
+        fresh = _risk(counters_provider=lambda: store.counters(self.DAY2))
+        assert fresh.validate(_intent(), _account(), now=self.DAY2).approved
+
+    def test_yesterdays_state_is_still_readable(self, conn):
+        """Rollover must not destroy the audit trail."""
+        store = RiskStateStore(conn)
+        store.record_order_placed("d1-a", now=self.DAY1)
+        store.record_order_placed("d2-a", now=self.DAY2)
+        assert store.state(self.DAY1).orders_placed == 1
+        assert store.state(self.DAY2).orders_placed == 1
+        days = [r[0] for r in conn.execute(
+            "SELECT DISTINCT utc_day FROM risk_day_events ORDER BY utc_day")]
+        assert days == ["2026-08-18", "2026-08-19"]
+
+    def test_day_boundary_is_exact(self):
+        assert utc_day_of(datetime(2026, 8, 18, 23, 59, 59, 999999,
+                                   tzinfo=timezone.utc)) == "2026-08-18"
+        assert utc_day_of(datetime(2026, 8, 19, 0, 0, 0,
+                                   tzinfo=timezone.utc)) == "2026-08-19"
+
+    def test_naive_datetime_is_treated_as_utc(self):
+        assert utc_day_of(datetime(2026, 8, 19, 0, 0, 0)) == "2026-08-19"
+
+    def test_non_utc_timezone_is_converted_not_truncated(self):
+        from datetime import timedelta
+        ist = timezone(timedelta(hours=5, minutes=30))
+        # 2026-08-19 04:00 IST == 2026-08-18 22:30 UTC
+        assert utc_day_of(datetime(2026, 8, 19, 4, 0, tzinfo=ist)) == "2026-08-18"
+
+
+class TestRiskStatePersistenceSafety:
+    """4 - idempotency, corruption, concurrency, transaction boundaries."""
+
+    def test_duplicate_order_record_is_idempotent(self, conn):
+        store = RiskStateStore(conn)
+        for _ in range(10):
+            store.record_order_placed("same-coid")
+        assert store.state().orders_placed == 1
+
+    def test_duplicate_pnl_record_is_idempotent(self, conn):
+        store = RiskStateStore(conn)
+        for _ in range(10):
+            store.record_realised_pnl("same-ref", -1.25)
+        assert store.state().realised_pnl == pytest.approx(-1.25)
+
+    def test_mirror_always_agrees_with_the_event_ledger(self, conn):
+        store = RiskStateStore(conn)
+        store.record_order_placed("a")
+        store.record_realised_pnl("p", -2.5)
+        row = conn.execute("SELECT realised_pnl, orders_placed FROM risk_state "
+                           "WHERE utc_day = ?", (utc_day_of(),)).fetchone()
+        assert int(row[1]) == 1
+        assert float(row[0]) == pytest.approx(-2.5)
+
+    def test_tampered_mirror_fails_closed(self, conn):
+        """A row that disagrees with the ledger must stop trading, not guess."""
+        store = RiskStateStore(conn)
+        store.record_order_placed("a")
+        store.record_order_placed("b")
+        conn.execute("UPDATE risk_state SET orders_placed = 0 WHERE utc_day = ?",
+                     (utc_day_of(),))
+        conn.commit()
+
+        with pytest.raises(MalformedRiskState):
+            store.state()
+
+        d = _risk(counters_provider=store.counters).validate(
+            _intent(), _account(), now=NOON)
+        assert not d.approved
+        assert "unreadable" in d.reason
+
+    def test_negative_order_count_fails_closed(self, conn):
+        store = RiskStateStore(conn)
+        store.record_order_placed("a")
+        conn.execute("UPDATE risk_state SET orders_placed = -5 WHERE utc_day = ?",
+                     (utc_day_of(),))
+        conn.commit()
+        with pytest.raises(MalformedRiskState):
+            store.state()
+
+    def test_non_numeric_counter_fails_closed(self, conn):
+        store = RiskStateStore(conn)
+        store.record_order_placed("a")
+        conn.execute("UPDATE risk_state SET realised_pnl = 'corrupt' WHERE utc_day = ?",
+                     (utc_day_of(),))
+        conn.commit()
+        with pytest.raises(MalformedRiskState):
+            store.state()
+
+    def test_missing_row_is_a_new_day_not_a_corruption(self, conn):
+        s = RiskStateStore(conn).state()
+        assert s.orders_placed == 0 and s.realised_pnl == 0.0
+
+    def test_unreadable_state_blocks_before_any_network_call(self, conn):
+        def exploding():
+            raise MalformedRiskState("simulated corruption")
+
+        ex = TestnetExecutor(conn, _NoNetworkClient(),
+                             _risk(counters_provider=exploding))
+        state, decision = ex.submit(_intent(), _account(), now=NOON)
+        assert state is OrderState.BLOCKED
+        assert "unreadable" in decision.reason
+
+    def test_concurrent_writers_do_not_lose_events(self, tmp_path):
+        """Real threads, real connections, real SQLite locking."""
+        import threading
+        db = tmp_path / "concurrent.db"
+        c0 = storage.get_connection(db)
+        storage.init_schema(c0)
+        storage.init_execution_schema(c0)
+        c0.close()
+
+        errors = []
+
+        def writer(n):
+            try:
+                c = storage.get_connection(db)
+                c.execute("PRAGMA busy_timeout = 10000")
+                for i in range(10):
+                    record_order_placed(c, f"w{n}-{i}")
+                c.close()
+            except Exception as exc:                       # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(n,)) for n in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+        c = storage.get_connection(db)
+        assert RiskStateStore(c).state().orders_placed == 50, "increments were lost"
+        c.close()
+
+    def test_failed_write_leaves_no_partial_state(self, conn):
+        """Transaction boundary: mirror failure must roll back the event too."""
+        store = RiskStateStore(conn)
+        store.record_order_placed("before")
+        assert store.state().orders_placed == 1
+
+        conn.execute("DROP TABLE risk_state")
+        conn.commit()
+        with pytest.raises(Exception):
+            store.record_order_placed("during-failure")
+
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM risk_day_events WHERE ref = 'during-failure'"
+        ).fetchone()[0]
+        assert rows == 0, "event survived a failed transaction"
+
+
+class TestCapsAndReconciliationInteraction:
+    """5 - two independent controls that must not weaken each other."""
+
+    def test_reconciler_halt_overrides_an_otherwise_permitted_intent(self, conn):
+        store = RiskStateStore(conn)
+        client = _FakeReconcileClient(positions={"success": True, "result": [{"size": 3}]})
+        r = Reconciler(conn, client, product_id=84)
+        r.start()
+        assert r.halted
+
+        rm = _risk(halt_provider=r.gate_state, counters_provider=store.counters)
+        d = rm.validate(_intent(), _account(), now=NOON)
+        assert not d.approved
+        assert "halted" in d.reason, "halt must outrank an unused daily budget"
+
+    def test_clearing_a_reconciler_halt_does_not_reset_counters(self, conn):
+        store = RiskStateStore(conn)
+        store.record_order_placed("a")
+        store.record_order_placed("b")
+
+        client = _FakeReconcileClient(positions={"success": True, "result": [{"size": 3}]})
+        r = Reconciler(conn, client, product_id=84)
+        r.start()
+        assert r.halted
+
+        client._p = {"success": True, "result": []}
+        assert r.clear_halt_if_clean() is True
+        assert not r.halted
+
+        assert store.state().orders_placed == 2
+        d = _risk(halt_provider=r.gate_state,
+                  counters_provider=store.counters).validate(
+            _intent(), _account(), now=NOON)
+        assert not d.approved
+        assert "orders today" in d.reason
+
+    def test_daily_cap_cannot_be_cleared_by_clean_reconciliation(self, conn):
+        store = RiskStateStore(conn)
+        store.record_realised_pnl("big-loss", -5.00)
+
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        r.start()
+        assert not r.halted and r.trading_permitted
+
+        for _ in range(3):
+            r.reconcile()
+            r.clear_halt_if_clean()
+
+        d = _risk(halt_provider=r.gate_state,
+                  counters_provider=store.counters).validate(
+            _intent(), _account(), now=NOON)
+        assert not d.approved
+        assert "daily loss" in d.reason
+
+    def test_both_controls_clear_means_permitted(self, conn):
+        store = RiskStateStore(conn)
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        r.start()
+        rm = _risk(halt_provider=r.gate_state, counters_provider=store.counters)
+        assert rm.validate(_intent(), _account(), now=NOON).approved
 
 
 # ---------------------------------------------------------------------------
