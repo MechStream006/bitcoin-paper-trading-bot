@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime, timezone
+from typing import Callable
 
 from src.risk import limits
 
@@ -59,9 +60,13 @@ class Decision:
 
 
 def round_trip_fees_usd(mark_price: float, size: int) -> float:
-    """Taker in, taker out -- the worst case, so the budget is never understated."""
+    """Taker in, taker out -- the worst case, so the budget is never understated.
+
+    Scaled by FEE_RESERVE_MULTIPLIER, which the exchange applies on top of the
+    published commission rates (measured, not documented -- see limits.py).
+    """
     notional = limits.BTCUSD_CONTRACT_VALUE * mark_price * size
-    return notional * limits.TAKER_FEE_RATE * 2
+    return notional * limits.TAKER_FEE_RATE * 2 * limits.FEE_RESERVE_MULTIPLIER
 
 
 def required_margin_usd(notional: float) -> float:
@@ -120,6 +125,7 @@ class RiskManager:
         orders_placed_today: int = 0,
         halted: bool = False,
         halt_reason: str = "",
+        halt_provider: "Callable[[], tuple[bool, str]] | None" = None,
     ) -> None:
         self.kill_switch_engaged = kill_switch_engaged
         self.platform = platform
@@ -128,6 +134,11 @@ class RiskManager:
         self.orders_placed_today = orders_placed_today
         self.halted = halted
         self.halt_reason = halt_reason
+        #: Live halt source, normally ``Reconciler.gate_state``. Consulted on
+        #: every validate() so a halt raised between two calls takes effect on
+        #: the next one, rather than at the next process restart. Must be pure:
+        #: validate()'s network-free contract depends on it.
+        self.halt_provider = halt_provider
 
     def validate(
         self,
@@ -141,10 +152,15 @@ class RiskManager:
         if self.kill_switch_engaged:
             return Decision.reject("kill switch engaged")
 
-        # 2. halt latch
+        # 2. halt latch -- static flag first, then the live source. Either
+        # blocks; neither can override the other into permissiveness.
         if self.halted:
             reason = self.halt_reason or "unspecified"
             return Decision.reject("trading halted: " + reason)
+        if self.halt_provider is not None:
+            blocked, reason = self.halt_provider()
+            if blocked:
+                return Decision.reject("trading halted: " + (reason or "unspecified"))
 
         # 3. platform guard -- belt AND braces
         if self.platform != limits.REQUIRED_PLATFORM:

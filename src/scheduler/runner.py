@@ -153,6 +153,16 @@ class SchedulerService:
     # Job registration
     # -----------------------------------------------------------------------
 
+    def has_job(self, job_id: str) -> bool:
+        """Whether `job_id` is already registered.
+
+        Lets a caller make registration idempotent without catching the
+        ValueError that register() raises, which would be indistinguishable
+        from a genuine trigger-argument error.
+        """
+        with self._lock:
+            return job_id in self._stats
+
     def register(
         self,
         name: str,

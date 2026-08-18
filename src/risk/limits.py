@@ -58,6 +58,23 @@ BTCUSD_DEFAULT_LEVERAGE = 10.0
 TAKER_FEE_RATE = 0.0005
 MAKER_FEE_RATE = 0.0002
 
+# Delta reserves MORE fee margin than the raw commission rates predict.
+#
+# Measured on the supervised order gate (2026-08-18, exchange order 2169335031,
+# 1 contract @ limit 63051.2): reserved fee margin was 0.074400416 USD where
+# notional * taker * 2 predicts 0.0630512 -- a ratio of exactly 1.18, matching
+# to 1e-12.
+#
+# The multiplier is NOT exposed by the API. It was absent from /v2/products,
+# /v2/assets, /v2/profile, /v2/users/trading_preferences and
+# /v2/wallet/transactions. It is consistent with an 18% tax on trading fees on
+# the India platform, but that reading is inferred from ONE observation, not
+# read from any documented field -- see docs/ops/fee-model-observation-2026-08-18.md.
+#
+# Applied as a conservatism factor: it can only ever raise the fee estimate, so
+# a wrong inference costs budget headroom, never a breached limit.
+FEE_RESERVE_MULTIPLIER = 1.18
+
 # --- price sanity ----------------------------------------------------------
 MAX_PRICE_DEVIATION_PCT = 2.0      # limit price must be within +/-2% of mark
 

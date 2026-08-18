@@ -78,6 +78,8 @@ from src.alerts.rate_limiter import RateLimiter
 from src.alerts.telegram import send_message
 from src.data.storage import get_connection, init_schema
 from src.exchange.delta_client import DeltaClient
+from src.execution.reconciler import Reconciler
+from src.execution.reconciliation_jobs import register_reconciliation_jobs
 from src.exchange.ws_manager import WSManager
 from src.expiry.expiry_context import ExpiryContext
 from src.expiry.models import ExpiryConfig
@@ -159,6 +161,7 @@ class Runtime:
         heartbeat_job_ages: bool = True,
         metrics_exporter_enabled: bool = True,
         metrics_exporter_port: int = 9108,
+        demo_trading_enabled: bool = False,
         n_strikes: int = 5,
         n_expiries: int = 3,
         snapshot_interval_sec: int = 60,
@@ -185,6 +188,7 @@ class Runtime:
         self._hb_universe_warn      = heartbeat_universe_warn
         self._hb_job_ages           = heartbeat_job_ages
         self._metrics_exporter_enabled = metrics_exporter_enabled
+        self._demo_trading_enabled = demo_trading_enabled
         self._metrics_exporter_port    = metrics_exporter_port
         self._n_strikes             = n_strikes
         self._n_expiries            = n_expiries
@@ -207,6 +211,7 @@ class Runtime:
         # Component references (all None until bootstrap)
         self._conn:             Optional[sqlite3.Connection]  = None
         self._client:           Optional[DeltaClient]         = None
+        self._reconciler:       Optional[Reconciler]          = None
         self._market_state:     Optional[MarketState]         = None
         self._ws_manager:       Optional[WSManager]           = None
         self._chain_refresher:  Optional[ChainRefresher]      = None
@@ -436,6 +441,28 @@ class Runtime:
                 port=self._metrics_exporter_port,
             )
         self._metrics_exporter = metrics_exporter
+
+        # 9c. Execution reconciliation (GATED on demo trading being armed).
+        #
+        # Deliberately NOT registered with the Supervisor. Reconciler.health()
+        # reports fatal=True when halted, and Runtime._on_fatal calls
+        # supervisor.request_shutdown() -- so registering it would make an
+        # execution halt tear down market-data collection. The collector is the
+        # irreplaceable asset (Delta serves no historical option-chain API), and
+        # an execution-layer fault must never cost a minute of it.
+        #
+        # With demo trading unarmed this block does nothing at all: no
+        # authenticated calls, no job, collector behaviour bit-for-bit as before.
+        reconciler: Optional[Reconciler] = None
+        if self._demo_trading_enabled:
+            reconciler = Reconciler(conn, client, product_id=84)
+            reconciler.start()
+            register_reconciliation_jobs(scheduler, reconciler)
+            logger.info("[runtime] reconciliation armed (trading_permitted=%s)",
+                        reconciler.trading_permitted)
+        else:
+            logger.info("[runtime] reconciliation not armed (DEMO_TRADING_ENABLED off)")
+        self._reconciler = reconciler
 
         # 10. Supervisor
         supervisor = Supervisor(

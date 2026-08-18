@@ -22,6 +22,9 @@ from src.execution.order_state import (
     is_open, is_terminal, transition,
 )
 from src.execution.reconciler import Divergence, Reconciler
+from src.execution.reconciliation_jobs import (
+    RECONCILE_JOB_ID, _make_periodic_reconcile, register_reconciliation_jobs,
+)
 from src.execution.testnet_executor import (
     ExecutionBlocked, InstrumentMissing, TestnetExecutor,
 )
@@ -83,6 +86,34 @@ class _FakeClient:
     def get_positions(self):
         self.calls.append("get_positions")
         return self._positions
+
+
+class _FakeReconcileClient(_FakeClient):
+    """_FakeClient in reconciliation-shaped terms.
+
+    `_o` / `_p` are writable so a test can change what the exchange reports
+    between two passes -- which is how "the halt persists even after the
+    exchange agrees again" is expressed.
+    """
+
+    def __init__(self, orders=None, fills=None, positions=None):
+        super().__init__(live=orders, fills=fills, positions=positions)
+
+    @property
+    def _o(self):
+        return self._live
+
+    @_o.setter
+    def _o(self, value):
+        self._live = value
+
+    @property
+    def _p(self):
+        return self._positions
+
+    @_p.setter
+    def _p(self, value):
+        self._positions = value
 
 
 @pytest.fixture
@@ -260,7 +291,8 @@ class TestRiskArithmetic:
         assert total == pytest.approx(price_only + round_trip_fees_usd(MARK, 1))
 
     def test_round_trip_fee_magnitude(self):
-        assert round_trip_fees_usd(MARK, 1) == pytest.approx(0.0642, abs=1e-3)
+        # 0.0642 raw, scaled by the measured FEE_RESERVE_MULTIPLIER.
+        assert round_trip_fees_usd(MARK, 1) == pytest.approx(0.0758, abs=1e-3)
 
     def test_one_contract_fits_budget_at_reference_mark(self):
         assert compute_trade_risk_usd(_intent(stop_price=63287.5), MARK) <= limits.MAX_TRADE_RISK_USD
@@ -279,7 +311,12 @@ class TestMarginArithmetic:
     # cannot be exercised there.
     HIGH_MARK = 150_000.0
     HIGH_NOTIONAL = 150.0                       # 0.001 * 150_000 * 1
-    HIGH_FEES = 0.15                            # 150 * 0.0005 * 2
+
+    @property
+    def HIGH_FEES(self):
+        # Derived, not hardcoded: FEE_RESERVE_MULTIPLIER must be free to change
+        # without silently invalidating this boundary test.
+        return round_trip_fees_usd(self.HIGH_MARK, 1)
 
     def _high_mark_case(self, available):
         return (
@@ -344,6 +381,327 @@ class TestMarginArithmetic:
             _intent(), _account(available_usd=0.0), now=NOON).approved
         assert not _risk().validate(
             _intent(size=2), _account(), now=NOON).approved
+
+
+class TestObservedExchangeBehaviour:
+    """Pinned to the real supervised order of 2026-08-18.
+
+    Exchange order 2169335031: 1 BTCUSD contract, buy limit @ 63051.2, never
+    filled, cancelled ~33s later. Delta reported, while it rested:
+
+        order_margin    = 6.30512
+        blocked_margin  = 6.379520416
+
+    These are measurements, not predictions. If a future Delta change breaks
+    them, that is a real finding and this test is where it should surface.
+    """
+
+    ORDER_ID = 2169335031
+    LIMIT_PRICE = 63051.2
+    OBSERVED_ORDER_MARGIN = 6.30512
+    OBSERVED_BLOCKED_TOTAL = 6.379520416
+    OBSERVED_FEE_RESERVE = 6.379520416 - 6.30512
+
+    def test_margin_is_computed_on_the_order_price_not_the_mark(self):
+        """The exchange charged notional-at-LIMIT / leverage, to the cent."""
+        notional = limits.BTCUSD_CONTRACT_VALUE * self.LIMIT_PRICE
+        assert required_margin_usd(notional) == pytest.approx(
+            self.OBSERVED_ORDER_MARGIN, abs=1e-9)
+
+    def test_leverage_leg_bound_not_the_initial_margin_floor(self):
+        """Confirms F2 against a real exchange reservation, not just the spec."""
+        notional = limits.BTCUSD_CONTRACT_VALUE * self.LIMIT_PRICE
+        floor = notional * limits.BTCUSD_INITIAL_MARGIN_PCT / 100.0
+        assert self.OBSERVED_ORDER_MARGIN == pytest.approx(
+            notional / limits.BTCUSD_DEFAULT_LEVERAGE, abs=1e-9)
+        assert self.OBSERVED_ORDER_MARGIN > floor
+        assert self.OBSERVED_ORDER_MARGIN / floor == pytest.approx(20.0)
+
+    def test_fee_reserve_matches_our_model_at_the_order_price(self):
+        """The whole point of FEE_RESERVE_MULTIPLIER."""
+        assert round_trip_fees_usd(self.LIMIT_PRICE, 1) == pytest.approx(
+            self.OBSERVED_FEE_RESERVE, abs=1e-9)
+
+    def test_fee_reserve_is_exactly_1_18x_the_raw_commission(self):
+        """Documents the measured ratio itself, independent of our constant."""
+        raw = limits.BTCUSD_CONTRACT_VALUE * self.LIMIT_PRICE * limits.TAKER_FEE_RATE * 2
+        assert self.OBSERVED_FEE_RESERVE / raw == pytest.approx(1.18, abs=1e-9)
+        assert limits.FEE_RESERVE_MULTIPLIER == 1.18
+
+    def test_total_blocked_is_margin_plus_fee_reserve(self):
+        notional = limits.BTCUSD_CONTRACT_VALUE * self.LIMIT_PRICE
+        modelled = required_margin_usd(notional) + round_trip_fees_usd(self.LIMIT_PRICE, 1)
+        assert modelled == pytest.approx(self.OBSERVED_BLOCKED_TOTAL, abs=1e-9)
+
+    def test_uncorrected_model_would_have_understated_the_reserve(self):
+        """Guards against silently reverting the multiplier."""
+        uncorrected = (limits.BTCUSD_CONTRACT_VALUE * self.LIMIT_PRICE
+                       * limits.TAKER_FEE_RATE * 2)
+        assert uncorrected < self.OBSERVED_FEE_RESERVE
+        assert self.OBSERVED_FEE_RESERVE / uncorrected > 1.15
+
+    def test_corrected_fees_still_leave_one_contract_inside_budget(self):
+        """The correction must not make the intended trade size unviable."""
+        it = _intent(stop_price=63287.5)
+        assert compute_trade_risk_usd(it, MARK) <= limits.MAX_TRADE_RISK_USD
+
+    def test_correction_is_strictly_conservative(self):
+        """A multiplier > 1 can only ever tighten, never loosen, a guard."""
+        assert limits.FEE_RESERVE_MULTIPLIER >= 1.0
+
+
+class _FakeScheduler:
+    """Mimics SchedulerService's duplicate-job contract exactly."""
+
+    def __init__(self):
+        self.jobs = {}
+
+    def has_job(self, job_id):
+        return job_id in self.jobs
+
+    def register(self, name, fn, trigger, job_id=None, **kw):
+        jid = job_id or name
+        if jid in self.jobs:
+            raise ValueError(f"job '{jid}' is already registered")
+        self.jobs[jid] = (name, fn, trigger, kw)
+
+
+class TestReconciliationLifecycle:
+    """A-E: the reconciler as a real safety control, not an advisory."""
+
+    def _rec(self, conn, client=None):
+        return Reconciler(conn, client or _FakeReconcileClient(), product_id=84)
+
+    def test_clean_boot_permits_execution(self, conn):
+        r = self._rec(conn)
+        r.start()
+        assert r.running and r.booted
+        assert not r.halted
+        assert r.trading_permitted
+        assert r.gate_state() == (False, "")
+
+    def test_before_start_trading_is_not_permitted(self, conn):
+        r = self._rec(conn)
+        assert not r.trading_permitted
+        blocked, reason = r.gate_state()
+        assert blocked and "not running" in reason
+
+    def test_failed_boot_reconciliation_prevents_trading(self, conn):
+        client = _FakeReconcileClient(orders={"success": True, "result": [
+            {"client_order_id": "ghost", "id": 42, "state": "open"}]})
+        r = self._rec(conn, client)
+        r.start()
+        assert r.booted
+        assert r.halted
+        assert not r.trading_permitted
+        blocked, reason = r.gate_state()
+        assert blocked and "halted" in reason
+
+    def test_boot_that_raises_halts_rather_than_propagates(self, conn):
+        class Exploding:
+            def get_live_orders(self, pid):
+                raise ConnectionError("exchange unreachable")
+
+            def get_fills(self, pid):
+                raise ConnectionError("exchange unreachable")
+
+            def get_positions(self):
+                raise ConnectionError("exchange unreachable")
+
+        r = self._rec(conn, Exploding())
+        r.start()
+        assert r.halted
+        assert not r.trading_permitted
+        assert "ConnectionError" in r.halt_reason
+
+    def test_stop_does_not_clear_halt(self, conn):
+        client = _FakeReconcileClient(positions={"success": True, "result": [{"size": 5}]})
+        r = self._rec(conn, client)
+        r.start()
+        assert r.halted
+        r.stop()
+        assert r.halted, "stop() must not clear a halt"
+        assert not r.trading_permitted
+
+    def test_restart_cannot_clear_a_halt(self, conn):
+        """The supervisor's restart policy must not become a halt bypass."""
+        client = _FakeReconcileClient(positions={"success": True, "result": [{"size": 5}]})
+        r = self._rec(conn, client)
+        r.start()
+        assert r.halted
+        client._p = {"success": True, "result": []}
+        r.stop()
+        r.start()
+        assert r.halted, "restart must not clear a halt"
+        assert not r.trading_permitted
+
+    def test_stopped_reconciler_blocks_even_when_not_halted(self, conn):
+        r = self._rec(conn)
+        r.start()
+        assert r.trading_permitted
+        r.stop()
+        assert not r.trading_permitted
+        blocked, reason = r.gate_state()
+        assert blocked and "not running" in reason
+
+    def test_halt_persists_across_repeated_periodic_passes(self, conn):
+        client = _FakeReconcileClient(positions={"success": True, "result": [{"size": 5}]})
+        r = self._rec(conn, client)
+        r.start()
+        assert r.halted
+        client._p = {"success": True, "result": []}
+        job = _make_periodic_reconcile(r)
+        for _ in range(5):
+            job()
+        assert r.halted, "time passing must never clear a halt"
+
+    def test_halt_cleared_only_by_explicit_clean_reconciliation(self, conn):
+        client = _FakeReconcileClient(positions={"success": True, "result": [{"size": 5}]})
+        r = self._rec(conn, client)
+        r.start()
+        assert r.halted
+
+        assert r.clear_halt_if_clean() is False, "still divergent -- must not clear"
+        assert r.halted
+
+        client._p = {"success": True, "result": []}
+        assert r.clear_halt_if_clean() is True
+        assert not r.halted
+        assert r.trading_permitted
+
+    def test_reconciliation_never_places_or_cancels(self, conn):
+        class Watching(_FakeReconcileClient):
+            def place_order(self, **kw):
+                raise AssertionError("reconciler placed an order")
+
+            def cancel_order(self, *a, **k):
+                raise AssertionError("reconciler cancelled an order")
+
+        client = Watching(orders={"success": True, "result": [
+            {"client_order_id": "ghost", "id": 7, "state": "open"}]})
+        r = self._rec(conn, client)
+        r.start()
+        _make_periodic_reconcile(r)()
+        assert r.halted
+        assert client.calls, "it did query"
+
+
+class TestScheduledReconciliation:
+    """B: periodic execution, and the duplicate-job property that motivates it."""
+
+    def test_registration_creates_the_job(self, conn):
+        sched = _FakeScheduler()
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        assert register_reconciliation_jobs(sched, r) is True
+        assert RECONCILE_JOB_ID in sched.jobs
+        name, fn, trigger, kw = sched.jobs[RECONCILE_JOB_ID]
+        assert trigger == "interval" and kw["seconds"] == 60
+
+    def test_registration_is_idempotent(self, conn):
+        sched = _FakeScheduler()
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        assert register_reconciliation_jobs(sched, r) is True
+        assert register_reconciliation_jobs(sched, r) is False
+        assert len(sched.jobs) == 1
+
+    def test_component_restart_produces_no_duplicate_jobs(self, conn):
+        """The reason job ownership sits outside the component."""
+        sched = _FakeScheduler()
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        register_reconciliation_jobs(sched, r)
+        for _ in range(3):
+            r.stop()
+            r.start()
+        assert len(sched.jobs) == 1
+
+    def test_scheduled_job_actually_reconciles(self, conn):
+        sched = _FakeScheduler()
+        client = _FakeReconcileClient()
+        r = Reconciler(conn, client, product_id=84)
+        r.start()
+        register_reconciliation_jobs(sched, r)
+        before = len(client.calls)
+        sched.jobs[RECONCILE_JOB_ID][1]()
+        assert len(client.calls) > before
+        assert r._last_run is not None
+
+    def test_scheduled_job_detects_divergence_and_halts(self, conn):
+        sched = _FakeScheduler()
+        client = _FakeReconcileClient()
+        r = Reconciler(conn, client, product_id=84)
+        r.start()
+        register_reconciliation_jobs(sched, r)
+        assert not r.halted
+        client._p = {"success": True, "result": [{"size": 2}]}
+        sched.jobs[RECONCILE_JOB_ID][1]()
+        assert r.halted
+        assert not r.trading_permitted
+
+    def test_scheduled_job_swallows_exceptions(self, conn):
+        class Exploding(_FakeReconcileClient):
+            def get_live_orders(self, pid):
+                raise RuntimeError("boom")
+
+        r = Reconciler(conn, Exploding(), product_id=84)
+        _make_periodic_reconcile(r)()
+
+
+class TestHaltPropagation:
+    """D: a reconciler HALT must block order submission."""
+
+    def test_halt_provider_blocks_a_perfect_intent(self, conn):
+        client = _FakeReconcileClient(positions={"success": True, "result": [{"size": 3}]})
+        r = Reconciler(conn, client, product_id=84)
+        r.start()
+        assert r.halted
+
+        rm = _risk(halt_provider=r.gate_state)
+        d = rm.validate(_intent(), _account(), now=NOON)
+        assert not d.approved
+        assert "halted" in d.reason and "position mismatch" in d.reason
+
+    def test_clean_reconciler_permits_the_same_intent(self, conn):
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        r.start()
+        rm = _risk(halt_provider=r.gate_state)
+        assert rm.validate(_intent(), _account(), now=NOON).approved
+
+    def test_executor_blocks_and_never_reaches_the_exchange_when_halted(self, conn):
+        client = _FakeReconcileClient(positions={"success": True, "result": [{"size": 3}]})
+        r = Reconciler(conn, client, product_id=84)
+        r.start()
+        ex = TestnetExecutor(conn, _NoNetworkClient(), _risk(halt_provider=r.gate_state))
+        state, decision = ex.submit(_intent(), _account(), now=NOON)
+        assert state is OrderState.BLOCKED
+        assert "halted" in decision.reason
+
+    def test_halt_takes_effect_between_two_validate_calls(self, conn):
+        """Live source, not a value frozen at construction."""
+        client = _FakeReconcileClient()
+        r = Reconciler(conn, client, product_id=84)
+        r.start()
+        rm = _risk(halt_provider=r.gate_state)
+        assert rm.validate(_intent(), _account(), now=NOON).approved
+
+        client._p = {"success": True, "result": [{"size": 1}]}
+        r.reconcile()
+        assert not rm.validate(_intent(), _account(), now=NOON).approved
+
+    def test_unbooted_reconciler_blocks_trading(self, conn):
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        rm = _risk(halt_provider=r.gate_state)
+        d = rm.validate(_intent(), _account(), now=NOON)
+        assert not d.approved and "reconciler not running" in d.reason
+
+    def test_kill_switch_still_outranks_the_halt_provider(self, conn):
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        r.start()
+        rm = _risk(kill_switch_engaged=True, halt_provider=r.gate_state)
+        d = rm.validate(_intent(), _account(), now=NOON)
+        assert not d.approved and "kill switch" in d.reason
+
+    def test_no_provider_preserves_existing_behaviour(self):
+        assert _risk().validate(_intent(), _account(), now=NOON).approved
 
 
 # ---------------------------------------------------------------------------

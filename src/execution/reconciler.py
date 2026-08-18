@@ -77,6 +77,9 @@ class Reconciler:
         self._last_run: datetime | None = None
         self._halted = False
         self._halt_reason = ""
+        self._running = False
+        self._booted = False
+        self._pass_halted = False
 
     # -- state -------------------------------------------------------------
 
@@ -89,14 +92,58 @@ class Reconciler:
         return self._halt_reason
 
     def _halt(self, reason: str) -> None:
+        """Latch a halt.
+
+        Two flags, deliberately: ``_halted`` is STICKY and survives every
+        subsequent pass, restart included -- that is what makes a halt a real
+        safety control rather than a transient warning. ``_pass_halted`` is
+        scoped to the current pass, so a later pass can be judged on its own
+        evidence without the latch making the verdict a foregone conclusion.
+        Without that separation a halted reconciler could never be shown clean
+        again, and the halt could only be cleared by restarting the process.
+        """
         self._halted = True
+        self._pass_halted = True
         self._halt_reason = reason
         log.critical("[reconcile] HALT: %s", reason)
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    @property
+    def booted(self) -> bool:
+        return self._booted
+
+    @property
+    def trading_permitted(self) -> bool:
+        """The single question the risk layer asks.
+
+        Trading requires a reconciler that is started, has completed a boot
+        reconciliation, and is not halted. Every one of those is False by
+        default, so the permissive state is only ever reached deliberately.
+        """
+        return self._running and self._booted and not self._halted
+
+    def gate_state(self) -> tuple[bool, str]:
+        """``(blocked, reason)`` for ``RiskManager(halt_provider=...)``.
+
+        Pure: reads cached state only, never queries the exchange, so the risk
+        manager's network-free contract survives this wiring.
+        """
+        if self._halted:
+            return True, "reconciler halted: " + (self._halt_reason or "unspecified")
+        if not self._running:
+            return True, "reconciler not running"
+        if not self._booted:
+            return True, "boot reconciliation has not run"
+        return False, ""
 
     # -- core --------------------------------------------------------------
 
     def reconcile(self) -> ReconcileResult:
         self._last_run = datetime.now(timezone.utc)
+        self._pass_halted = False
         findings: list[tuple[str, Divergence, str]] = []
 
         live_resp = self._client.get_live_orders(self._product_id)
@@ -180,7 +227,7 @@ class Reconciler:
                              f"exchange={exch_size} local={local_size}"))
             self._halt(f"position mismatch: exchange={exch_size} local={local_size}")
 
-        clean = not self._halted and all(
+        clean = not self._pass_halted and all(
             d in (Divergence.IN_SYNC, Divergence.LOCAL_STALE, Divergence.ORPHAN_LOCAL)
             for _, d, _ in findings
         )
@@ -218,12 +265,70 @@ class Reconciler:
     # -- boot gate ---------------------------------------------------------
 
     def boot_reconcile(self) -> ReconcileResult:
-        """Must run, and be clean, before trading is enabled."""
+        """Must run, and be clean, before trading is enabled.
+
+        A query that raises is treated exactly like a divergence: halt. An
+        exchange we cannot read is an exchange we cannot claim to agree with.
+        """
         log.info("[reconcile] boot reconciliation starting")
-        result = self.reconcile()
+        try:
+            result = self.reconcile()
+        except Exception as exc:
+            reason = f"boot reconciliation failed: {type(exc).__name__}: {exc}"
+            self._halt(reason)
+            result = ReconcileResult(False, reason, ())
+            self._last_result = result
+        self._booted = True
         if not result.clean:
-            log.critical("[reconcile] boot reconciliation NOT clean: %s", result.halt_reason)
+            log.critical("[reconcile] boot reconciliation NOT clean: %s",
+                         result.halt_reason)
         return result
+
+    # -- lifecycle (Supervisor component protocol) --------------------------
+
+    def start(self) -> None:
+        """Start, and boot-reconcile before trading may be permitted.
+
+        Restart-safe in the one direction that matters: a stop()/start() cycle
+        re-runs boot reconciliation but CANNOT clear an existing halt. A halt
+        survives restart by design -- if restarting cleared it, the supervisor's
+        own restart policy would become an automatic halt-bypass.
+
+        Registers nothing. Scheduler jobs are owned by
+        `reconciliation_jobs.register_reconciliation_jobs`, so restarting this
+        component can never duplicate a job.
+        """
+        self._running = True
+        log.info("[reconcile] start (halted=%s)", self._halted)
+        self.boot_reconcile()
+
+    def stop(self) -> None:
+        """Stop. Deliberately does NOT clear the halt latch or the boot flag."""
+        self._running = False
+        log.info("[reconcile] stop (halted=%s)", self._halted)
+
+    # -- operator halt resolution -------------------------------------------
+
+    def clear_halt_if_clean(self) -> bool:
+        """Explicit, operator-initiated halt resolution.
+
+        Runs a fresh reconciliation and clears the latch ONLY if that pass
+        finds nothing wrong. Deliberately NOT called from the scheduled job:
+        automatic self-healing is precisely what an execution stack must not
+        do. A halt is cleared because someone looked, not because time passed.
+        """
+        if not self._halted:
+            return True
+        result = self.reconcile()
+        if result.clean:
+            log.warning("[reconcile] halt cleared by explicit clean reconciliation "
+                        "(was: %s)", self._halt_reason)
+            self._halted = False
+            self._halt_reason = ""
+            return True
+        log.critical("[reconcile] halt NOT cleared; still divergent: %s",
+                     result.halt_reason or "see findings")
+        return False
 
     # -- Supervisor protocol ------------------------------------------------
 

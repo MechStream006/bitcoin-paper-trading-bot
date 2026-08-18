@@ -122,6 +122,7 @@ def main() -> int:
         heartbeat_universe_warn=cfg.HEARTBEAT_UNIVERSE_WARN,
         heartbeat_job_ages=cfg.HEARTBEAT_JOB_AGES,
         metrics_exporter_enabled=cfg.METRICS_EXPORTER_ENABLED,
+        demo_trading_enabled=cfg.DEMO_TRADING_ENABLED,
         metrics_exporter_port=cfg.METRICS_EXPORTER_PORT,
     )
 
