@@ -76,10 +76,13 @@ from typing import Any, Callable, List, Optional, Tuple
 from src.alerts.heartbeat import HeartbeatService
 from src.alerts.rate_limiter import RateLimiter
 from src.alerts.telegram import send_message
-from src.data.storage import get_connection, init_schema
+from src.data.storage import get_connection, init_execution_schema, init_schema
 from src.exchange.delta_client import DeltaClient
 from src.execution.reconciler import Reconciler
 from src.execution.reconciliation_jobs import register_reconciliation_jobs
+from src.execution.testnet_executor import TestnetExecutor
+from src.risk.manager import RiskManager
+from src.risk.state import RiskStateStore
 from src.exchange.ws_manager import WSManager
 from src.expiry.expiry_context import ExpiryContext
 from src.expiry.models import ExpiryConfig
@@ -162,6 +165,7 @@ class Runtime:
         metrics_exporter_enabled: bool = True,
         metrics_exporter_port: int = 9108,
         demo_trading_enabled: bool = False,
+        demo_kill_switch_engaged: bool = True,
         n_strikes: int = 5,
         n_expiries: int = 3,
         snapshot_interval_sec: int = 60,
@@ -189,6 +193,7 @@ class Runtime:
         self._hb_job_ages           = heartbeat_job_ages
         self._metrics_exporter_enabled = metrics_exporter_enabled
         self._demo_trading_enabled = demo_trading_enabled
+        self._demo_kill_switch_engaged = demo_kill_switch_engaged
         self._metrics_exporter_port    = metrics_exporter_port
         self._n_strikes             = n_strikes
         self._n_expiries            = n_expiries
@@ -212,6 +217,10 @@ class Runtime:
         self._conn:             Optional[sqlite3.Connection]  = None
         self._client:           Optional[DeltaClient]         = None
         self._reconciler:       Optional[Reconciler]          = None
+        self._risk_conn:        Optional[sqlite3.Connection]  = None
+        self._risk_state:       Optional[RiskStateStore]      = None
+        self._risk_manager:     Optional[RiskManager]         = None
+        self._executor:         Optional[TestnetExecutor]     = None
         self._market_state:     Optional[MarketState]         = None
         self._ws_manager:       Optional[WSManager]           = None
         self._chain_refresher:  Optional[ChainRefresher]      = None
@@ -460,6 +469,45 @@ class Runtime:
             register_reconciliation_jobs(scheduler, reconciler)
             logger.info("[runtime] reconciliation armed (trading_permitted=%s)",
                         reconciler.trading_permitted)
+
+            # Daily risk state gets its OWN connection. It is the only component
+            # that opens an explicit `BEGIN IMMEDIATE`, and the runtime's shared
+            # connection is used concurrently by the collector -- starting a
+            # transaction on it mid-write would raise "cannot start a
+            # transaction within a transaction". A dedicated handle keeps the
+            # cap accounting isolated from market-data writes.
+            risk_conn = get_connection(self._db_path)
+            init_execution_schema(risk_conn)
+            self._risk_conn = risk_conn
+            risk_state = RiskStateStore(risk_conn)
+
+            risk_manager = RiskManager(
+                kill_switch_engaged=self._demo_kill_switch_engaged,
+                platform="testnet",
+                base_url=self._delta_base_url,
+                halt_provider=reconciler.gate_state,
+                counters_provider=risk_state.counters,
+            )
+            executor = TestnetExecutor(conn, client, risk_manager,
+                                       strategy="manual", risk_state=risk_state)
+            self._risk_state = risk_state
+            self._risk_manager = risk_manager
+            self._executor = executor
+
+            today = risk_state.state()
+            logger.info(
+                "[runtime] risk state wired: day=%s orders_placed=%d "
+                "realised_pnl=%.2f (source=%s)",
+                today.utc_day, today.orders_placed, today.realised_pnl,
+                type(risk_state).__name__)
+            logger.info(
+                "[runtime] risk manager wired: counters_provider=%s halt_provider=%s "
+                "kill_switch_engaged=%s",
+                risk_manager.counters_provider is risk_state.counters,
+                risk_manager.halt_provider is reconciler.gate_state,
+                risk_manager.kill_switch_engaged)
+            logger.info("[runtime] executor wired: risk_state=%s",
+                        executor._risk_state is risk_state)
         else:
             logger.info("[runtime] reconciliation not armed (DEMO_TRADING_ENABLED off)")
         self._reconciler = reconciler
@@ -688,6 +736,14 @@ class Runtime:
             )
 
     def _close_db(self) -> None:
+        if self._risk_conn is not None:
+            try:
+                self._risk_conn.close()
+                logger.info("[runtime] risk-state DB closed")
+            except Exception as exc:
+                logger.error("[runtime] risk-state DB close error: %s", exc)
+            self._risk_conn = None
+
         if self._conn is not None:
             try:
                 self._conn.close()
