@@ -28,7 +28,7 @@ from src.execution.testnet_executor import (
 from src.risk import limits
 from src.risk.manager import (
     AccountSnapshot, OrderIntent, RiskManager, compute_trade_risk_usd,
-    round_trip_fees_usd,
+    required_margin_usd, round_trip_fees_usd,
 )
 from src.strategies import bridge
 
@@ -264,6 +264,86 @@ class TestRiskArithmetic:
 
     def test_one_contract_fits_budget_at_reference_mark(self):
         assert compute_trade_risk_usd(_intent(stop_price=63287.5), MARK) <= limits.MAX_TRADE_RISK_USD
+
+
+class TestMarginArithmetic:
+    """Margin must reflect BOTH of Delta's inputs, not just the percentage one.
+
+    `initial_margin: 0.5` (percent) and `default_leverage: 10` are BOTH published
+    for BTCUSD, and the exchange reserves whichever is larger. Using only the
+    0.5% floor understated the requirement by 20x.
+    """
+
+    # A mark high enough that margin, not MIN_FREE_EQUITY_USD, is the binding
+    # constraint. At $64k the $10 floor dominates ($6.48 required), so the guard
+    # cannot be exercised there.
+    HIGH_MARK = 150_000.0
+    HIGH_NOTIONAL = 150.0                       # 0.001 * 150_000 * 1
+    HIGH_FEES = 0.15                            # 150 * 0.0005 * 2
+
+    def _high_mark_case(self, available):
+        return (
+            _intent(limit_price=self.HIGH_MARK, stop_price=self.HIGH_MARK - 800.0),
+            _account(available_usd=available, mark_price=self.HIGH_MARK),
+        )
+
+    def test_leverage_requirement_exceeds_initial_margin_floor(self):
+        """Case 1: the live BTCUSD spec -- leverage is the binding input."""
+        notional = limits.BTCUSD_CONTRACT_VALUE * MARK
+        floor = notional * limits.BTCUSD_INITIAL_MARGIN_PCT / 100.0
+        leveraged = notional / limits.BTCUSD_DEFAULT_LEVERAGE
+
+        assert leveraged > floor
+        assert required_margin_usd(notional) == pytest.approx(leveraged)
+        assert required_margin_usd(notional) == pytest.approx(20.0 * floor)
+        assert required_margin_usd(notional) == pytest.approx(6.4188, abs=1e-3)
+
+    def test_initial_margin_floor_exceeds_leverage_requirement(self, monkeypatch):
+        """Case 2: a spec where the percentage floor binds instead."""
+        monkeypatch.setattr(limits, "BTCUSD_INITIAL_MARGIN_PCT", 20.0)
+        monkeypatch.setattr(limits, "BTCUSD_DEFAULT_LEVERAGE", 10.0)
+
+        notional = 150.0
+        assert required_margin_usd(notional) == pytest.approx(30.0)   # 20% floor
+        assert required_margin_usd(notional) > notional / 10.0        # not leverage
+
+    def test_fees_are_added_on_top_of_margin(self):
+        """Case 3: available covering margin but not margin+fees is rejected."""
+        margin_only = self.HIGH_NOTIONAL / limits.BTCUSD_DEFAULT_LEVERAGE
+        assert margin_only == pytest.approx(15.0)
+
+        intent, account = self._high_mark_case(margin_only + 0.05)
+        d = _risk().validate(intent, account, now=NOON)
+        assert not d.approved
+        assert "margin + fees" in d.reason
+
+        intent, account = self._high_mark_case(margin_only + self.HIGH_FEES + 0.01)
+        assert _risk().validate(intent, account, now=NOON).approved
+
+    def test_insufficient_available_equity_is_rejected(self):
+        """Case 4: above the free-equity floor, still short of true margin."""
+        intent, account = self._high_mark_case(12.0)
+        assert account.available_usd > limits.MIN_FREE_EQUITY_USD
+
+        d = _risk().validate(intent, account, now=NOON)
+        assert not d.approved
+        assert "below required" in d.reason
+
+    def test_existing_rejection_behaviour_unchanged(self):
+        """Case 5: the fix tightens one guard and disturbs nothing else."""
+        # The live-spec baseline still approves: $200 covers $6.48 comfortably.
+        assert _risk().validate(_intent(), _account(), now=NOON).approved
+
+        # The free-equity floor still fires first, with its own message.
+        d = _risk().validate(_intent(), _account(available_usd=5.0), now=NOON)
+        assert not d.approved
+        assert "below floor" in d.reason
+
+        # Earlier guards still short-circuit ahead of the margin check.
+        assert not _risk(kill_switch_engaged=True).validate(
+            _intent(), _account(available_usd=0.0), now=NOON).approved
+        assert not _risk().validate(
+            _intent(size=2), _account(), now=NOON).approved
 
 
 # ---------------------------------------------------------------------------

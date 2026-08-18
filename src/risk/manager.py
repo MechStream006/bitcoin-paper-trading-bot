@@ -64,6 +64,23 @@ def round_trip_fees_usd(mark_price: float, size: int) -> float:
     return notional * limits.TAKER_FEE_RATE * 2
 
 
+def required_margin_usd(notional: float) -> float:
+    """Margin the exchange will actually reserve for `notional`.
+
+    Delta exposes two inputs and the BINDING one is whichever is larger:
+
+        initial_margin   0.5  -> a PERCENT floor (0.005 as a fraction)
+        default_leverage 10.0 -> notional / 10, i.e. 10% of notional
+
+    Quoting only the 0.5% floor understates the real requirement by 20x at the
+    live BTCUSD spec ($0.32 vs $6.41 per contract at a ~$64,120 mark). Taking
+    the max is what the exchange does, so it is what the equity guard must do.
+    """
+    floor = notional * limits.BTCUSD_INITIAL_MARGIN_PCT / 100.0
+    leveraged = notional / limits.BTCUSD_DEFAULT_LEVERAGE
+    return max(floor, leveraged)
+
+
 def compute_trade_risk_usd(intent: OrderIntent, mark_price: float) -> float:
     """Net risk: adverse move to the stop PLUS round-trip fees.
 
@@ -210,7 +227,7 @@ class RiskManager:
                 f"available ${account.available_usd:.2f} below floor "
                 f"${limits.MIN_FREE_EQUITY_USD:.2f}")
         notional = limits.BTCUSD_CONTRACT_VALUE * account.mark_price * intent.size
-        required = notional * 0.005 + fees          # initial margin 0.5% + fees
+        required = required_margin_usd(notional) + fees
         if account.available_usd < required:
             return Decision.reject(
                 f"available ${account.available_usd:.2f} below required "

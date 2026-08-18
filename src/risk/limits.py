@@ -42,6 +42,18 @@ BTCUSD_PRODUCT_ID = 84
 BTCUSD_TICK_SIZE = 0.1
 BTCUSD_CONTRACT_VALUE = 0.001
 
+# --- margin (Delta India testnet, /v2/products 2026-08-18) -----------------
+# Delta exposes TWO margin inputs and the binding one is whichever is LARGER:
+#
+#   initial_margin    0.5   -> a PERCENT floor, i.e. 0.005 as a fraction
+#   default_leverage  10.0  -> notional / 10 = 10% of notional
+#
+# At the live BTCUSD spec the leverage requirement is 20x the percentage floor
+# ($6.41 vs $0.32 per contract at a ~$64,120 mark), so quoting only the 0.5%
+# floor understates what the exchange actually reserves by that factor.
+BTCUSD_INITIAL_MARGIN_PCT = 0.5     # percent, as Delta reports it
+BTCUSD_DEFAULT_LEVERAGE = 10.0
+
 # --- fees (Delta India testnet, /v2/products 2026-08-18) -------------------
 TAKER_FEE_RATE = 0.0005
 MAKER_FEE_RATE = 0.0002
