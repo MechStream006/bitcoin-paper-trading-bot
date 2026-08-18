@@ -92,3 +92,70 @@ class DeltaClient:
     def get_candles(self, symbol: str, resolution: str, start: int, end: int) -> dict:
         params = {"symbol": symbol, "resolution": resolution, "start": start, "end": end}
         return self._public_get("/v2/history/candles", params=params)
+
+    # --- Private trading endpoints (testnet demo execution stack) ----------
+    #
+    # Thin wrappers over the signing primitives above. They add no retry, no
+    # backoff and no state: an ambiguous outcome must surface to the caller so
+    # the executor can mark the order UNKNOWN and let reconciliation resolve it.
+    # A retry buried here would silently turn one intent into two positions.
+
+    def place_order(
+        self,
+        product_id: int,
+        size: int,
+        side: str,
+        order_type: str = "limit_order",
+        limit_price: str | None = None,
+        client_order_id: str | None = None,
+        time_in_force: str = "gtc",
+        post_only: bool = False,
+    ) -> dict:
+        """POST /v2/orders. `size` is an integer contract count.
+
+        `limit_price` is sent as a STRING: Delta rejects floats for price
+        fields, and a float round-trip can silently break tick alignment.
+        """
+        payload: dict = {
+            "product_id": int(product_id),
+            "size": int(size),
+            "side": side,
+            "order_type": order_type,
+            "time_in_force": time_in_force,
+        }
+        if limit_price is not None:
+            payload["limit_price"] = str(limit_price)
+        if client_order_id:
+            payload["client_order_id"] = client_order_id
+        if post_only:
+            payload["post_only"] = True
+        return self._signed_post("/v2/orders", payload)
+
+    def cancel_order(self, order_id: int, product_id: int) -> dict:
+        """DELETE /v2/orders — routed through a signed DELETE."""
+        return self._signed_delete(
+            "/v2/orders", {"id": int(order_id), "product_id": int(product_id)}
+        )
+
+    def get_live_orders(self, product_id: int | None = None) -> dict:
+        params = {"product_ids": str(product_id)} if product_id else None
+        return self._signed_get("/v2/orders", params)
+
+    def get_fills(self, product_id: int | None = None) -> dict:
+        params = {"product_ids": str(product_id)} if product_id else None
+        return self._signed_get("/v2/fills", params)
+
+    def get_positions(self) -> dict:
+        return self._signed_get("/v2/positions/margined")
+
+    def get_wallet_balances(self) -> dict:
+        return self._signed_get("/v2/wallet/balances")
+
+    def _signed_delete(self, path: str, payload: dict | None = None) -> dict:
+        body = json.dumps(payload) if payload is not None else ""
+        headers = self._signed_headers("DELETE", path, body=body)
+        headers["Content-Type"] = "application/json"
+        url = self.base_url + path
+        r = self.session.delete(url, headers=headers, data=body, timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()

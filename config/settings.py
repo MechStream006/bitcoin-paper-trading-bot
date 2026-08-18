@@ -71,3 +71,14 @@ PLATFORM = os.getenv("PLATFORM", "testnet")
 COLD_ARCHIVE_ROOT = os.getenv("COLD_ARCHIVE_ROOT", str(ROOT / "data" / "cold_archive"))
 ARCHIVE_HASH_SPEC_VERSION = int(os.getenv("ARCHIVE_HASH_SPEC_VERSION", "1"))
 ARCHIVE_WRITER_ENABLED = os.getenv("ARCHIVE_WRITER_ENABLED", "0") not in ("0", "false", "False", "")
+
+# --- Testnet demo execution stack (B2/B3/B4) -------------------------------
+# BOTH default to OFF. Demo trading is opt-in per-process, and the strategy is
+# opt-in again on top of that, so neither a deploy nor a restart can begin
+# trading by itself.
+DEMO_TRADING_ENABLED = os.getenv("DEMO_TRADING_ENABLED", "0") not in ("0", "false", "False", "")
+DEMO_STRATEGY_ENABLED = os.getenv("DEMO_STRATEGY_ENABLED", "0") not in ("0", "false", "False", "")
+
+# Kill switch. Engaged (blocking) unless explicitly disengaged -- the safe
+# default is the one that refuses to trade.
+DEMO_KILL_SWITCH_ENGAGED = os.getenv("DEMO_KILL_SWITCH", "1") not in ("0", "false", "False", "")

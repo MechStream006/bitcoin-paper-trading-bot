@@ -385,3 +385,167 @@ def upsert_instrument(conn: sqlite3.Connection, product: dict, fetched_at: str) 
             fetched_at,
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Testnet demo execution stack (B2/B3/B4)
+#
+# Additive only: CREATE TABLE / CREATE INDEX IF NOT EXISTS. No existing table is
+# altered and no existing row is rewritten, so this is safe to apply to a live
+# btc_trading.db with the collector running.
+# ---------------------------------------------------------------------------
+
+EXECUTION_SCHEMA = """
+-- DB-level idempotency for order submission. A deterministic client_order_id
+-- plus this constraint means a duplicate submit cannot create a second order
+-- even if every guard above it failed.
+-- Not a partial index: SQLite treats NULLs as distinct in a UNIQUE index, so
+-- rows without a client_order_id are still permitted, while a partial index
+-- (WHERE client_order_id IS NOT NULL) cannot serve as an ON CONFLICT target.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_order_id
+    ON orders(client_order_id);
+
+-- Per-UTC-day risk counters. Persisted so a restart cannot reset the daily
+-- loss cap or the order budget -- otherwise a crash loop becomes a way to
+-- trade past the limit.
+CREATE TABLE IF NOT EXISTS risk_state (
+    utc_day        TEXT PRIMARY KEY,
+    realised_pnl   REAL NOT NULL DEFAULT 0.0,
+    orders_placed  INTEGER NOT NULL DEFAULT 0,
+    halted         INTEGER NOT NULL DEFAULT 0,
+    halt_reason    TEXT,
+    updated_ts     TEXT NOT NULL
+);
+"""
+
+
+def init_execution_schema(conn: sqlite3.Connection) -> None:
+    """Idempotent, additive schema-ensure for the execution stack."""
+    conn.executescript(EXECUTION_SCHEMA)
+    conn.commit()
+
+
+def instrument_exists(conn: sqlite3.Connection, instrument_id: int) -> bool:
+    """Explicit existence check.
+
+    `orders.instrument_id` carries a FOREIGN KEY, but foreign_keys is a
+    PER-CONNECTION pragma and is observed OFF on the live database, so the
+    constraint is decorative there. The executor therefore verifies presence
+    itself rather than trusting a constraint that may not be enforced.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM instruments WHERE id = ?", (int(instrument_id),)
+    ).fetchone()
+    return row is not None
+
+
+def write_order(
+    conn: sqlite3.Connection,
+    *,
+    client_order_id: str,
+    instrument_id: int,
+    side: str,
+    order_type: str,
+    quantity: float,
+    price: float | None,
+    status: str,
+    strategy: str | None,
+    placed_ts: str,
+    delta_order_id: str | None = None,
+    filled_ts: str | None = None,
+) -> None:
+    """Write-ahead order row. Called BEFORE the API call and again after.
+
+    INSERT ... ON CONFLICT(client_order_id) DO UPDATE keeps one row per intent
+    for its whole lifecycle, so a crash between the two writes still leaves a
+    durable record for the reconciler to find.
+    """
+    conn.execute(
+        """
+        INSERT INTO orders
+            (client_order_id, delta_order_id, instrument_id, side, order_type,
+             quantity, price, status, strategy, placed_ts, filled_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(client_order_id) DO UPDATE SET
+            delta_order_id = COALESCE(excluded.delta_order_id, orders.delta_order_id),
+            status         = excluded.status,
+            price          = COALESCE(excluded.price, orders.price),
+            filled_ts      = COALESCE(excluded.filled_ts, orders.filled_ts)
+        """,
+        (client_order_id, delta_order_id, int(instrument_id), side, order_type,
+         float(quantity), price, status, strategy, placed_ts, filled_ts),
+    )
+    conn.commit()
+
+
+def get_order(conn: sqlite3.Connection, client_order_id: str) -> dict | None:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM orders WHERE client_order_id = ?", (client_order_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_open_orders(conn: sqlite3.Connection, open_states: tuple[str, ...]) -> list[dict]:
+    conn.row_factory = sqlite3.Row
+    marks = ",".join("?" for _ in open_states)
+    rows = conn.execute(
+        f"SELECT * FROM orders WHERE status IN ({marks}) ORDER BY id", open_states
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def write_trade(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int,
+    instrument_id: int,
+    side: str,
+    quantity: float,
+    price: float,
+    fee: float | None,
+    ts: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO trades (order_id, instrument_id, side, quantity, price, fee, ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (int(order_id), int(instrument_id), side, float(quantity), float(price), fee, ts),
+    )
+    conn.commit()
+
+
+def get_risk_state(conn: sqlite3.Connection, utc_day: str) -> dict:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM risk_state WHERE utc_day = ?", (utc_day,)).fetchone()
+    if row:
+        return dict(row)
+    return {"utc_day": utc_day, "realised_pnl": 0.0, "orders_placed": 0,
+            "halted": 0, "halt_reason": None, "updated_ts": None}
+
+
+def write_risk_state(
+    conn: sqlite3.Connection,
+    *,
+    utc_day: str,
+    realised_pnl: float,
+    orders_placed: int,
+    halted: int,
+    halt_reason: str | None,
+    updated_ts: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO risk_state (utc_day, realised_pnl, orders_placed, halted, halt_reason, updated_ts)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(utc_day) DO UPDATE SET
+            realised_pnl  = excluded.realised_pnl,
+            orders_placed = excluded.orders_placed,
+            halted        = excluded.halted,
+            halt_reason   = COALESCE(excluded.halt_reason, risk_state.halt_reason),
+            updated_ts    = excluded.updated_ts
+        """,
+        (utc_day, float(realised_pnl), int(orders_placed), int(halted), halt_reason, updated_ts),
+    )
+    conn.commit()
