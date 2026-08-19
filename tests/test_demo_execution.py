@@ -2581,6 +2581,241 @@ class TestNativeStopClientParamsUnchanged:
             assert plain[k] == withstop[k]
 
 
+class TestRejectionObservability:
+    """5C.2 fix 1: a 4xx body must be captured durably.
+
+    Gate 5C was diagnosed from client_order_id filename patterns because the
+    executor read only the status code and discarded the response.
+    """
+
+    def _http_error(self, status, body, json_payload=None):
+        resp = requests.Response()
+        resp.status_code = status
+        resp._content = body.encode() if isinstance(body, str) else body
+        return requests.exceptions.HTTPError(response=resp)
+
+    def test_4xx_body_is_persisted(self, conn):
+        err = self._http_error(400, '{"error":{"code":"invalid_client_order_id"},'
+                                    '"success":false}')
+        ex = TestnetExecutor(conn, _FakeClient(place=err), _risk())
+        state, _ = ex.submit(_intent(client_order_id="rej-1"), _account(), now=NOON)
+        assert state is OrderState.REJECTED
+
+        rec = storage.get_order_rejection(conn, "rej-1")
+        assert rec is not None
+        assert rec["http_status"] == 400
+        assert rec["error_code"] == "invalid_client_order_id"
+        assert "invalid_client_order_id" in rec["body"]
+
+    def test_definitive_4xx_remains_rejected_not_unknown(self, conn):
+        for status in (400, 401, 403, 404, 422):
+            err = self._http_error(status, '{"error":{"code":"nope"}}')
+            ex = TestnetExecutor(conn, _FakeClient(place=err), _risk())
+            state, _ = ex.submit(_intent(client_order_id=f"rej-{status}"),
+                                 _account(), now=NOON)
+            assert state is OrderState.REJECTED, status
+
+    def test_5xx_remains_unknown_and_records_nothing(self, conn):
+        err = self._http_error(503, "gateway down")
+        ex = TestnetExecutor(conn, _FakeClient(place=err), _risk())
+        state, _ = ex.submit(_intent(client_order_id="amb-1"), _account(), now=NOON)
+        assert state is OrderState.UNKNOWN
+        assert storage.get_order_rejection(conn, "amb-1") is None
+
+    def test_unparseable_body_still_captured(self, conn):
+        err = self._http_error(400, "<html>Bad Request</html>")
+        ex = TestnetExecutor(conn, _FakeClient(place=err), _risk())
+        state, _ = ex.submit(_intent(client_order_id="rej-html"), _account(), now=NOON)
+        assert state is OrderState.REJECTED
+        rec = storage.get_order_rejection(conn, "rej-html")
+        assert rec["error_code"] is None
+        assert "Bad Request" in rec["body"]
+
+    def test_body_is_truncated(self, conn):
+        from src.execution.testnet_executor import MAX_REJECTION_BODY
+        err = self._http_error(400, "x" * (MAX_REJECTION_BODY * 3))
+        ex = TestnetExecutor(conn, _FakeClient(place=err), _risk())
+        ex.submit(_intent(client_order_id="rej-big"), _account(), now=NOON)
+        rec = storage.get_order_rejection(conn, "rej-big")
+        assert len(rec["body"]) <= MAX_REJECTION_BODY
+
+    def test_recording_failure_never_masks_the_rejection(self, conn):
+        """A broken audit table must not turn REJECTED into an exception."""
+        conn.execute("DROP TABLE order_rejections")
+        conn.commit()
+        err = self._http_error(400, '{"error":{"code":"x"}}')
+        ex = TestnetExecutor(conn, _FakeClient(place=err), _risk())
+        state, _ = ex.submit(_intent(client_order_id="rej-nodb"), _account(), now=NOON)
+        assert state is OrderState.REJECTED
+
+    def test_no_credentials_can_reach_the_record(self, conn):
+        """Only the exchange RESPONSE is read -- never our request or headers.
+
+        Checked against EXECUTABLE code with docstrings and comments stripped:
+        the prose legitimately names the things it promises not to touch, so a
+        raw substring scan false-positives on its own documentation.
+        """
+        import ast, inspect
+        from src.execution import testnet_executor as te
+
+        tree = ast.parse(inspect.getsource(te._rejection_detail))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Module))                     and ast.get_docstring(node):
+                node.body = node.body[1:]
+        code = ast.unparse(tree)
+        for forbidden in ("api_key", "api_secret", "signature", "headers",
+                          ".request", "session"):
+            assert forbidden not in code, f"{forbidden} appears in executable code"
+        # It must read the response and nothing else.
+        assert "response" in code
+
+    def test_rejection_record_is_idempotent(self, conn):
+        err = self._http_error(400, '{"error":{"code":"dup"}}')
+        for _ in range(3):
+            TestnetExecutor(conn, _FakeClient(place=err), _risk()).submit(
+                _intent(client_order_id="rej-idem"), _account(), now=NOON)
+        n = conn.execute("SELECT COUNT(*) FROM order_rejections "
+                         "WHERE client_order_id='rej-idem'").fetchone()[0]
+        assert n == 1
+
+
+class TestExecutableEntryPrice:
+    """5C.2 fix 3: the entry price must actually cross the book.
+
+    Measured in Gate 5C: mark 64400.35771707 -> limit 64400.4 against bid
+    64400.0, i.e. ABOVE the bid, so the sell would have rested, not filled.
+    """
+
+    GATE5C_BID = 64400.0
+    GATE5C_ASK = 64401.0
+    GATE5C_MARK = 64400.35771707
+
+    def test_reproduces_the_gate_5c_non_marketable_price(self):
+        """The old rule, shown to be wrong on the real book."""
+        tick = limits.BTCUSD_TICK_SIZE
+        old = round(round(self.GATE5C_MARK / tick) * tick, 1)
+        assert old == 64400.4
+        assert old > self.GATE5C_BID, "old sell price did NOT cross the bid"
+
+    def test_sell_crosses_the_bid_on_the_gate_5c_book(self):
+        px = bridge.executable_limit_price(-1, self.GATE5C_BID, self.GATE5C_ASK)
+        assert px <= self.GATE5C_BID
+        assert px == 64400.0
+
+    def test_buy_crosses_the_ask_on_the_gate_5c_book(self):
+        px = bridge.executable_limit_price(1, self.GATE5C_BID, self.GATE5C_ASK)
+        assert px >= self.GATE5C_ASK
+        assert px == 64401.0
+
+    @pytest.mark.parametrize("bid,ask", [
+        (64400.0, 64401.0), (63000.03, 63000.07), (59999.95, 60000.05),
+        (70000.0, 70000.1), (64187.44, 64187.56), (1.0, 1.1),
+    ])
+    def test_marketability_holds_for_every_book(self, bid, ask):
+        buy = bridge.executable_limit_price(1, bid, ask)
+        sell = bridge.executable_limit_price(-1, bid, ask)
+        assert buy >= ask, f"buy {buy} does not reach ask {ask}"
+        assert sell <= bid, f"sell {sell} does not reach bid {bid}"
+
+    @pytest.mark.parametrize("bid,ask", [
+        (64400.0, 64401.0), (63000.03, 63000.07), (59999.95, 60000.05),
+        (64187.44, 64187.56),
+    ])
+    def test_prices_are_tick_aligned(self, bid, ask):
+        tick = limits.BTCUSD_TICK_SIZE
+        for d in (1, -1):
+            px = bridge.executable_limit_price(d, bid, ask)
+            assert abs(round(px / tick) * tick - px) < 1e-9, px
+
+    def test_rounding_goes_away_from_the_touch(self):
+        """Nearest-rounding is what produced the Gate 5C failure."""
+        bid, ask = 64400.04, 64400.96          # nearest would give 64400.0/64401.0
+        assert bridge.executable_limit_price(-1, bid, ask) <= bid   # floor -> 64400.0
+        assert bridge.executable_limit_price(1, bid, ask) >= ask    # ceil  -> 64401.0
+
+    def test_invalid_books_are_refused(self):
+        for bid, ask in [(0.0, 100.0), (100.0, 0.0), (-1.0, 100.0), (101.0, 100.0)]:
+            with pytest.raises(ValueError):
+                bridge.executable_limit_price(1, bid, ask)
+
+    def test_build_intent_requires_the_book(self):
+        with pytest.raises(TypeError):
+            bridge.build_intent(direction=1, mark_price=MARK, enabled=True)
+
+    def test_stop_is_recomputed_from_the_executable_price(self):
+        it = bridge.build_intent(direction=-1, mark_price=self.GATE5C_MARK,
+                                 enabled=True, best_bid=self.GATE5C_BID,
+                                 best_ask=self.GATE5C_ASK, utc_day="2026-08-19")
+        assert it.limit_price == 64400.0
+        assert it.stop_price > it.limit_price
+        expected = it.limit_price * (1 + bridge.STOP_DISTANCE_PCT / 100)
+        assert abs(it.stop_price - expected) < 0.11
+
+    def test_long_stop_sits_below_the_executable_price(self):
+        it = bridge.build_intent(direction=1, mark_price=self.GATE5C_MARK,
+                                 enabled=True, best_bid=self.GATE5C_BID,
+                                 best_ask=self.GATE5C_ASK, utc_day="2026-08-19")
+        assert it.limit_price == 64401.0
+        assert it.stop_price < it.limit_price
+
+    def test_corrected_intent_still_passes_every_risk_guard(self):
+        for d in (1, -1):
+            it = bridge.build_intent(direction=d, mark_price=self.GATE5C_MARK,
+                                     enabled=True, best_bid=self.GATE5C_BID,
+                                     best_ask=self.GATE5C_ASK, utc_day="2026-08-19")
+            dec = _risk().validate(it, _account(mark_price=self.GATE5C_MARK), now=NOON)
+            assert dec.approved, f"direction={d}: {dec.reason}"
+
+    def test_risk_budget_after_correction(self):
+        it = bridge.build_intent(direction=-1, mark_price=self.GATE5C_MARK,
+                                 enabled=True, best_bid=self.GATE5C_BID,
+                                 best_ask=self.GATE5C_ASK, utc_day="2026-08-19")
+        risk = compute_trade_risk_usd(it, self.GATE5C_MARK)
+        assert risk <= limits.MAX_TRADE_RISK_USD, risk
+        assert risk > 0.9, "stop distance collapsed"
+
+    def test_deviation_guard_still_applies_to_the_entry(self):
+        """Fix 3 must not bypass any guard."""
+        it = bridge.build_intent(direction=1, mark_price=self.GATE5C_MARK,
+                                 enabled=True, best_bid=self.GATE5C_BID,
+                                 best_ask=self.GATE5C_ASK, utc_day="2026-08-19")
+        far = _risk().validate(it, _account(mark_price=self.GATE5C_MARK * 1.5),
+                               now=NOON)
+        assert not far.approved and "from mark" in far.reason
+
+    # A deliberately WIDE spread: with the Gate 5C book the mark and the
+    # executable price differ by 0.36, too little to distinguish "derived from
+    # the book" from "derived from the mark". These separate them.
+    WIDE_BID, WIDE_ASK, WIDE_MARK = 64000.0, 64500.0, 64250.0
+
+    def test_build_intent_price_is_marketable_against_the_book(self):
+        """The Gate 5C defect, asserted at the level that produced it."""
+        sell = bridge.build_intent(direction=-1, mark_price=self.WIDE_MARK,
+                                   enabled=True, best_bid=self.WIDE_BID,
+                                   best_ask=self.WIDE_ASK, utc_day="2026-08-19")
+        assert sell.limit_price <= self.WIDE_BID, "sell would rest, not fill"
+        buy = bridge.build_intent(direction=1, mark_price=self.WIDE_MARK,
+                                  enabled=True, best_bid=self.WIDE_BID,
+                                  best_ask=self.WIDE_ASK, utc_day="2026-08-19")
+        assert buy.limit_price >= self.WIDE_ASK, "buy would rest, not fill"
+
+    def test_stop_derives_from_the_executable_price_not_the_mark(self):
+        it = bridge.build_intent(direction=-1, mark_price=self.WIDE_MARK,
+                                 enabled=True, best_bid=self.WIDE_BID,
+                                 best_ask=self.WIDE_ASK, utc_day="2026-08-19")
+        from_limit = it.limit_price * (1 + bridge.STOP_DISTANCE_PCT / 100)
+        from_mark = self.WIDE_MARK * (1 + bridge.STOP_DISTANCE_PCT / 100)
+        assert abs(it.stop_price - from_limit) < 0.2, it.stop_price
+        assert abs(it.stop_price - from_mark) > 100,             "stop was derived from the mark, not the executed price"
+
+    def test_intent_kind_remains_entry(self):
+        it = bridge.build_intent(direction=1, mark_price=self.GATE5C_MARK,
+                                 enabled=True, best_bid=self.GATE5C_BID,
+                                 best_ask=self.GATE5C_ASK)
+        assert it.intent_kind == "entry"
+        assert it.size == limits.MAX_CONTRACTS_PER_ORDER
+
+
 # ---------------------------------------------------------------------------
 # 2 — State machine
 # ---------------------------------------------------------------------------
@@ -2869,10 +3104,12 @@ class TestRecovery:
 class TestStrategyBridge:
     def test_disabled_by_default_raises(self):
         with pytest.raises(bridge.StrategyDisabled):
-            bridge.build_intent(direction=1, mark_price=MARK, enabled=False)
+            bridge.build_intent(direction=1, mark_price=MARK, enabled=False,
+                                best_bid=MARK - 0.5, best_ask=MARK + 0.5)
 
     def test_enabled_builds_tick_aligned_single_contract_intent(self):
         it = bridge.build_intent(direction=1, mark_price=MARK, enabled=True,
+                                 best_bid=MARK - 0.5, best_ask=MARK + 0.5,
                                  utc_day="2026-08-18")
         assert it.size == 1 and it.symbol == "BTCUSD" and it.product_id == 84
         assert it.order_type == "limit_order" and it.side == "buy"
@@ -2881,12 +3118,14 @@ class TestStrategyBridge:
 
     def test_short_direction(self):
         it = bridge.build_intent(direction=-1, mark_price=MARK, enabled=True,
+                                 best_bid=MARK - 0.5, best_ask=MARK + 0.5,
                                  utc_day="2026-08-18")
         assert it.side == "sell" and it.stop_price > it.limit_price
 
     def test_invalid_direction_rejected(self):
         with pytest.raises(ValueError):
-            bridge.build_intent(direction=0, mark_price=MARK, enabled=True)
+            bridge.build_intent(direction=0, mark_price=MARK, enabled=True,
+                                best_bid=MARK - 0.5, best_ask=MARK + 0.5)
 
     def test_missing_db_returns_none_not_raise(self, tmp_path):
         assert bridge.read_latest_signal(str(tmp_path / "nope.db")) is None

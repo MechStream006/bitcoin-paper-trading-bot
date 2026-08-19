@@ -40,6 +40,39 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: Response bodies are truncated before storage. Delta's error payloads are
+#: small; a cap stops a pathological HTML error page filling the database.
+MAX_REJECTION_BODY = 2000
+
+
+def _rejection_detail(exc) -> tuple[str | None, str | None]:
+    """(error_code, truncated_body) from a 4xx. Never raises, never logs secrets.
+
+    Only the exchange's RESPONSE is read -- never our request, headers or
+    signature -- so no credential can reach the log or the database.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None, None
+    body = None
+    try:
+        body = (resp.text or "")[:MAX_REJECTION_BODY]
+    except Exception:
+        body = None
+    code = None
+    try:
+        payload = resp.json()
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                code = err.get("code")
+            elif isinstance(err, str):
+                code = err
+    except Exception:
+        pass
+    return code, body
+
+
 class TestnetExecutor:
     # Not a pytest test class -- the name begins with "Test" only because the
     # venue is Delta *testnet*. Without this, pytest tries to collect it.
@@ -152,9 +185,20 @@ class TestnetExecutor:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status is not None and 400 <= status < 500:
                 # A definitive refusal: the exchange saw it and said no.
+                # The BODY is the only thing that says why. Capture it durably:
+                # journald rotates, and Gate 5C had to be diagnosed from
+                # client_order_id filename patterns because this was discarded.
+                code, body = _rejection_detail(exc)
                 state = transition(state, OrderState.REJECTED)
                 self._persist(intent, state)
-                log.error("[exec] REJECTED %s: HTTP %s", intent.client_order_id, status)
+                try:
+                    storage.write_order_rejection(
+                        self._conn, client_order_id=intent.client_order_id,
+                        ts=_now_iso(), http_status=status, error_code=code, body=body)
+                except Exception as rec_exc:            # never mask the rejection
+                    log.error("[exec] could not record rejection detail: %s", rec_exc)
+                log.error("[exec] REJECTED %s: HTTP %s code=%s body=%s",
+                          intent.client_order_id, status, code, body)
                 return state, decision
             # 5xx or unknown status: the order may exist. Ambiguous.
             state = transition(state, OrderState.UNKNOWN)

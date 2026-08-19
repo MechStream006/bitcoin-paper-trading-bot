@@ -435,6 +435,17 @@ CREATE TABLE IF NOT EXISTS order_fills (
 CREATE INDEX IF NOT EXISTS idx_order_fills_coid
     ON order_fills(client_order_id);
 
+-- Durable record of exchange refusals. A 4xx body is the only thing that
+-- explains WHY an order was refused, and journald rotates -- Gate 5C was
+-- diagnosed from client_order_id filename patterns because this did not exist.
+CREATE TABLE IF NOT EXISTS order_rejections (
+    client_order_id TEXT PRIMARY KEY,
+    ts              TEXT NOT NULL,
+    http_status     INTEGER,
+    error_code      TEXT,
+    body            TEXT
+);
+
 CREATE TABLE IF NOT EXISTS risk_day_events (
     utc_day  TEXT NOT NULL,
     kind     TEXT NOT NULL CHECK (kind IN ('order', 'pnl')),
@@ -541,6 +552,30 @@ def write_trade(
         (int(order_id), int(instrument_id), side, float(quantity), float(price), fee, ts),
     )
     conn.commit()
+
+
+def write_order_rejection(conn: sqlite3.Connection, *, client_order_id: str,
+                          ts: str, http_status: int | None,
+                          error_code: str | None, body: str | None) -> None:
+    """Record an exchange refusal. Idempotent per client_order_id.
+
+    `body` is truncated by the caller. Nothing here is ever a credential: the
+    payload recorded is the exchange's RESPONSE, never our request or headers.
+    """
+    conn.execute(
+        "INSERT OR REPLACE INTO order_rejections "
+        "(client_order_id, ts, http_status, error_code, body) VALUES (?, ?, ?, ?, ?)",
+        (client_order_id, ts, http_status, error_code, body),
+    )
+    conn.commit()
+
+
+def get_order_rejection(conn: sqlite3.Connection, client_order_id: str) -> dict | None:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM order_rejections WHERE client_order_id = ?",
+        (client_order_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def get_risk_state(conn: sqlite3.Connection, utc_day: str) -> dict:

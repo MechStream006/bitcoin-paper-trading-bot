@@ -16,6 +16,7 @@ Deliberately does NOT: recompute signals, touch the research pipeline, write to
 from __future__ import annotations
 
 import logging
+import math
 import pathlib
 import sqlite3
 from datetime import datetime, timezone
@@ -106,18 +107,47 @@ def latest_direction(forward_db_path: str, signal_id: str = SIGNAL_ID) -> int | 
                 pass
 
 
+def executable_limit_price(direction: int, best_bid: float, best_ask: float) -> float:
+    """A limit price that actually crosses, tick-aligned in the safe direction.
+
+    `round(mark / tick) * tick` -- the previous rule -- is NOT marketable. Gate
+    5C measured it: a sell built from mark 64400.36 produced 64400.4 against a
+    bid of 64400.0, so it sat ABOVE the bid and would have rested rather than
+    filled. The intent that gate existed to test could never have produced a
+    fill.
+
+    To cross, a BUY must reach the ask and a SELL must reach the bid. Rounding
+    must therefore go AWAY from the touch (ceil for a buy, floor for a sell):
+    rounding to nearest can land a buy below the ask or a sell above the bid,
+    which is exactly the failure being fixed.
+    """
+    tick = limits.BTCUSD_TICK_SIZE
+    if best_bid <= 0 or best_ask <= 0:
+        raise ValueError(f"invalid book: bid={best_bid} ask={best_ask}")
+    if best_ask < best_bid:
+        raise ValueError(f"crossed book: bid={best_bid} ask={best_ask}")
+    if direction == 1:
+        return round(math.ceil(best_ask / tick) * tick, 1)
+    return round(math.floor(best_bid / tick) * tick, 1)
+
+
 def build_intent(
     *,
     direction: int,
     mark_price: float,
     enabled: bool,
+    best_bid: float,
+    best_ask: float,
     utc_day: str | None = None,
     seq: int = 1,
 ) -> OrderIntent:
-    """Turn a direction into a single-contract limit intent.
+    """Turn a direction into a single-contract, genuinely marketable limit intent.
 
     Raises StrategyDisabled unless explicitly enabled -- the guard lives here so
     a caller cannot forget it.
+
+    best_bid/best_ask are REQUIRED: the price must be built from the book, not
+    from the mark, or the order does not cross (see executable_limit_price).
     """
     if not enabled:
         raise StrategyDisabled(
@@ -131,7 +161,9 @@ def build_intent(
     side = "buy" if direction == 1 else "sell"
 
     tick = limits.BTCUSD_TICK_SIZE
-    limit_price = round(round(mark_price / tick) * tick, 1)
+    limit_price = executable_limit_price(direction, best_bid, best_ask)
+    # The stop is recomputed from the EXECUTED price, not the mark, so the risk
+    # budget describes the trade that will actually exist.
     offset = limit_price * STOP_DISTANCE_PCT / 100
     stop_price = round(
         round((limit_price - offset if direction == 1 else limit_price + offset) / tick) * tick,
