@@ -60,6 +60,15 @@ PROTECTIVE_STOP_DISTANCE_PCT = 1.4
 # actually fill instead of resting unfilled through the move it exists to escape.
 PROTECTIVE_STOP_LIMIT_SLIPPAGE_PCT = 0.15
 
+# Hard bound on how far a protective order's LIMIT may sit from its own
+# TRIGGER. A protective stop is deliberately away from market -- that is its
+# function -- so it is checked against its trigger rather than against mark
+# (see RiskManager.validate guard 10). This is what keeps the exemption
+# narrow: the limit must stay adjacent to the trigger, so a "protective"
+# order cannot carry an arbitrary price. Design uses 0.15%; the bound leaves
+# headroom for tick rounding without becoming permissive.
+MAX_PROTECTIVE_LIMIT_OFFSET_PCT = 0.5
+
 # --- margin (Delta India testnet, /v2/products 2026-08-18) -----------------
 # Delta exposes TWO margin inputs and the binding one is whichever is LARGER:
 #

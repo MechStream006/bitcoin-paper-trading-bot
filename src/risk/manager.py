@@ -167,8 +167,24 @@ class RiskManager:
     ) -> Decision:
         now = now or datetime.now(timezone.utc)
 
-        # 1. kill switch -- first, unconditional
-        if self.kill_switch_engaged:
+        # 0. intent kind, resolved first so the guards below can distinguish
+        # opening exposure from reducing it. An unknown kind is rejected here
+        # and can therefore never be treated as protective.
+        if intent.intent_kind not in ("entry", "exit", "protective"):
+            return Decision.reject(f"unknown intent_kind {intent.intent_kind!r}")
+        is_protective = intent.intent_kind == "protective"
+        is_exit = intent.intent_kind in ("exit", "protective")
+
+        # 1. kill switch -- first, and unconditional for anything that OPENS or
+        # discretionarily closes exposure.
+        #
+        # A protective stop is exempt, and only a protective stop. The kill
+        # switch exists to stop the system taking on risk; if it also prevented
+        # protecting risk already held, engaging it would convert a bounded
+        # position into an unbounded one. That is the opposite of what an
+        # operator means by "stop". Normal exits stay blocked: an exit is a
+        # discretionary decision to trade, and the operator has said no.
+        if self.kill_switch_engaged and not is_protective:
             return Decision.reject("kill switch engaged")
 
         # 2. halt latch -- static flag first, then the live source. Either
@@ -211,12 +227,6 @@ class RiskManager:
                 and intent.size > limits.MAX_CONTRACTS_PER_ORDER):
             return Decision.reject(
                 f"size {intent.size} exceeds max {limits.MAX_CONTRACTS_PER_ORDER}")
-
-        if intent.intent_kind not in ("entry", "exit", "protective"):
-            return Decision.reject(f"unknown intent_kind {intent.intent_kind!r}")
-        is_protective = intent.intent_kind == "protective"
-        # Both reducing kinds share the exposure proof and the cap exemption.
-        is_exit = intent.intent_kind in ("exit", "protective")
 
         # 5b. an exit must PROVABLY reduce exposure. These checks are what
         # earn it the cap exemption below; without them "exit" would just be a
@@ -276,11 +286,27 @@ class RiskManager:
             return Decision.reject("mark price unavailable")
         if intent.limit_price <= 0:
             return Decision.reject("limit price must be positive")
-        deviation = abs(intent.limit_price - account.mark_price) / account.mark_price * 100
-        if deviation > limits.MAX_PRICE_DEVIATION_PCT:
-            return Decision.reject(
-                f"limit price {deviation:.2f}% from mark, "
-                f"max {limits.MAX_PRICE_DEVIATION_PCT}%")
+        if is_protective:
+            # A protective stop is SUPPOSED to sit away from market -- that is
+            # its entire function -- so measuring it against mark rejects
+            # exactly the stop you need after an adverse move. The limit is
+            # bounded against its own TRIGGER instead, which is what keeps a
+            # triggered stop filling near where it triggered. This cannot
+            # become an entry or a flip: side, size and reduce_only are proved
+            # against the open position in guard 5b above.
+            if intent.stop_price is None or intent.stop_price <= 0:
+                return Decision.reject("protective order requires a stop trigger")
+            offset = abs(intent.limit_price - intent.stop_price) / intent.stop_price * 100
+            if offset > limits.MAX_PROTECTIVE_LIMIT_OFFSET_PCT:
+                return Decision.reject(
+                    f"protective limit {offset:.2f}% from its trigger, "
+                    f"max {limits.MAX_PROTECTIVE_LIMIT_OFFSET_PCT}%")
+        else:
+            deviation = abs(intent.limit_price - account.mark_price) / account.mark_price * 100
+            if deviation > limits.MAX_PRICE_DEVIATION_PCT:
+                return Decision.reject(
+                    f"limit price {deviation:.2f}% from mark, "
+                    f"max {limits.MAX_PRICE_DEVIATION_PCT}%")
         if not _tick_aligned(intent.limit_price, limits.BTCUSD_TICK_SIZE):
             return Decision.reject(
                 f"limit price {intent.limit_price} not aligned to tick "

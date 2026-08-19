@@ -2078,10 +2078,13 @@ class TestProtectiveRiskSemantics:
         blocked = _risk().validate(_intent(), _account(), now=dead)
         assert not blocked.approved and "dead zone" in blocked.reason
 
-    def test_protective_still_blocked_by_the_kill_switch(self, conn):
+    def test_protective_permitted_while_the_kill_switch_is_engaged(self, conn):
+        # Corrected at Gate 5C.1: a kill switch that forbids protecting an
+        # open position converts bounded exposure into unbounded exposure.
+        # See TestKillSwitchProtectiveException for the full distinction.
         d = _risk(kill_switch_engaged=True).validate(
             self._protective(), _account(position_size=1), now=NOON)
-        assert not d.approved and "kill switch" in d.reason
+        assert d.approved, d.reason
 
     def test_protective_cannot_increase_exposure(self, conn):
         d = _risk().validate(self._protective(side="buy"),
@@ -2310,6 +2313,272 @@ class TestRuntimeExecutorWiring:
         r.set_executor(ex)
         r.reconcile()
         assert set(client.calls) <= {"get_live_orders", "get_fills", "get_positions"}
+
+
+class TestKillSwitchProtectiveException:
+    """5C.1 fix 1: the kill switch must not make a held position unprotectable.
+
+    The distinction is deliberately three-way and must stay that way:
+    entries blocked, discretionary exits blocked, protective stops permitted.
+    """
+
+    def _protective(self, **kw):
+        base = dict(client_order_id="stop-p1-q1", side="sell",
+                    intent_kind="protective", limit_price=63100.0,
+                    stop_price=63163.0)
+        base.update(kw)
+        return _intent(**base)
+
+    def _rm(self):
+        return _risk(kill_switch_engaged=True)
+
+    def test_entry_remains_blocked_by_the_kill_switch(self):
+        d = self._rm().validate(_intent(), _account(), now=NOON)
+        assert not d.approved and "kill switch" in d.reason
+
+    def test_discretionary_exit_remains_blocked_by_the_kill_switch(self):
+        """An exit is still a decision to trade; the operator said no."""
+        d = self._rm().validate(
+            _intent(side="sell", intent_kind="exit"),
+            _account(position_size=1), now=NOON)
+        assert not d.approved and "kill switch" in d.reason
+
+    def test_protective_stop_is_permitted_while_the_kill_switch_is_engaged(self):
+        d = self._rm().validate(self._protective(), _account(position_size=1),
+                                now=NOON)
+        assert d.approved, d.reason
+
+    def test_the_exemption_is_exactly_one_intent_kind(self):
+        rm = self._rm()
+        outcomes = {
+            kind: rm.validate(
+                _intent(side="sell", intent_kind=kind,
+                        limit_price=63100.0, stop_price=63163.0),
+                _account(position_size=1), now=NOON).approved
+            for kind in ("entry", "exit", "protective")
+        }
+        assert outcomes == {"entry": False, "exit": False, "protective": True}
+
+    def test_unknown_intent_kind_cannot_borrow_the_exemption(self):
+        for kind in ("protective ", "PROTECTIVE", "prot", "", "sneaky"):
+            d = self._rm().validate(
+                _intent(side="sell", intent_kind=kind), _account(position_size=1),
+                now=NOON)
+            assert not d.approved, kind
+            assert "unknown intent_kind" in d.reason, kind
+
+    def test_protective_exemption_does_not_bypass_the_halt_latch(self):
+        rm = _risk(kill_switch_engaged=True, halted=True,
+                   halt_reason="position mismatch")
+        d = rm.validate(self._protective(), _account(position_size=1), now=NOON)
+        assert not d.approved and "halted" in d.reason
+
+    def test_protective_exemption_does_not_bypass_the_exposure_proof(self):
+        """The whole point: it still cannot open or increase exposure."""
+        rm = self._rm()
+        assert not rm.validate(self._protective(),
+                               _account(position_size=0), now=NOON).approved
+        assert not rm.validate(self._protective(side="buy"),
+                               _account(position_size=1), now=NOON).approved
+        assert not rm.validate(self._protective(size=3),
+                               _account(position_size=1), now=NOON).approved
+
+    def test_protective_exemption_does_not_bypass_symbol_or_product(self):
+        rm = self._rm()
+        assert not rm.validate(self._protective(symbol="ETHUSD"),
+                               _account(position_size=1), now=NOON).approved
+        assert not rm.validate(self._protective(product_id=99),
+                               _account(position_size=1), now=NOON).approved
+
+    def test_protective_exemption_does_not_bypass_tick_alignment(self):
+        d = self._rm().validate(self._protective(limit_price=63100.03),
+                                _account(position_size=1), now=NOON)
+        assert not d.approved and "tick" in d.reason
+
+    def test_protective_exemption_does_not_bypass_order_type(self):
+        d = self._rm().validate(self._protective(order_type="market_order"),
+                                _account(position_size=1), now=NOON)
+        assert not d.approved and "order_type" in d.reason
+
+
+class TestProtectiveDeviationAfterMarketMoves:
+    """5C.1 fix 2: an adverse move must not make protection unplaceable.
+
+    Gate 5C preflight measured the real failure: with mark at 64300 and a stop
+    built from a 63163 entry, the stop-limit was 2.02% from mark and the
+    entry-oriented guard rejected it -- exactly when it was needed.
+    """
+
+    ENTRY = 64000.0
+
+    def _protective_at(self, position_size=1, **kw):
+        trigger, limit = protection.stop_prices(self.ENTRY, position_size)
+        base = dict(client_order_id="stop-p1-q1",
+                    side="sell" if position_size > 0 else "buy",
+                    intent_kind="protective", limit_price=limit,
+                    stop_price=trigger)
+        base.update(kw)
+        return _intent(**base)
+
+    def test_reproduces_the_gate_5c_rejection_shape_for_an_entry(self):
+        """The same price is still rejected for an ENTRY -- guard intact."""
+        trigger, limit = protection.stop_prices(self.ENTRY, 1)
+        d = _risk().validate(
+            _intent(limit_price=limit, stop_price=trigger),
+            _account(mark_price=64300.0), now=NOON)
+        assert not d.approved and "from mark" in d.reason
+
+    def test_protective_survives_an_adverse_move(self):
+        d = _risk().validate(self._protective_at(),
+                             _account(position_size=1, mark_price=64300.0),
+                             now=NOON)
+        assert d.approved, d.reason
+
+    @pytest.mark.parametrize("mark", [60000.0, 62000.0, 64000.0, 66000.0, 70000.0])
+    def test_protective_is_placeable_at_any_mark(self, mark):
+        """Protection must never become unplaceable because price moved."""
+        d = _risk().validate(self._protective_at(),
+                             _account(position_size=1, mark_price=mark), now=NOON)
+        assert d.approved, f"mark={mark}: {d.reason}"
+
+    def test_short_protection_survives_an_adverse_move(self):
+        d = _risk().validate(self._protective_at(position_size=-1),
+                             _account(position_size=-1, mark_price=63000.0),
+                             now=NOON)
+        assert d.approved, d.reason
+
+    def test_limit_far_from_its_trigger_is_still_rejected(self):
+        """The exemption is bounded: limit must stay adjacent to the trigger."""
+        trigger, _ = protection.stop_prices(self.ENTRY, 1)
+        far = round(round(trigger * 0.98 / 0.1) * 0.1, 1)     # 2% away
+        d = _risk().validate(self._protective_at(limit_price=far),
+                             _account(position_size=1, mark_price=64000.0),
+                             now=NOON)
+        assert not d.approved
+        assert "from its trigger" in d.reason
+
+    def test_protective_without_a_trigger_is_rejected(self):
+        d = _risk().validate(self._protective_at(stop_price=None),
+                             _account(position_size=1, mark_price=64000.0),
+                             now=NOON)
+        assert not d.approved
+
+    def test_designed_offset_is_well_inside_the_bound(self):
+        trigger, limit = protection.stop_prices(self.ENTRY, 1)
+        offset = abs(limit - trigger) / trigger * 100
+        assert offset < limits.MAX_PROTECTIVE_LIMIT_OFFSET_PCT
+        assert offset == pytest.approx(limits.PROTECTIVE_STOP_LIMIT_SLIPPAGE_PCT,
+                                       abs=0.02)
+
+    def test_entry_deviation_guard_is_unchanged(self):
+        """Fix 2 must not loosen anything for entries."""
+        assert _risk().validate(_intent(limit_price=64187.5),
+                                _account(mark_price=64187.5), now=NOON).approved
+        d = _risk().validate(_intent(limit_price=70000.0),
+                             _account(mark_price=64187.5), now=NOON)
+        assert not d.approved and "from mark" in d.reason
+
+    def test_exit_still_uses_the_mark_deviation_guard(self):
+        """Only protective orders change basis; discretionary exits do not."""
+        d = _risk().validate(
+            _intent(side="sell", intent_kind="exit", limit_price=70000.0),
+            _account(position_size=1, mark_price=64187.5), now=NOON)
+        assert not d.approved and "from mark" in d.reason
+
+
+class TestProtectiveExemptionCannotBecomeAnEntry:
+    """Adversarial: the two exemptions together must not open a back door."""
+
+    def _rm(self):
+        return _risk(kill_switch_engaged=True)
+
+    def test_cannot_open_a_position_while_flat(self):
+        for side in ("buy", "sell"):
+            d = self._rm().validate(
+                _intent(side=side, intent_kind="protective",
+                        limit_price=63100.0, stop_price=63163.0),
+                _account(position_size=0), now=NOON)
+            assert not d.approved and "no open position" in d.reason
+
+    def test_cannot_flip_a_long_into_a_short(self):
+        d = self._rm().validate(
+            _intent(side="sell", size=2, intent_kind="protective",
+                    limit_price=63100.0, stop_price=63163.0),
+            _account(position_size=1), now=NOON)
+        assert not d.approved and "exceeds open position" in d.reason
+
+    def test_cannot_add_to_a_position(self):
+        d = self._rm().validate(
+            _intent(side="buy", intent_kind="protective",
+                    limit_price=63100.0, stop_price=63163.0),
+            _account(position_size=1), now=NOON)
+        assert not d.approved and "would increase exposure" in d.reason
+
+    def test_cannot_place_an_arbitrary_price_under_the_protective_label(self):
+        d = self._rm().validate(
+            _intent(side="sell", intent_kind="protective",
+                    limit_price=1000.0, stop_price=63163.0),
+            _account(position_size=1), now=NOON)
+        assert not d.approved and "from its trigger" in d.reason
+
+    def test_executor_sends_reduce_only_for_every_protective_order(self, conn):
+        captured = {}
+
+        class Capturing(_FakeClient):
+            def place_order(self, **kw):
+                captured.update(kw)
+                return {"success": True, "result": {"id": 21}}
+
+        ex = TestnetExecutor(conn, Capturing(), _risk(kill_switch_engaged=True))
+        state, decision = ex.submit(
+            _intent(client_order_id="stop-p1-q1", side="sell",
+                    intent_kind="protective", limit_price=63100.0,
+                    stop_price=63163.0),
+            _account(position_size=1), now=NOON)
+        assert state is OrderState.ACKED, decision.reason
+        assert captured["reduce_only"] is True
+        assert captured["stop_order_type"] == "stop_loss_order"
+        assert captured["stop_trigger_method"] == "mark_price"
+
+    def test_protective_order_still_consumes_no_daily_slot(self, conn):
+        store = RiskStateStore(conn)
+        client = _FakeClient(place={"success": True, "result": {"id": 22}})
+        ex = TestnetExecutor(conn, client,
+                             _risk(kill_switch_engaged=True,
+                                   counters_provider=lambda: store.counters(NOON)),
+                             risk_state=store)
+        ex.submit(_intent(client_order_id="stop-p1-q1", side="sell",
+                          intent_kind="protective", limit_price=63100.0,
+                          stop_price=63163.0),
+                  _account(position_size=1), now=NOON)
+        assert store.state(NOON).orders_placed == 0
+
+
+class TestNativeStopClientParamsUnchanged:
+    """Requirement 4: the stop parameters remain additive."""
+
+    def test_payload_is_identical_when_stop_params_are_absent(self):
+        from unittest.mock import patch
+        from src.exchange.delta_client import DeltaClient
+        c = DeltaClient("https://x", "k", "s")
+
+        plain, withstop = {}, {}
+        with patch.object(DeltaClient, "_signed_post",
+                          lambda self, path, payload: plain.update(payload) or {}):
+            c.place_order(product_id=84, size=1, side="buy",
+                          limit_price="100.0", client_order_id="t")
+        with patch.object(DeltaClient, "_signed_post",
+                          lambda self, path, payload: withstop.update(payload) or {}):
+            c.place_order(product_id=84, size=1, side="buy", limit_price="100.0",
+                          client_order_id="t", stop_order_type="stop_loss_order",
+                          stop_price="90.0", stop_trigger_method="mark_price")
+
+        assert set(plain) == {"product_id", "size", "side", "order_type",
+                              "time_in_force", "limit_price", "client_order_id"}
+        assert set(withstop) - set(plain) == {"stop_order_type", "stop_price",
+                                              "stop_trigger_method"}
+        for k in plain:
+            assert plain[k] == withstop[k]
 
 
 # ---------------------------------------------------------------------------
