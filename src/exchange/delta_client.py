@@ -111,6 +111,9 @@ class DeltaClient:
         time_in_force: str = "gtc",
         post_only: bool = False,
         reduce_only: bool = False,
+        stop_order_type: str | None = None,
+        stop_price: str | None = None,
+        stop_trigger_method: str | None = None,
     ) -> dict:
         """POST /v2/orders. `size` is an integer contract count.
 
@@ -134,6 +137,17 @@ class DeltaClient:
             # Exchange-side guarantee that an exit cannot open or increase a
             # position if the position moved between validation and arrival.
             payload["reduce_only"] = True
+        # Protective-stop fields. Purely additive: when all three are None the
+        # payload is byte-identical to before, so existing order behaviour is
+        # unchanged. Delta's acceptance of these is NOT yet established -- the
+        # order model returned by GET /v2/orders carries them, which proves the
+        # schema has them, not that POST honours them.
+        if stop_order_type is not None:
+            payload["stop_order_type"] = stop_order_type
+        if stop_price is not None:
+            payload["stop_price"] = str(stop_price)
+        if stop_trigger_method is not None:
+            payload["stop_trigger_method"] = stop_trigger_method
         return self._signed_post("/v2/orders", payload)
 
     def cancel_order(self, order_id: int, product_id: int) -> dict:

@@ -32,9 +32,12 @@ class OrderIntent:
     stop_price: float | None     # required to bound risk
     strategy: str
     #: "entry" opens or increases exposure and consumes a daily order slot.
-    #: "exit" may only reduce exposure and is exempt from the ORDER-COUNT and
-    #: DAILY-LOSS caps -- a risk limit that traps you inside a position is not
-    #: a risk limit. Every other guard still applies. See RiskManager.validate.
+    #: "exit" and "protective" may only REDUCE exposure and are exempt from the
+    #: ORDER-COUNT and DAILY-LOSS caps -- a risk limit that traps you inside a
+    #: position is not a risk limit. "protective" is additionally exempt from
+    #: the settlement dead zone, because a position must not sit unprotected
+    #: across a window merely because new entries are paused there.
+    #: Every other guard still applies. See RiskManager.validate.
     intent_kind: str = "entry"
 
 
@@ -198,13 +201,22 @@ class RiskManager:
             return Decision.reject(f"invalid side {intent.side!r}")
         if intent.size < 1:
             return Decision.reject(f"size {intent.size} below minimum 1")
-        if intent.size > limits.MAX_CONTRACTS_PER_ORDER:
+        # The per-order size cap governs how much exposure may be OPENED. It
+        # must not apply to reducing orders: a position of N contracts needs a
+        # stop of N, and capping that at the entry size would make a larger
+        # position permanently unprotectable -- the cap would create exactly
+        # the exposure it exists to limit. Reducing orders are bounded instead
+        # by |position_size|, checked below, which is strictly tighter.
+        if (intent.intent_kind == "entry"
+                and intent.size > limits.MAX_CONTRACTS_PER_ORDER):
             return Decision.reject(
                 f"size {intent.size} exceeds max {limits.MAX_CONTRACTS_PER_ORDER}")
 
-        is_exit = intent.intent_kind == "exit"
-        if intent.intent_kind not in ("entry", "exit"):
+        if intent.intent_kind not in ("entry", "exit", "protective"):
             return Decision.reject(f"unknown intent_kind {intent.intent_kind!r}")
+        is_protective = intent.intent_kind == "protective"
+        # Both reducing kinds share the exposure proof and the cap exemption.
+        is_exit = intent.intent_kind in ("exit", "protective")
 
         # 5b. an exit must PROVABLY reduce exposure. These checks are what
         # earn it the cap exemption below; without them "exit" would just be a
@@ -253,8 +265,10 @@ class RiskManager:
                 f"daily loss {realised_pnl:.2f} at or beyond cap "
                 f"-{limits.MAX_DAILY_LOSS_USD:.2f}")
 
-        # 9. settlement dead zone (CLAUDE.md section 14)
-        if _in_settlement_window(now):
+        # 9. settlement dead zone (CLAUDE.md section 14). A protective stop is
+        # exempt: refusing to protect an open position during the window would
+        # make the dead zone the most dangerous part of the day.
+        if not is_protective and _in_settlement_window(now):
             return Decision.reject("inside settlement dead zone 11:58-12:06 UTC")
 
         # 10. price sanity
@@ -286,7 +300,16 @@ class RiskManager:
                 f"risk ${risk:.4f} exceeds per-trade budget "
                 f"${limits.MAX_TRADE_RISK_USD:.2f}", risk)
 
-        # 12. equity floor
+        # 12. equity floor / margin -- ENTRIES ONLY.
+        #
+        # A reduce-only order reserves NO margin: measured on probe order
+        # 2169420335, which rested with order_margin=0 while flat. Requiring
+        # free equity before a position may be protected or closed would make
+        # a drawdown -- exactly when equity is scarce -- the moment protection
+        # becomes impossible. Reducing exposure can never require funding it.
+        if is_exit:
+            return Decision.approve(risk, fees)
+
         if account.available_usd < limits.MIN_FREE_EQUITY_USD:
             return Decision.reject(
                 f"available ${account.available_usd:.2f} below floor "

@@ -22,6 +22,7 @@ from src.execution.order_state import (
     is_open, is_terminal, transition,
 )
 from src.execution import fills
+from src.execution import protection
 from src.execution.reconciler import Divergence, Reconciler
 from src.execution.reconciliation_jobs import (
     RECONCILE_JOB_ID, _make_periodic_reconcile, register_reconciliation_jobs,
@@ -118,6 +119,14 @@ class _FakeReconcileClient(_FakeClient):
     @_p.setter
     def _p(self, value):
         self._positions = value
+
+    @property
+    def _f(self):
+        return self._fills
+
+    @_f.setter
+    def _f(self, value):
+        self._fills = value
 
 
 @pytest.fixture
@@ -1496,7 +1505,9 @@ class TestReconciliationAfterFill:
         """The ordering property: no spurious halt on a genuine fill."""
         client = _FakeReconcileClient(
             fills={"success": True, "result": [_fill("f1", "buy")]},
+            orders={"success": True, "result": [_stop_order()]},
             positions={"success": True, "result": [{"size": 1}]})
+        _local_stop_row(conn)
         r = Reconciler(conn, client, product_id=84)
         result = r.reconcile()
         assert not r.halted, r.halt_reason
@@ -1525,7 +1536,9 @@ class TestReconciliationAfterFill:
     def test_repeated_passes_converge_and_do_not_double_count(self, conn):
         client = _FakeReconcileClient(
             fills={"success": True, "result": [_fill("f1", "buy")]},
+            orders={"success": True, "result": [_stop_order()]},
             positions={"success": True, "result": [{"size": 1}]})
+        _local_stop_row(conn)
         r = Reconciler(conn, client, product_id=84)
         for _ in range(5):
             r.reconcile()
@@ -1642,6 +1655,524 @@ class TestFillPersistenceSafety:
         """Pure function of the payload it is handed."""
         fills.ingest_fills(conn, [_fill("f1", "buy")], risk_state=None)
         assert fills.position_size(conn) == 1
+
+
+def _local_stop_row(conn, coid="stop-p1-q1", size=1, side="sell",
+                    status="acked", delta_order_id="5001"):
+    """Mirror of the local row the executor always writes when it places a stop.
+
+    Without it the stop is, correctly, an ORPHAN exchange order -- the
+    reconciler is right to halt on an exchange order it has no record of.
+    """
+    storage.write_order(conn, client_order_id=coid, instrument_id=84, side=side,
+                        order_type="limit_order", quantity=float(size),
+                        price=60997.0, status=status, strategy="protection",
+                        placed_ts="2026-08-19T05:00:00+00:00",
+                        delta_order_id=delta_order_id)
+    conn.commit()
+
+
+def _stop_order(size=1, side="sell", oid=5001, coid="stop-p1-q1",
+                state="pending", reduce_only=True):
+    """A live native protective stop as Delta returns it (probe 2169420335)."""
+    return {"id": oid, "client_order_id": coid, "product_id": 84, "side": side,
+            "size": size, "unfilled_size": size, "state": state,
+            "limit_price": "60997", "stop_price": "61061.3",
+            "stop_order_type": "stop_loss_order",
+            "stop_trigger_method": "mark_price", "reduce_only": reduce_only}
+
+
+class _StopCapturingClient(_FakeReconcileClient):
+    """Records protective placements and lets a test refuse them."""
+
+    def __init__(self, *a, place_result=None, place_exc=None, **kw):
+        super().__init__(*a, **kw)
+        self.placed = []
+        self.cancelled = []
+        self._place_result = place_result or {"success": True, "result": {"id": 7001}}
+        self._place_exc = place_exc
+
+    def place_order(self, **kw):
+        self.placed.append(kw)
+        if self._place_exc:
+            raise self._place_exc
+        if not self._place_result.get("success"):
+            return self._place_result
+        # A real exchange LISTS an order it acknowledged. Without this the
+        # reconciler would correctly adopt the local row as cancelled (acked
+        # but absent from the book) and re-place -- a thrash caused by the
+        # double, not by the code under test.
+        oid = (self._place_result.get("result") or {}).get("id", 7001)
+        listed = dict(_stop_order(
+            size=kw.get("size", 1), side=kw.get("side", "sell"), oid=oid,
+            coid=kw.get("client_order_id"),
+            reduce_only=bool(kw.get("reduce_only"))))
+        if not kw.get("stop_order_type"):
+            listed["stop_order_type"] = None
+        self._o = {"success": True,
+                   "result": list(self._o.get("result") or []) + [listed]}
+        return self._place_result
+
+    def cancel_order(self, order_id, product_id):
+        self.cancelled.append(order_id)
+        self._o = {"success": True,
+                   "result": [o for o in (self._o.get("result") or [])
+                              if str(o.get("id")) != str(order_id)]}
+        return {"success": True, "result": {}}
+
+
+class TestProtectionStateModel:
+    """The invariant, derived rather than stored."""
+
+    def test_flat_with_no_stop_is_flat(self, conn):
+        st = protection.evaluate(conn, [])
+        assert st.state is protection.ProtectionState.FLAT
+        assert st.is_safe
+
+    def test_exposed_with_no_stop_is_unprotected(self, conn):
+        fills.ingest_fills(conn, [_fill("f1", "buy")])
+        st = protection.evaluate(conn, [])
+        assert st.state is protection.ProtectionState.UNPROTECTED
+        assert not st.is_safe
+        assert st.position_size == 1
+
+    def test_exposed_with_correct_stop_is_protected(self, conn):
+        fills.ingest_fills(conn, [_fill("f1", "buy")])
+        st = protection.evaluate(conn, [_stop_order(size=1, side="sell")])
+        assert st.state is protection.ProtectionState.PROTECTED
+        assert st.is_safe
+
+    def test_stop_of_the_wrong_size_is_stale(self, conn):
+        fills.ingest_fills(conn, [_fill("f1", "buy", size=2)])
+        st = protection.evaluate(conn, [_stop_order(size=1, side="sell")])
+        assert st.state is protection.ProtectionState.STALE
+        assert not st.is_safe
+
+    def test_stop_on_the_wrong_side_is_stale_not_protected(self, conn):
+        fills.ingest_fills(conn, [_fill("f1", "buy")])
+        st = protection.evaluate(conn, [_stop_order(size=1, side="buy")])
+        assert st.state is protection.ProtectionState.STALE
+
+    def test_stop_without_reduce_only_does_not_count_as_protection(self, conn):
+        fills.ingest_fills(conn, [_fill("f1", "buy")])
+        st = protection.evaluate(conn, [_stop_order(reduce_only=False)])
+        assert st.state is protection.ProtectionState.STALE
+
+    def test_stop_while_flat_is_orphaned(self, conn):
+        st = protection.evaluate(conn, [_stop_order()])
+        assert st.state is protection.ProtectionState.ORPHANED
+        assert not st.is_safe
+
+    def test_non_stop_orders_are_ignored_by_protection(self, conn):
+        fills.ingest_fills(conn, [_fill("f1", "buy")])
+        plain = {"id": 1, "side": "sell", "size": 1, "state": "open",
+                 "stop_order_type": None, "reduce_only": True}
+        assert protection.evaluate(conn, [plain]).state is \
+            protection.ProtectionState.UNPROTECTED
+
+    def test_cancelled_stop_is_not_live(self, conn):
+        fills.ingest_fills(conn, [_fill("f1", "buy")])
+        st = protection.evaluate(conn, [_stop_order(state="cancelled")])
+        assert st.state is protection.ProtectionState.UNPROTECTED
+
+    def test_short_position_needs_a_buy_stop(self, conn):
+        fills.ingest_fills(conn, [_fill("s1", "sell")])
+        assert protection.evaluate(conn, [_stop_order(side="buy")]).state is \
+            protection.ProtectionState.PROTECTED
+        assert protection.evaluate(conn, [_stop_order(side="sell")]).state is \
+            protection.ProtectionState.STALE
+
+    def test_malformed_stop_payload_fails_closed(self, conn):
+        fills.ingest_fills(conn, [_fill("f1", "buy")])
+        for bad in ([{"stop_order_type": "stop_loss_order", "state": "pending",
+                      "side": "sell", "size": "abc", "reduce_only": True}],
+                    ["<html>"], [None]):
+            st = protection.evaluate(conn, bad)
+            assert not st.is_safe, f"{bad} was treated as protection"
+
+
+class TestProtectivePricing:
+    def test_long_stop_sits_below_entry(self):
+        trigger, limit = protection.stop_prices(64000.0, +1)
+        assert trigger < 64000.0 and limit < trigger
+
+    def test_short_stop_sits_above_entry(self):
+        trigger, limit = protection.stop_prices(64000.0, -1)
+        assert trigger > 64000.0 and limit > trigger
+
+    def test_distance_matches_the_configured_percentage(self):
+        trigger, _ = protection.stop_prices(64000.0, +1)
+        assert abs((1 - trigger / 64000.0) * 100
+                   - limits.PROTECTIVE_STOP_DISTANCE_PCT) < 0.01
+
+    def test_prices_are_tick_aligned(self):
+        for size in (+1, -1):
+            for px in (64000.0, 63187.37, 70123.45):
+                for v in protection.stop_prices(px, size):
+                    assert abs(round(v / 0.1) * 0.1 - v) < 1e-9
+
+
+class TestProtectiveCoidIdempotency:
+    def test_coid_is_deterministic(self):
+        assert protection.protective_coid(7, 1) == protection.protective_coid(7, 1)
+
+    def test_coid_encodes_position_and_quantity(self):
+        assert protection.protective_coid(7, 1) == "stop-p7-q1"
+        assert protection.protective_coid(7, 2) != protection.protective_coid(7, 1)
+        assert protection.protective_coid(8, 1) != protection.protective_coid(7, 1)
+
+    def test_sign_does_not_change_the_id(self):
+        assert protection.protective_coid(7, -2) == protection.protective_coid(7, 2)
+
+    def test_already_placed_detects_a_submitted_stop(self, conn):
+        assert protection.already_placed(conn, "stop-p1-q1") is False
+        storage.write_order(conn, client_order_id="stop-p1-q1", instrument_id=84,
+                            side="sell", order_type="limit_order", quantity=1.0,
+                            price=60997.0, status="acked", strategy="protection",
+                            placed_ts="2026-08-19T05:00:00+00:00")
+        conn.commit()
+        assert protection.already_placed(conn, "stop-p1-q1") is True
+
+    def test_blocked_stop_is_not_treated_as_placed(self, conn):
+        storage.write_order(conn, client_order_id="stop-p1-q1", instrument_id=84,
+                            side="sell", order_type="limit_order", quantity=1.0,
+                            price=60997.0, status="blocked", strategy="protection",
+                            placed_ts="2026-08-19T05:00:00+00:00")
+        conn.commit()
+        assert protection.already_placed(conn, "stop-p1-q1") is False
+
+
+class TestProtectionThroughReconciliation:
+    """End-to-end: the reconciler must establish or halt."""
+
+    def _executor(self, conn, client, store=None):
+        rm = _risk(counters_provider=(lambda: store.counters(NOON)) if store else None)
+        return TestnetExecutor(conn, client, rm, strategy="protection",
+                               risk_state=store)
+
+    def test_entry_fill_creates_a_protective_stop(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy", price=64000.0)]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84,
+                       executor=self._executor(conn, client))
+        r.reconcile()
+        assert len(client.placed) == 1, client.placed
+        sent = client.placed[0]
+        assert sent["side"] == "sell" and sent["size"] == 1
+        assert sent["reduce_only"] is True
+        assert sent["stop_order_type"] == "stop_loss_order"
+        assert sent["stop_trigger_method"] == "mark_price"
+        assert float(sent["stop_price"]) < 64000.0
+
+    def test_stop_uses_actual_filled_quantity_not_intended(self, conn):
+        """A 1-lot fill of a 2-lot intent must be protected for 1, not 2."""
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy", size=1)]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84,
+                       executor=self._executor(conn, client))
+        r.reconcile()
+        assert client.placed[0]["size"] == 1
+
+    def test_partial_fill_growth_resizes_protection(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy", size=1)]},
+            positions={"success": True, "result": [{"size": 1}]})
+        ex = self._executor(conn, client)
+        r = Reconciler(conn, client, product_id=84, executor=ex)
+        r.reconcile()
+        first = client.placed[0]["client_order_id"]
+
+        client._f = {"success": True, "result": [_fill("f1", "buy", size=1),
+                                                 _fill("f2", "buy", size=1)]}
+        client._o = {"success": True, "result": [_stop_order(size=1, coid=first)]}
+        client._p = {"success": True, "result": [{"size": 2}]}
+        r.reconcile()
+        assert len(client.placed) == 2
+        assert client.placed[1]["size"] == 2
+        assert client.placed[1]["client_order_id"] != first
+        assert client.cancelled, "stale stop was not cancelled before replacement"
+
+    def test_repeated_reconciliation_does_not_duplicate_the_stop(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        ex = self._executor(conn, client)
+        r = Reconciler(conn, client, product_id=84, executor=ex)
+        r.reconcile()
+        placed_after_first = len(client.placed)
+        client._o = {"success": True, "result": [
+            _stop_order(coid=client.placed[0]["client_order_id"])]}
+        for _ in range(5):
+            r.reconcile()
+        assert len(client.placed) == placed_after_first == 1
+
+    def test_no_duplicate_when_the_local_row_exists_but_exchange_lags(self, conn):
+        """already_placed() is the guard for the submit->listed window."""
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84,
+                       executor=self._executor(conn, client))
+        r.reconcile()
+        coid = client.placed[0]["client_order_id"]
+        assert protection.already_placed(conn, coid)
+        # Simulate the exchange briefly not listing it: the local row must
+        # still prevent a second placement within the same pass.
+        st = protection.evaluate(conn, [])
+        protection.ensure(conn, self._executor(conn, client), client, st,
+                          mark_price=64000.0)
+        assert len(client.placed) == 1
+
+    def test_unprotected_position_halts(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84, executor=None)
+        result = r.reconcile()
+        assert r.halted and not result.clean
+        assert "unprotected" in r.halt_reason
+
+    def test_stop_rejected_leaves_position_unprotected_and_halts(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]},
+            place_result={"success": False, "error": {"code": "nope"}})
+        r = Reconciler(conn, client, product_id=84,
+                       executor=self._executor(conn, client))
+        result = r.reconcile()
+        assert r.halted and not result.clean
+
+    def test_stop_timeout_is_not_protection(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]},
+            place_exc=requests.exceptions.Timeout("t"))
+        r = Reconciler(conn, client, product_id=84,
+                       executor=self._executor(conn, client))
+        result = r.reconcile()
+        assert r.halted and not result.clean
+        assert "unprotected" in r.halt_reason
+
+    def test_stop_cancelled_while_exposed_halts(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            orders={"success": True, "result": [_stop_order(state="cancelled")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        _local_stop_row(conn, status="cancelled")
+        r = Reconciler(conn, client, product_id=84, executor=None)
+        assert r.reconcile().clean is False
+        assert r.halted
+
+    def test_protected_position_does_not_halt(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            orders={"success": True, "result": [_stop_order()]},
+            positions={"success": True, "result": [{"size": 1}]})
+        _local_stop_row(conn)
+        r = Reconciler(conn, client, product_id=84, executor=None)
+        result = r.reconcile()
+        assert not r.halted, r.halt_reason
+        assert result.clean
+        assert r.protection.state is protection.ProtectionState.PROTECTED
+
+    def test_full_exit_cancels_the_orphaned_stop(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy"),
+                                               _fill("x1", "sell", price=64500.0)]},
+            orders={"success": True, "result": [_stop_order(oid=9001)]},
+            positions={"success": True, "result": []})
+        _local_stop_row(conn, delta_order_id="9001")
+        r = Reconciler(conn, client, product_id=84,
+                       executor=self._executor(conn, client))
+        r.reconcile()
+        assert 9001 in client.cancelled, "orphaned stop left live while flat"
+        assert fills.position_size(conn) == 0
+
+    def test_flat_and_no_stop_is_clean(self, conn):
+        client = _StopCapturingClient()
+        r = Reconciler(conn, client, product_id=84, executor=None)
+        result = r.reconcile()
+        assert result.clean and not r.halted
+        assert r.protection.state is protection.ProtectionState.FLAT
+
+    def test_stop_fill_closes_the_position_and_clears_protection(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [
+                _fill("f1", "buy", price=64000.0),
+                _fill("s1", "sell", price=63100.0, coid="stop-p1-q1")]},
+            positions={"success": True, "result": []})
+        r = Reconciler(conn, client, product_id=84,
+                       executor=self._executor(conn, client))
+        result = r.reconcile()
+        assert fills.position_size(conn) == 0
+        assert fills.open_position(conn) is None
+        assert r.protection.state is protection.ProtectionState.FLAT
+        assert result.clean and not r.halted
+
+    def test_ensure_never_reports_protected_without_an_ack(self, conn):
+        """ensure() called directly must not claim success on a non-ACK.
+
+        The reconciler re-derives from the exchange afterwards, so this check
+        is defence in depth -- but any other caller of ensure() would be
+        trusting its return value, and it must never lie.
+        """
+        fills.ingest_fills(conn, [_fill("f1", "buy")])
+        client = _StopCapturingClient(
+            place_result={"success": False, "error": {"code": "refused"}})
+        ex = self._executor(conn, client)
+        st = protection.evaluate(conn, [])
+        assert st.state is protection.ProtectionState.UNPROTECTED
+        after = protection.ensure(conn, ex, client, st, mark_price=64000.0)
+        assert after.state is not protection.ProtectionState.PROTECTED
+        assert not after.is_safe
+
+    def test_ensure_reports_protected_only_on_a_real_ack(self, conn):
+        fills.ingest_fills(conn, [_fill("f1", "buy")])
+        client = _StopCapturingClient()
+        ex = self._executor(conn, client)
+        st = protection.evaluate(conn, [])
+        after = protection.ensure(conn, ex, client, st, mark_price=64000.0)
+        assert after.state is protection.ProtectionState.PROTECTED
+
+    def test_protection_can_be_disabled_for_a_read_only_reconciler(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84, executor=None,
+                       enforce_protection=False)
+        assert r.reconcile().clean
+        assert not r.halted
+
+
+class TestProtectiveRiskSemantics:
+    """Requirement 14: protection must never be blocked by the entry caps."""
+
+    def _protective(self, **kw):
+        base = dict(client_order_id="stop-p1-q1", side="sell", intent_kind="protective",
+                    limit_price=63100.0, stop_price=63163.0)
+        base.update(kw)
+        return _intent(**base)
+
+    def test_protective_permitted_when_the_order_cap_is_exhausted(self, conn):
+        store = RiskStateStore(conn)
+        store.record_order_placed("a", now=NOON)
+        store.record_order_placed("b", now=NOON)
+        rm = _risk(counters_provider=lambda: store.counters(NOON))
+        d = rm.validate(self._protective(), _account(position_size=1), now=NOON)
+        assert d.approved, d.reason
+
+    def test_protective_permitted_when_the_loss_cap_is_breached(self, conn):
+        store = RiskStateStore(conn)
+        store.record_realised_pnl("big", -99.0, now=NOON)
+        rm = _risk(counters_provider=lambda: store.counters(NOON))
+        assert rm.validate(self._protective(), _account(position_size=1),
+                           now=NOON).approved
+
+    def test_protective_permitted_inside_the_settlement_dead_zone(self, conn):
+        dead = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+        d = _risk().validate(self._protective(), _account(position_size=1), now=dead)
+        assert d.approved, d.reason
+        blocked = _risk().validate(_intent(), _account(), now=dead)
+        assert not blocked.approved and "dead zone" in blocked.reason
+
+    def test_protective_still_blocked_by_the_kill_switch(self, conn):
+        d = _risk(kill_switch_engaged=True).validate(
+            self._protective(), _account(position_size=1), now=NOON)
+        assert not d.approved and "kill switch" in d.reason
+
+    def test_protective_cannot_increase_exposure(self, conn):
+        d = _risk().validate(self._protective(side="buy"),
+                             _account(position_size=1), now=NOON)
+        assert not d.approved and "would increase exposure" in d.reason
+
+    def test_protective_cannot_flip_the_position(self, conn):
+        d = _risk().validate(self._protective(size=3),
+                             _account(position_size=1), now=NOON)
+        assert not d.approved
+
+    def test_protective_with_no_position_is_rejected(self, conn):
+        d = _risk().validate(self._protective(), _account(position_size=0), now=NOON)
+        assert not d.approved and "no open position" in d.reason
+
+    def test_protective_does_not_consume_a_daily_slot(self, conn):
+        store = RiskStateStore(conn)
+        client = _FakeClient(place={"success": True, "result": {"id": 3}})
+        rm = _risk(counters_provider=lambda: store.counters(NOON))
+        ex = TestnetExecutor(conn, client, rm, risk_state=store)
+        state, decision = ex.submit(self._protective(), _account(position_size=1),
+                                    now=NOON)
+        assert state is OrderState.ACKED, decision.reason
+        assert store.state(NOON).orders_placed == 0
+
+    def test_entry_never_transmits_stop_parameters(self, conn):
+        captured = {}
+
+        class Capturing(_FakeClient):
+            def place_order(self, **kw):
+                captured.update(kw)
+                return {"success": True, "result": {"id": 4}}
+
+        ex = TestnetExecutor(conn, Capturing(), _risk())
+        ex.submit(_intent(), _account(), now=NOON)
+        assert "stop_order_type" not in captured
+        assert captured.get("reduce_only") is False
+
+
+class TestProtectionPersistenceAndConcurrency:
+    def test_protection_survives_restart_without_duplicating(self, tmp_path):
+        db = tmp_path / "prot.db"
+        c1 = _fresh_db(db)
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        ex1 = TestnetExecutor(c1, client, _risk(), strategy="protection")
+        Reconciler(c1, client, product_id=84, executor=ex1).reconcile()
+        assert len(client.placed) == 1
+        coid = client.placed[0]["client_order_id"]
+        c1.close()
+
+        c2 = storage.get_connection(db)
+        ex2 = TestnetExecutor(c2, client, _risk(), strategy="protection")
+        Reconciler(c2, client, product_id=84, executor=ex2).reconcile()
+        assert len(client.placed) == 1, "restart re-placed the stop"
+        assert protection.already_placed(c2, coid)
+        c2.close()
+
+    def test_concurrent_reconciliation_places_at_most_one_stop(self, tmp_path):
+        import threading
+        db = tmp_path / "prot_concurrent.db"
+        c0 = _fresh_db(db)
+        fills.ingest_fills(c0, [_fill("f1", "buy")])
+        c0.close()
+
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        errors = []
+
+        def worker():
+            try:
+                c = storage.get_connection(db)
+                c.execute("PRAGMA busy_timeout = 10000")
+                ex = TestnetExecutor(c, client, _risk(), strategy="protection")
+                Reconciler(c, client, product_id=84, executor=ex).reconcile()
+                c.close()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        c = storage.get_connection(db)
+        rows = c.execute("SELECT COUNT(*) FROM orders WHERE client_order_id "
+                         "LIKE 'stop-%'").fetchone()[0]
+        c.close()
+        assert rows <= 1, f"{rows} protective orders persisted"
 
 
 # ---------------------------------------------------------------------------

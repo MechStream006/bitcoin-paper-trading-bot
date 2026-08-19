@@ -118,7 +118,7 @@ class TestnetExecutor:
         # ENTRIES consume the daily slot; exits do not. An exit is bounded by
         # the position it closes, not by a daily budget, and counting it would
         # make the cap able to strand an open position.
-        if self._risk_state is not None and intent.intent_kind != "exit":
+        if self._risk_state is not None and intent.intent_kind not in ("exit", "protective"):
             self._risk_state.record_order_placed(intent.client_order_id, now)
 
         try:
@@ -132,7 +132,15 @@ class TestnetExecutor:
                 # Belt and braces: risk already proved this reduces exposure,
                 # but reduce_only makes the EXCHANGE refuse it if the position
                 # moved between validation and arrival.
-                reduce_only=(intent.intent_kind == "exit"),
+                reduce_only=(intent.intent_kind in ("exit", "protective")),
+                # Native protective stop. intent.stop_price is the TRIGGER for
+                # a protective order (for an entry it is only a risk-budget
+                # input and is never transmitted).
+                **({"stop_order_type": limits.STOP_ORDER_TYPE,
+                    "stop_price": f"{intent.stop_price:.1f}",
+                    "stop_trigger_method": limits.STOP_TRIGGER_METHOD}
+                   if intent.intent_kind == "protective" and intent.stop_price
+                   else {}),
             )
         except requests.exceptions.Timeout as exc:
             # The request may or may not have reached Delta. Ambiguous.

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 
 from src.data import storage
 from src.execution import fills as fills_mod
+from src.execution import protection as protection_mod
 from src.execution.order_state import OPEN_STATES, OrderState, transition
 from src.runtime.health import HealthStatus
 
@@ -71,12 +72,19 @@ class Reconciler:
     """
 
     def __init__(self, conn, client, *, product_id: int,
-                 ingest_fills: bool = True, risk_state=None) -> None:
+                 ingest_fills: bool = True, risk_state=None,
+                 executor=None, enforce_protection: bool = True) -> None:
         self._conn = conn
         self._client = client
         self._product_id = product_id
         self._ingest_fills = ingest_fills
         self._risk_state = risk_state
+        #: Supervised executor used to establish protective stops. Without one
+        #: protection is detect-only: an unprotected position still HALTS, it
+        #: just cannot be repaired automatically. Detect-only fails closed.
+        self._executor = executor
+        self._enforce_protection = enforce_protection
+        self._last_protection: protection_mod.ProtectionStatus | None = None
         self._last_result: ReconcileResult | None = None
         self._last_run: datetime | None = None
         self._halted = False
@@ -253,6 +261,28 @@ class Reconciler:
                              f"exchange={exch_size} local={local_size}"))
             self._halt(f"position mismatch: exchange={exch_size} local={local_size}")
 
+        # --- protection: the invariant, checked AFTER positions are current -
+        # open_position != 0 => a valid reduce-only stop must exist.
+        # Deliberately last: it must see the position this pass produced, not
+        # the one it started with.
+        if self._enforce_protection:
+            status = protection_mod.evaluate(self._conn, live_orders)
+            if not status.is_safe:
+                status = protection_mod.ensure(
+                    self._conn, self._executor, self._client, status,
+                    mark_price=self._mark_price_hint())
+                # Re-derive from the exchange rather than trusting the attempt.
+                refreshed = self._client.get_live_orders(self._product_id)
+                if isinstance(refreshed, dict) and refreshed.get("success") is True:
+                    status = protection_mod.evaluate(
+                        self._conn, refreshed.get("result") or [])
+            self._last_protection = status
+            if not status.is_safe:
+                findings.append(("<protection>", Divergence.POSITION_MISMATCH,
+                                 f"{status.state.value}: {status.detail}"))
+                self._halt(f"position {status.position_size:+d} is "
+                           f"{status.state.value}: {status.detail}")
+
         clean = not self._pass_halted and all(
             d in (Divergence.IN_SYNC, Divergence.LOCAL_STALE, Divergence.ORPHAN_LOCAL)
             for _, d, _ in findings
@@ -260,6 +290,23 @@ class Reconciler:
         result = ReconcileResult(clean, self._halt_reason, tuple(findings))
         self._last_result = result
         return result
+
+    @property
+    def protection(self) -> "protection_mod.ProtectionStatus | None":
+        return self._last_protection
+
+    def _mark_price_hint(self) -> float:
+        """Best-effort mark for the protective intent's deviation guard.
+
+        Public endpoint only. A failure here must not itself halt: the caller
+        already halts if protection cannot be established.
+        """
+        try:
+            t = self._client._public_get("/v2/tickers/BTCUSD", None)
+            return float(t["result"]["mark_price"])
+        except Exception:
+            pos = fills_mod.open_position(self._conn)
+            return float(pos["entry_price"]) if pos else 0.0
 
     def _local_position_size(self) -> int:
         """Absolute local exposure, from the fill-derived positions projection."""

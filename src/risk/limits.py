@@ -42,6 +42,24 @@ BTCUSD_PRODUCT_ID = 84
 BTCUSD_TICK_SIZE = 0.1
 BTCUSD_CONTRACT_VALUE = 0.001
 
+# --- protective stops (verified on Delta India testnet 2026-08-19) --------
+# Probe order 2169420335 established these accepted values on product 84:
+# a native stop_loss_order with mark_price triggering and reduce_only=true is
+# accepted while flat, rests as state="pending", reserves ZERO margin, and is
+# independent of brackets (all bracket_* fields stayed null).
+STOP_ORDER_TYPE = "stop_loss_order"
+STOP_TRIGGER_METHOD = "mark_price"
+
+# Distance from the position's entry price at which protection triggers.
+# Matches the strategy bridge's STOP_DISTANCE_PCT so the stop that authorised
+# the trade's risk budget is the stop that actually exists.
+PROTECTIVE_STOP_DISTANCE_PCT = 1.4
+
+# The stop is a stop-LIMIT: once triggered it becomes a limit order at this
+# extra distance beyond the trigger. Slippage room, so a triggered stop can
+# actually fill instead of resting unfilled through the move it exists to escape.
+PROTECTIVE_STOP_LIMIT_SLIPPAGE_PCT = 0.15
+
 # --- margin (Delta India testnet, /v2/products 2026-08-18) -----------------
 # Delta exposes TWO margin inputs and the binding one is whichever is LARGER:
 #
