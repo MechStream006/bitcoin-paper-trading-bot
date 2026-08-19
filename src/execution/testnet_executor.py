@@ -20,7 +20,10 @@ import requests
 
 from src.data import storage
 from src.execution.order_state import IllegalTransition, OrderState, transition
-from src.risk.manager import AccountSnapshot, Decision, OrderIntent, RiskManager
+from src.risk import limits
+from src.risk.manager import (
+    AccountSnapshot, Decision, OrderIntent, RiskManager,
+)
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +115,10 @@ class TestnetExecutor:
         # on success -- would let a string of ambiguous submits bypass the cap
         # entirely. Idempotent per client_order_id, so a retry of this method
         # cannot consume two slots.
-        if self._risk_state is not None:
+        # ENTRIES consume the daily slot; exits do not. An exit is bounded by
+        # the position it closes, not by a daily budget, and counting it would
+        # make the cap able to strand an open position.
+        if self._risk_state is not None and intent.intent_kind != "exit":
             self._risk_state.record_order_placed(intent.client_order_id, now)
 
         try:
@@ -123,6 +129,10 @@ class TestnetExecutor:
                 order_type=intent.order_type,
                 limit_price=f"{intent.limit_price:.1f}",
                 client_order_id=intent.client_order_id,
+                # Belt and braces: risk already proved this reduces exposure,
+                # but reduce_only makes the EXCHANGE refuse it if the position
+                # moved between validation and arrival.
+                reduce_only=(intent.intent_kind == "exit"),
             )
         except requests.exceptions.Timeout as exc:
             # The request may or may not have reached Delta. Ambiguous.
@@ -203,3 +213,37 @@ class TestnetExecutor:
         )
         log.info("[exec] CANCELLED %s", client_order_id)
         return state
+
+    def close_position(self, account: AccountSnapshot, *, limit_price: float,
+                       client_order_id: str, now: datetime | None = None,
+                       strategy: str | None = None) -> tuple[OrderState, Decision]:
+        """Reduce an open position to flat. Supervised, same path as entry.
+
+        Deliberately built on submit() rather than beside it: the close gets
+        the same risk validation, the same write-ahead persistence, the same
+        UNKNOWN handling and the same reconciliation. The only differences are
+        carried on the intent itself -- intent_kind="exit", which exempts it
+        from the daily caps and requires it to reduce exposure.
+
+        Raises ValueError when flat: "close" with nothing to close would be an
+        entry wearing the wrong label, and that is exactly the confusion the
+        exit exemption must never permit.
+        """
+        if account.position_size == 0:
+            raise ValueError("no open position to close")
+
+        side = "sell" if account.position_size > 0 else "buy"
+        intent = OrderIntent(
+            client_order_id=client_order_id,
+            symbol="BTCUSD",
+            product_id=limits.BTCUSD_PRODUCT_ID,
+            side=side,
+            size=abs(account.position_size),
+            order_type="limit_order",
+            limit_price=limit_price,
+            # An exit's risk is the position it removes, not a new stop.
+            stop_price=limit_price,
+            strategy=strategy or self._strategy,
+            intent_kind="exit",
+        )
+        return self.submit(intent, account, now=now)

@@ -110,6 +110,7 @@ class DeltaClient:
         client_order_id: str | None = None,
         time_in_force: str = "gtc",
         post_only: bool = False,
+        reduce_only: bool = False,
     ) -> dict:
         """POST /v2/orders. `size` is an integer contract count.
 
@@ -129,6 +130,10 @@ class DeltaClient:
             payload["client_order_id"] = client_order_id
         if post_only:
             payload["post_only"] = True
+        if reduce_only:
+            # Exchange-side guarantee that an exit cannot open or increase a
+            # position if the position moved between validation and arrival.
+            payload["reduce_only"] = True
         return self._signed_post("/v2/orders", payload)
 
     def cancel_order(self, order_id: int, product_id: int) -> dict:

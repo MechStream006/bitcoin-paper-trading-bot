@@ -25,6 +25,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.data import storage
+from src.execution import fills as fills_mod
 from src.execution.order_state import OPEN_STATES, OrderState, transition
 from src.runtime.health import HealthStatus
 
@@ -69,10 +70,13 @@ class Reconciler:
     it alongside ws_manager, chain_refresher and snapshot_writer.
     """
 
-    def __init__(self, conn, client, *, product_id: int) -> None:
+    def __init__(self, conn, client, *, product_id: int,
+                 ingest_fills: bool = True, risk_state=None) -> None:
         self._conn = conn
         self._client = client
         self._product_id = product_id
+        self._ingest_fills = ingest_fills
+        self._risk_state = risk_state
         self._last_result: ReconcileResult | None = None
         self._last_run: datetime | None = None
         self._halted = False
@@ -219,6 +223,28 @@ class Reconciler:
                     "never auto-cancelled; operator must resolve"
                 )
 
+        # --- fills BEFORE positions ---------------------------------------
+        # Ordering is the correctness property. A real fill must become local
+        # state within the SAME pass that observes it, otherwise the position
+        # check below compares an exchange position against a local view that
+        # has not been told about it yet and halts on a divergence that is
+        # purely an artifact of processing order.
+        if self._ingest_fills:
+            try:
+                fills_result = fills_mod.ingest_fills(
+                    self._conn, fills, instrument_id=self._product_id,
+                    risk_state=self._risk_state)
+                if fills_result.ingested:
+                    findings.append(("<fills>", Divergence.LOCAL_STALE,
+                                     f"ingested {fills_result.ingested} fill(s), "
+                                     f"position now {fills_result.position_after:+d}"))
+            except Exception as exc:
+                # A fill we cannot read is not a fill we may ignore: it means
+                # local state is provably behind the exchange.
+                reason = f"fill ingestion failed: {type(exc).__name__}: {exc}"
+                self._halt(reason)
+                return ReconcileResult(False, reason, tuple(findings))
+
         # --- positions ----------------------------------------------------
         exch_size = sum(abs(int(p.get("size") or 0)) for p in positions)
         local_size = self._local_position_size()
@@ -236,6 +262,7 @@ class Reconciler:
         return result
 
     def _local_position_size(self) -> int:
+        """Absolute local exposure, from the fill-derived positions projection."""
         row = self._conn.execute(
             "SELECT COALESCE(SUM(quantity), 0) FROM positions WHERE status = 'open'"
         ).fetchone()

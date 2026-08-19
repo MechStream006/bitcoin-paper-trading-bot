@@ -417,6 +417,24 @@ CREATE TABLE IF NOT EXISTS risk_state (
     updated_ts     TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS order_fills (
+    fill_id         TEXT PRIMARY KEY,
+    client_order_id TEXT,
+    delta_order_id  TEXT,
+    instrument_id   INTEGER NOT NULL,
+    side            TEXT    NOT NULL CHECK (side IN ('buy', 'sell')),
+    size            REAL    NOT NULL CHECK (size > 0),
+    price           REAL    NOT NULL CHECK (price > 0),
+    fee             REAL    NOT NULL DEFAULT 0.0,
+    role            TEXT    NOT NULL CHECK (role IN ('entry', 'exit')),
+    realised_pnl    REAL,
+    exch_ts         TEXT,
+    processed_ts    TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_fills_coid
+    ON order_fills(client_order_id);
+
 CREATE TABLE IF NOT EXISTS risk_day_events (
     utc_day  TEXT NOT NULL,
     kind     TEXT NOT NULL CHECK (kind IN ('order', 'pnl')),

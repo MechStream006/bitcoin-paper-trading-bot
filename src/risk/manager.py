@@ -31,6 +31,11 @@ class OrderIntent:
     limit_price: float
     stop_price: float | None     # required to bound risk
     strategy: str
+    #: "entry" opens or increases exposure and consumes a daily order slot.
+    #: "exit" may only reduce exposure and is exempt from the ORDER-COUNT and
+    #: DAILY-LOSS caps -- a risk limit that traps you inside a position is not
+    #: a risk limit. Every other guard still applies. See RiskManager.validate.
+    intent_kind: str = "entry"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,6 +46,10 @@ class AccountSnapshot:
     available_usd: float
     open_positions: int
     mark_price: float
+    #: Signed open exposure in contracts (+long / -short / 0 flat), derived
+    #: from the fill ledger. An exit is validated against this, so an "exit"
+    #: cannot be used as a disguised entry.
+    position_size: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -193,8 +202,29 @@ class RiskManager:
             return Decision.reject(
                 f"size {intent.size} exceeds max {limits.MAX_CONTRACTS_PER_ORDER}")
 
-        # 6. one position at a time
-        if account.open_positions >= limits.MAX_OPEN_POSITIONS:
+        is_exit = intent.intent_kind == "exit"
+        if intent.intent_kind not in ("entry", "exit"):
+            return Decision.reject(f"unknown intent_kind {intent.intent_kind!r}")
+
+        # 5b. an exit must PROVABLY reduce exposure. These checks are what
+        # earn it the cap exemption below; without them "exit" would just be a
+        # keyword that bypasses the daily limits.
+        if is_exit:
+            if account.position_size == 0:
+                return Decision.reject("exit requested with no open position")
+            wanted = "sell" if account.position_size > 0 else "buy"
+            if intent.side != wanted:
+                return Decision.reject(
+                    f"exit side {intent.side!r} would increase exposure "
+                    f"(position {account.position_size:+d} needs {wanted!r})")
+            if intent.size > abs(account.position_size):
+                return Decision.reject(
+                    f"exit size {intent.size} exceeds open position "
+                    f"{abs(account.position_size)}; would flip exposure")
+
+        # 6. one position at a time -- an exit is the thing that ENDS a
+        # position, so this cap must not apply to it.
+        if not is_exit and account.open_positions >= limits.MAX_OPEN_POSITIONS:
             return Decision.reject(
                 f"{account.open_positions} open position(s), "
                 f"max {limits.MAX_OPEN_POSITIONS}")
@@ -209,14 +239,16 @@ class RiskManager:
                 return Decision.reject(
                     f"daily risk state unreadable ({type(exc).__name__}): {exc}")
 
-        # 7. daily order budget
-        if orders_today >= limits.MAX_ORDERS_PER_DAY:
+        # 7. daily order budget -- ENTRIES ONLY.
+        if not is_exit and orders_today >= limits.MAX_ORDERS_PER_DAY:
             return Decision.reject(
                 f"{orders_today} orders today, "
                 f"max {limits.MAX_ORDERS_PER_DAY}")
 
-        # 8. daily loss cap
-        if realised_pnl <= -limits.MAX_DAILY_LOSS_USD:
+        # 8. daily loss cap -- ENTRIES ONLY. Blocking an exit once the loss cap
+        # is hit would leave the account stuck in the losing position that
+        # tripped it, turning the cap into the cause of further loss.
+        if not is_exit and realised_pnl <= -limits.MAX_DAILY_LOSS_USD:
             return Decision.reject(
                 f"daily loss {realised_pnl:.2f} at or beyond cap "
                 f"-{limits.MAX_DAILY_LOSS_USD:.2f}")
