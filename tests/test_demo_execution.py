@@ -714,7 +714,11 @@ class TestDailyOrderCap:
         return RiskStateStore(conn)
 
     def _rm(self, store, **kw):
-        return _risk(counters_provider=store.counters, **kw)
+        # Bound to NOON, matching the `now` every submit in this class uses.
+        # Reading counters at wall-clock time while writing them at a fixed
+        # test timestamp makes these tests silently date-dependent: they pass
+        # on the day NOON falls on and fail every other day.
+        return _risk(counters_provider=lambda: store.counters(NOON), **kw)
 
     def test_first_and_second_order_increment_the_counter(self, conn):
         store = self._store(conn)
@@ -727,10 +731,10 @@ class TestDailyOrderCap:
         rm = self._rm(store)
         assert rm.validate(_intent(), _account(), now=NOON).approved
 
-        store.record_order_placed("coid-1")
+        store.record_order_placed("coid-1", now=NOON)
         assert rm.validate(_intent(), _account(), now=NOON).approved
 
-        store.record_order_placed("coid-2")
+        store.record_order_placed("coid-2", now=NOON)
         d = rm.validate(_intent(), _account(), now=NOON)
         assert not d.approved
         assert "orders today" in d.reason and "max 2" in d.reason
@@ -745,14 +749,14 @@ class TestDailyOrderCap:
             state, decision = ex.submit(
                 _intent(client_order_id=f"bad-{i}", size=9), _account(), now=NOON)
             assert state is OrderState.BLOCKED
-        assert store.state().orders_placed == 0, "blocked intents consumed slots"
+        assert store.state(NOON).orders_placed == 0, "blocked intents consumed slots"
 
     def test_submitted_order_consumes_exactly_one_slot(self, conn):
         store = self._store(conn)
         client = _FakeClient(place={"success": True, "result": {"id": 1}})
         ex = TestnetExecutor(conn, client, self._rm(store), risk_state=store)
         ex.submit(_intent(client_order_id="real-1"), _account(), now=NOON)
-        assert store.state().orders_placed == 1
+        assert store.state(NOON).orders_placed == 1
 
     def test_slot_is_consumed_even_when_the_submit_is_ambiguous(self, conn):
         """An UNKNOWN order may exist on the exchange; it must count."""
@@ -761,7 +765,7 @@ class TestDailyOrderCap:
         ex = TestnetExecutor(conn, client, self._rm(store), risk_state=store)
         state, _ = ex.submit(_intent(client_order_id="ambiguous-1"), _account(), now=NOON)
         assert state is OrderState.UNKNOWN
-        assert store.state().orders_placed == 1
+        assert store.state(NOON).orders_placed == 1
 
     def test_cap_binds_through_the_executor(self, conn):
         store = self._store(conn)
