@@ -500,11 +500,18 @@ class Runtime:
                 "realised_pnl=%.2f (source=%s)",
                 today.utc_day, today.orders_placed, today.realised_pnl,
                 type(risk_state).__name__)
+            # `is` on a bound method is ALWAYS False -- attribute access builds a
+            # new object every time -- so identity must be checked through
+            # __self__/__func__. The first version of this line compared the
+            # bound methods directly and logged a misleading "False" for
+            # correctly-wired providers.
             logger.info(
                 "[runtime] risk manager wired: counters_provider=%s halt_provider=%s "
                 "kill_switch_engaged=%s",
-                risk_manager.counters_provider is risk_state.counters,
-                risk_manager.halt_provider is reconciler.gate_state,
+                (risk_manager.counters_provider is not None
+                 and risk_manager.counters_provider.__self__ is risk_state),
+                (risk_manager.halt_provider is not None
+                 and risk_manager.halt_provider.__self__ is reconciler),
                 risk_manager.kill_switch_engaged)
             logger.info("[runtime] executor wired: risk_state=%s",
                         executor._risk_state is risk_state)
