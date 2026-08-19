@@ -10,6 +10,7 @@ Run:
 """
 from __future__ import annotations
 
+import pathlib
 import sqlite3
 from datetime import datetime, timezone
 
@@ -2173,6 +2174,142 @@ class TestProtectionPersistenceAndConcurrency:
                          "LIKE 'stop-%'").fetchone()[0]
         c.close()
         assert rows <= 1, f"{rows} protective orders persisted"
+
+
+class TestRuntimeSchemaOrdering:
+    """Gate 5B regression: boot halted on `no such table: order_fills`.
+
+    The defect was ordering, not logic -- boot_reconcile() ingests fills, which
+    needs order_fills, and the schema-ensure ran afterwards. These tests pin
+    both the behaviour and the source ordering that produces it.
+    """
+
+    def _bare_db(self, path):
+        """Base schema only -- no execution schema. A genuinely fresh DB."""
+        c = storage.get_connection(path)
+        storage.init_schema(c)
+        c.execute(
+            "INSERT OR REPLACE INTO instruments "
+            "(id,symbol,contract_type,underlying,quoting,tick_size,contract_value,"
+            "state,fetched_at) VALUES "
+            "(84,'BTCUSD','perpetual_futures','BTC','USD',0.1,0.001,'live','t')")
+        c.commit()
+        return c
+
+    def test_schema_less_db_lacks_order_fills(self, tmp_path):
+        c = self._bare_db(tmp_path / "bare.db")
+        n = c.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='order_fills'"
+                      ).fetchone()[0]
+        c.close()
+        assert n == 0, "fixture is not actually schema-less"
+
+    def test_boot_without_schema_init_halts(self, tmp_path):
+        """The exact production failure, reproduced."""
+        c = self._bare_db(tmp_path / "nofix.db")
+        r = Reconciler(c, _FakeReconcileClient(), product_id=84)
+        r.start()
+        assert r.halted
+        assert "order_fills" in r.halt_reason
+        assert not r.trading_permitted
+        c.close()
+
+    def test_schema_init_before_start_boots_clean(self, tmp_path):
+        """The fix: initialise on the reconciler's own connection first."""
+        c = self._bare_db(tmp_path / "fixed.db")
+        storage.init_execution_schema(c)
+        r = Reconciler(c, _FakeReconcileClient(), product_id=84)
+        r.start()
+        assert not r.halted, r.halt_reason
+        assert r.trading_permitted
+        assert r.protection.state is protection.ProtectionState.FLAT
+        c.close()
+
+    def test_schema_init_is_idempotent_and_preserves_rows(self, tmp_path):
+        c = self._bare_db(tmp_path / "idem.db")
+        storage.init_execution_schema(c)
+        fills.ingest_fills(c, [_fill("f1", "buy")])
+        before = fills.position_size(c)
+        rows = c.execute("SELECT COUNT(*) FROM order_fills").fetchone()[0]
+        for _ in range(3):
+            storage.init_execution_schema(c)
+        assert c.execute("SELECT COUNT(*) FROM order_fills").fetchone()[0] == rows
+        assert fills.position_size(c) == before
+        c.close()
+
+    def test_lifecycle_initialises_schema_before_boot(self):
+        """Source-order guard: the defect was invisible to behaviour tests."""
+        src = pathlib.Path("src/runtime/lifecycle.py").read_text(encoding="utf-8")
+        assert src.index("init_execution_schema(conn)") < src.index("reconciler.start()")
+
+    def test_lifecycle_initialises_schema_on_the_runtime_connection(self):
+        src = pathlib.Path("src/runtime/lifecycle.py").read_text(encoding="utf-8")
+        assert "init_execution_schema(conn)" in src, \
+            "execution schema must be ensured on the reconciler's connection"
+
+
+class TestRuntimeExecutorWiring:
+    """Gate 5B regression: protection could only detect, never establish."""
+
+    def test_reconciler_accepts_an_executor_after_construction(self, conn):
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        assert r._executor is None
+        ex = TestnetExecutor(conn, _FakeReconcileClient(), _risk())
+        r.set_executor(ex)
+        assert r._executor is ex
+
+    def test_lifecycle_attaches_the_executor_before_boot(self):
+        src = pathlib.Path("src/runtime/lifecycle.py").read_text(encoding="utf-8")
+        assert src.index("set_executor(executor)") < src.index("reconciler.start()")
+
+    def test_lifecycle_builds_exactly_one_executor_and_one_reconciler(self):
+        """No parallel execution path may exist."""
+        src = pathlib.Path("src/runtime/lifecycle.py").read_text(encoding="utf-8")
+        assert src.count("TestnetExecutor(") == 1
+        assert src.count("Reconciler(conn, client") == 1
+
+    def test_flat_state_creates_no_protective_stop(self, conn):
+        """An executor being present must not mean an order gets placed."""
+        client = _StopCapturingClient()
+        ex = TestnetExecutor(conn, client, _risk(), strategy="protection")
+        r = Reconciler(conn, client, product_id=84)
+        r.set_executor(ex)
+        r.start()
+        assert r.protection.state is protection.ProtectionState.FLAT
+        assert client.placed == [], "placed an order while flat"
+        assert not r.halted
+
+    def test_exposed_position_uses_the_supervised_executor(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy", price=64000.0)]},
+            positions={"success": True, "result": [{"size": 1}]})
+        ex = TestnetExecutor(conn, client, _risk(), strategy="protection")
+        r = Reconciler(conn, client, product_id=84)
+        r.set_executor(ex)
+        r.reconcile()
+        assert len(client.placed) == 1
+        assert client.placed[0]["stop_order_type"] == "stop_loss_order"
+        # It went through the executor, so a local order row exists.
+        assert storage.get_order(conn, client.placed[0]["client_order_id"]) is not None
+
+    def test_without_an_executor_protection_still_fails_closed(self, conn):
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84)      # no executor
+        result = r.reconcile()
+        assert r.halted and not result.clean
+        assert client.placed == []
+
+    def test_protection_uses_no_network_beyond_the_injected_client(self, conn):
+        """All exchange access goes through the client double."""
+        client = _StopCapturingClient(
+            fills={"success": True, "result": [_fill("f1", "buy")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        ex = TestnetExecutor(conn, client, _risk(), strategy="protection")
+        r = Reconciler(conn, client, product_id=84)
+        r.set_executor(ex)
+        r.reconcile()
+        assert set(client.calls) <= {"get_live_orders", "get_fills", "get_positions"}
 
 
 # ---------------------------------------------------------------------------

@@ -464,11 +464,15 @@ class Runtime:
         # authenticated calls, no job, collector behaviour bit-for-bit as before.
         reconciler: Optional[Reconciler] = None
         if self._demo_trading_enabled:
-            reconciler = Reconciler(conn, client, product_id=84)
-            reconciler.start()
-            register_reconciliation_jobs(scheduler, reconciler)
-            logger.info("[runtime] reconciliation armed (trading_permitted=%s)",
-                        reconciler.trading_permitted)
+            # 1. SCHEMA FIRST, on the connection the reconciler will use.
+            #
+            # boot_reconcile() ingests fills, which requires order_fills. On a
+            # fresh or newly-migrated database that table does not exist until
+            # something creates it, and creating it after start() is what made
+            # the 2026-08-19 deployment halt on `no such table: order_fills`.
+            # Idempotent (CREATE TABLE IF NOT EXISTS), so this is a no-op on an
+            # already-initialised database and never touches existing rows.
+            init_execution_schema(conn)
 
             # Daily risk state gets its OWN connection. It is the only component
             # that opens an explicit `BEGIN IMMEDIATE`, and the runtime's shared
@@ -481,6 +485,14 @@ class Runtime:
             self._risk_conn = risk_conn
             risk_state = RiskStateStore(risk_conn)
 
+            # 2. Construction order is forced by a genuine cycle: risk manager
+            # needs reconciler.gate_state -> executor needs risk manager ->
+            # protection needs executor. The reconciler is built first, the
+            # executor is attached to it, and only THEN does it boot -- so the
+            # first pass can establish a missing stop instead of only halting.
+            reconciler = Reconciler(conn, client, product_id=84,
+                                    risk_state=risk_state)
+
             risk_manager = RiskManager(
                 kill_switch_engaged=self._demo_kill_switch_engaged,
                 platform="testnet",
@@ -490,6 +502,15 @@ class Runtime:
             )
             executor = TestnetExecutor(conn, client, risk_manager,
                                        strategy="manual", risk_state=risk_state)
+            reconciler.set_executor(executor)
+
+            reconciler.start()
+            register_reconciliation_jobs(scheduler, reconciler)
+            logger.info("[runtime] reconciliation armed (trading_permitted=%s, "
+                        "protection=%s)", reconciler.trading_permitted,
+                        reconciler.protection.state.value
+                        if reconciler.protection else "n/a")
+
             self._risk_state = risk_state
             self._risk_manager = risk_manager
             self._executor = executor

@@ -291,6 +291,22 @@ class Reconciler:
         self._last_result = result
         return result
 
+    def set_executor(self, executor) -> None:
+        """Attach the supervised executor after construction.
+
+        The runtime wiring is genuinely cyclic: the risk manager needs this
+        reconciler's gate_state, the executor needs that risk manager, and
+        protection needs the executor. Something has to be attached second.
+        Doing it here -- rather than building a second executor for protection
+        -- keeps exactly one supervised execution path, which is the property
+        that makes the daily caps and write-ahead persistence meaningful.
+
+        Must be called BEFORE start(): boot reconciliation is the first pass
+        that can find an unprotected position, and it should be able to fix it
+        rather than merely halt.
+        """
+        self._executor = executor
+
     @property
     def protection(self) -> "protection_mod.ProtectionStatus | None":
         return self._last_protection
