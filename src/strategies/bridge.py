@@ -22,13 +22,20 @@ import sqlite3
 from datetime import datetime, timezone
 
 from src.risk import limits
-from src.risk.manager import OrderIntent
+from src.risk.manager import (
+    OrderIntent, compute_trade_risk_usd, round_trip_fees_usd,
+)
 
 log = logging.getLogger(__name__)
 
 SIGNAL_ID = "g3_momentum_tsmom"
 
-#: Stop distance as a percentage of price.
+#: Bound on the float-error correction below. One or two ticks is all
+#: that is ever needed; a bound stops a silent infinite loop if the
+#: budget arithmetic is ever changed incoherently.
+_MAX_STOP_SHRINK_TICKS = 8
+
+#: MAXIMUM stop distance as a percentage of price -- a ceiling, not a target.
 #:
 #: Sized so NET risk -- adverse move PLUS round-trip fees -- fits the $1.00
 #: per-trade budget. At a $64,187.50 mark, 1 contract (0.001 BTC):
@@ -131,6 +138,55 @@ def executable_limit_price(direction: int, best_bid: float, best_ask: float) -> 
     return round(math.floor(best_bid / tick) * tick, 1)
 
 
+def affordable_stop_distance(mark_price: float, size: int = 1) -> float:
+    """Largest stop distance the per-trade budget can fund, after fees.
+
+    Derived from RiskManager's OWN arithmetic rather than a parallel formula:
+    compute_trade_risk_usd() is
+
+        |limit - stop| * contract_value * size + round_trip_fees_usd(mark, size)
+
+    so the affordable distance is simply that identity solved for the distance.
+    round_trip_fees_usd is imported, not reimplemented, so a change to the fee
+    model (FEE_RESERVE_MULTIPLIER, the taker rate) moves both sides together and
+    this cannot silently drift out of agreement with the guard it must satisfy.
+    """
+    budget = limits.MAX_TRADE_RISK_USD - round_trip_fees_usd(mark_price, size)
+    if budget <= 0:
+        return 0.0
+    return budget / (limits.BTCUSD_CONTRACT_VALUE * size)
+
+
+def stop_distance(limit_price: float, mark_price: float, size: int = 1) -> float:
+    """The stop distance to actually use: the strategy's ceiling, made affordable.
+
+    STOP_DISTANCE_PCT is the strategy's MAXIMUM, not a mandatory distance. A
+    fixed percentage against a fixed dollar budget breaks as price rises --
+    Gate 5C.3 measured it: at BTC 69548 a 1.4% stop costs $0.9737 which, with
+    $0.0821 of fees, is $1.0558 against a $1.00 budget, so every intent was
+    correctly vetoed and the strategy could not trade at all above ~$65,876.
+
+    Taking the MINIMUM of the two keeps the strategy's intent intact whenever it
+    is affordable and tightens the stop only when the budget demands it, rather
+    than raising the budget or widening the guard.
+
+    The result is floored to a whole tick: rounding a distance UP could push the
+    trade over the budget, which is the one direction that must never happen.
+    """
+    tick = limits.BTCUSD_TICK_SIZE
+    strategy_max = limit_price * STOP_DISTANCE_PCT / 100.0
+    affordable = affordable_stop_distance(mark_price, size)
+    distance = min(strategy_max, affordable)
+    distance = math.floor(distance / tick) * tick
+    if distance < tick:
+        raise ValueError(
+            f"no affordable stop distance at mark {mark_price}: budget "
+            f"${limits.MAX_TRADE_RISK_USD:.2f} minus fees "
+            f"${round_trip_fees_usd(mark_price, size):.4f} leaves less than one tick"
+        )
+    return round(distance, 1)
+
+
 def build_intent(
     *,
     direction: int,
@@ -160,24 +216,42 @@ def build_intent(
     day = utc_day or _utc_today()
     side = "buy" if direction == 1 else "sell"
 
-    tick = limits.BTCUSD_TICK_SIZE
     limit_price = executable_limit_price(direction, best_bid, best_ask)
-    # The stop is recomputed from the EXECUTED price, not the mark, so the risk
-    # budget describes the trade that will actually exist.
-    offset = limit_price * STOP_DISTANCE_PCT / 100
-    stop_price = round(
-        round((limit_price - offset if direction == 1 else limit_price + offset) / tick) * tick,
-        1,
-    )
+    size = limits.MAX_CONTRACTS_PER_ORDER
+    distance = stop_distance(limit_price, mark_price, size)
+    tick = limits.BTCUSD_TICK_SIZE
 
-    return OrderIntent(
-        client_order_id=f"{SIGNAL_ID}-{day}-{side}-{seq}",
-        symbol="BTCUSD",
-        product_id=limits.BTCUSD_PRODUCT_ID,
-        side=side,
-        size=limits.MAX_CONTRACTS_PER_ORDER,
-        order_type="limit_order",
-        limit_price=limit_price,
-        stop_price=stop_price,
-        strategy=SIGNAL_ID,
+    def _at(dist: float) -> OrderIntent:
+        stop = round((limit_price - dist) if direction == 1
+                     else (limit_price + dist), 1)
+        return OrderIntent(
+            client_order_id=f"{SIGNAL_ID}-{day}-{side}-{seq}",
+            symbol="BTCUSD",
+            product_id=limits.BTCUSD_PRODUCT_ID,
+            side=side,
+            size=size,
+            order_type="limit_order",
+            limit_price=limit_price,
+            stop_price=stop,
+            strategy=SIGNAL_ID,
+        )
+
+    # Verify against the guard's OWN function rather than trusting the
+    # arithmetic above. round(limit - distance, 1) reintroduces binary
+    # floating-point error, so the distance RiskManager reconstructs from
+    # |limit - stop| can exceed the one computed here by a few 1e-15 -- enough
+    # to fail a boundary comparison when the affordable distance lands exactly
+    # on a tick (observed at mark 90000: risk 1.0000000000000029 > 1.00).
+    # Shrinking by whole ticks is bounded and always converges downward.
+    for _ in range(_MAX_STOP_SHRINK_TICKS):
+        candidate = _at(distance)
+        if compute_trade_risk_usd(candidate, mark_price) <= limits.MAX_TRADE_RISK_USD:
+            return candidate
+        distance = round(distance - tick, 1)
+        if distance < tick:
+            break
+    raise ValueError(
+        f"could not build an in-budget intent at mark {mark_price}: "
+        f"budget ${limits.MAX_TRADE_RISK_USD:.2f}, fees "
+        f"${round_trip_fees_usd(mark_price, size):.4f}"
     )

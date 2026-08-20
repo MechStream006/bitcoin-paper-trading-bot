@@ -2816,6 +2816,196 @@ class TestExecutableEntryPrice:
         assert it.size == limits.MAX_CONTRACTS_PER_ORDER
 
 
+class TestStopDistanceCalibration:
+    """5C.4: a fixed-% stop against a fixed-$ budget breaks as price rises.
+
+    Gate 5C.3 measured it live: at BTC 69548 the 1.4% stop cost $0.9737 which,
+    with $0.0821 of fees, was $1.0558 against a $1.00 budget. Every intent was
+    correctly vetoed, so the strategy could not trade at all above ~$65,876.
+    """
+
+    # The exact book and mark from the Gate 5C.3 failure.
+    G5C3_BID, G5C3_ASK, G5C3_MARK = 69548.0, 69549.0, 69551.80188522
+
+    def _intent_at(self, direction, bid, ask, mark):
+        return bridge.build_intent(direction=direction, mark_price=mark,
+                                   enabled=True, best_bid=bid, best_ask=ask,
+                                   utc_day="2026-08-20")
+
+    # --- the regression that reproduces the failure ----------------------
+    def test_gate_5c3_old_rule_would_exceed_the_budget(self):
+        """The pre-fix behaviour, recomputed: proves the defect was real."""
+        limit = 69548.0
+        old_distance = limit * bridge.STOP_DISTANCE_PCT / 100.0
+        old_risk = (old_distance * limits.BTCUSD_CONTRACT_VALUE
+                    + round_trip_fees_usd(self.G5C3_MARK, 1))
+        assert old_risk == pytest.approx(1.0558, abs=1e-3)
+        assert old_risk > limits.MAX_TRADE_RISK_USD, "the defect no longer reproduces"
+
+    def test_gate_5c3_book_now_produces_an_approved_intent(self):
+        it = self._intent_at(-1, self.G5C3_BID, self.G5C3_ASK, self.G5C3_MARK)
+        assert it.limit_price == self.G5C3_BID
+        d = _risk().validate(it, _account(mark_price=self.G5C3_MARK), now=NOON)
+        assert d.approved, d.reason
+        assert compute_trade_risk_usd(it, self.G5C3_MARK) <= limits.MAX_TRADE_RISK_USD
+
+    # --- invariant 1: RiskManager approves at every price ----------------
+    @pytest.mark.parametrize("mark", [
+        30000.0, 64187.5, 65000.0, 65876.0, 69551.80188522, 90000.0,
+        120000.0, 250000.0,
+    ])
+    @pytest.mark.parametrize("direction", [1, -1])
+    def test_risk_manager_approves_at_every_price_and_side(self, mark, direction):
+        bid = round(round((mark - 1.0) / 0.1) * 0.1, 1)
+        ask = round(round((mark + 1.0) / 0.1) * 0.1, 1)
+        it = self._intent_at(direction, bid, ask, mark)
+        d = _risk().validate(it, _account(mark_price=mark), now=NOON)
+        assert d.approved, f"mark={mark} dir={direction}: {d.reason}"
+
+    @pytest.mark.parametrize("mark", [64187.5, 69551.80188522, 120000.0, 250000.0])
+    @pytest.mark.parametrize("direction", [1, -1])
+    def test_risk_never_exceeds_the_budget(self, mark, direction):
+        bid = round(round((mark - 1.0) / 0.1) * 0.1, 1)
+        ask = round(round((mark + 1.0) / 0.1) * 0.1, 1)
+        it = self._intent_at(direction, bid, ask, mark)
+        risk = compute_trade_risk_usd(it, mark)
+        assert risk <= limits.MAX_TRADE_RISK_USD, f"{risk} at mark {mark}"
+
+    # --- invariant 2: stop on the correct side ---------------------------
+    @pytest.mark.parametrize("mark", [30000.0, 64187.5, 69551.8, 120000.0])
+    def test_stop_sits_on_the_correct_side(self, mark):
+        bid = round(round((mark - 1.0) / 0.1) * 0.1, 1)
+        ask = round(round((mark + 1.0) / 0.1) * 0.1, 1)
+        long_it = self._intent_at(1, bid, ask, mark)
+        short_it = self._intent_at(-1, bid, ask, mark)
+        assert long_it.stop_price < long_it.limit_price
+        assert short_it.stop_price > short_it.limit_price
+
+    # --- invariant 3: never exceeds the strategy maximum -----------------
+    @pytest.mark.parametrize("mark", [30000.0, 50000.0, 64187.5, 69551.8, 120000.0])
+    def test_distance_never_exceeds_the_strategy_maximum(self, mark):
+        bid = round(round((mark - 1.0) / 0.1) * 0.1, 1)
+        ask = round(round((mark + 1.0) / 0.1) * 0.1, 1)
+        for d in (1, -1):
+            it = self._intent_at(d, bid, ask, mark)
+            distance = abs(it.limit_price - it.stop_price)
+            cap = it.limit_price * bridge.STOP_DISTANCE_PCT / 100.0
+            assert distance <= cap + 1e-9, f"{distance} > cap {cap} at {mark}"
+
+    def test_strategy_maximum_binds_at_low_prices(self):
+        """Below the crossover the strategy's intent is preserved untouched."""
+        mark = 64187.5
+        it = self._intent_at(1, 64186.0, 64187.0, mark)
+        distance = abs(it.limit_price - it.stop_price)
+        cap = it.limit_price * bridge.STOP_DISTANCE_PCT / 100.0
+        assert distance == pytest.approx(cap, abs=limits.BTCUSD_TICK_SIZE)
+
+    def test_budget_binds_at_high_prices(self):
+        """Above the crossover the budget tightens the stop."""
+        mark = 120000.0
+        it = self._intent_at(1, 119999.0, 120001.0, mark)
+        distance = abs(it.limit_price - it.stop_price)
+        cap = it.limit_price * bridge.STOP_DISTANCE_PCT / 100.0
+        assert distance < cap * 0.75, "budget did not tighten the stop"
+
+    # --- invariant 4: fees counted exactly once --------------------------
+    def test_affordable_distance_matches_the_risk_identity(self):
+        """Solved from compute_trade_risk_usd, so fees appear exactly once."""
+        for mark in (64187.5, 69551.8, 120000.0):
+            aff = bridge.affordable_stop_distance(mark, 1)
+            reconstructed = (aff * limits.BTCUSD_CONTRACT_VALUE
+                             + round_trip_fees_usd(mark, 1))
+            assert reconstructed == pytest.approx(limits.MAX_TRADE_RISK_USD, abs=1e-9)
+
+    def test_affordable_distance_uses_the_shared_fee_function(self):
+        """Not a parallel formula: a fee-model change must move both sides."""
+        import inspect
+        src = inspect.getsource(bridge.affordable_stop_distance)
+        assert "round_trip_fees_usd" in src
+        assert "TAKER_FEE_RATE" not in src, "fee arithmetic was reimplemented"
+
+    def test_fee_model_change_moves_the_distance(self, monkeypatch):
+        before = bridge.affordable_stop_distance(64187.5, 1)
+        monkeypatch.setattr(limits, "FEE_RESERVE_MULTIPLIER", 3.0)
+        after = bridge.affordable_stop_distance(64187.5, 1)
+        assert after < before, "distance ignored a fee-model change"
+
+    # --- invariant 5: price still from the book --------------------------
+    def test_executable_price_still_from_the_book(self):
+        it_s = self._intent_at(-1, self.G5C3_BID, self.G5C3_ASK, self.G5C3_MARK)
+        it_l = self._intent_at(1, self.G5C3_BID, self.G5C3_ASK, self.G5C3_MARK)
+        assert it_s.limit_price == self.G5C3_BID
+        assert it_l.limit_price == self.G5C3_ASK
+        mark_derived = round(round(self.G5C3_MARK / 0.1) * 0.1, 1)
+        assert it_s.limit_price != mark_derived
+
+    def test_wide_spread_still_marketable_and_in_budget(self):
+        bid, ask, mark = 69000.0, 70000.0, 69500.0
+        s = self._intent_at(-1, bid, ask, mark)
+        l = self._intent_at(1, bid, ask, mark)
+        assert s.limit_price <= bid and l.limit_price >= ask
+        for it in (s, l):
+            assert _risk().validate(it, _account(mark_price=mark), now=NOON).approved
+
+    # --- invariant 6: RiskManager remains the authority ------------------
+    def test_a_deliberately_over_budget_intent_is_still_rejected(self):
+        """The fix must not blunt the guard."""
+        it = _intent(limit_price=64187.5, stop_price=60000.0)
+        d = _risk().validate(it, _account(mark_price=64187.5), now=NOON)
+        assert not d.approved
+        assert "exceeds" in d.reason
+
+    def test_hard_ceiling_still_enforced(self):
+        it = _intent(limit_price=64187.5, stop_price=61000.0)
+        d = _risk().validate(it, _account(mark_price=64187.5), now=NOON)
+        assert not d.approved
+
+    def test_raising_the_price_cannot_silently_exceed_the_budget(self):
+        """The specific regression: a price rise must tighten, never overflow."""
+        prev = None
+        for mark in range(60000, 200001, 10000):
+            mark = float(mark)
+            bid = round(round((mark - 1.0) / 0.1) * 0.1, 1)
+            ask = round(round((mark + 1.0) / 0.1) * 0.1, 1)
+            it = self._intent_at(-1, bid, ask, mark)
+            risk = compute_trade_risk_usd(it, mark)
+            assert risk <= limits.MAX_TRADE_RISK_USD, f"mark {mark}: {risk}"
+            assert _risk().validate(it, _account(mark_price=mark),
+                                    now=NOON).approved, mark
+            prev = risk
+
+    # --- tick discipline --------------------------------------------------
+    @pytest.mark.parametrize("mark", [64187.5, 69551.80188522, 87654.321, 120000.0])
+    def test_stop_is_tick_aligned(self, mark):
+        tick = limits.BTCUSD_TICK_SIZE
+        bid = round(round((mark - 1.0) / 0.1) * 0.1, 1)
+        ask = round(round((mark + 1.0) / 0.1) * 0.1, 1)
+        for d in (1, -1):
+            it = self._intent_at(d, bid, ask, mark)
+            assert abs(round(it.stop_price / tick) * tick - it.stop_price) < 1e-6
+
+    def test_distance_is_floored_never_rounded_up(self):
+        """Rounding a distance UP is the one direction that breaks the budget."""
+        tick = limits.BTCUSD_TICK_SIZE
+        for mark in (69551.80188522, 87654.321, 111111.11):
+            d = bridge.stop_distance(mark, mark, 1)
+            assert d <= bridge.affordable_stop_distance(mark, 1) + 1e-9
+            assert abs(round(d / tick) * tick - d) < 1e-6
+
+    def test_unaffordable_budget_raises_rather_than_building_a_bad_intent(self,
+                                                                         monkeypatch):
+        """If fees ever consume the budget, refuse -- never emit a null stop."""
+        monkeypatch.setattr(limits, "MAX_TRADE_RISK_USD", 0.01)
+        with pytest.raises(ValueError):
+            bridge.stop_distance(64187.5, 64187.5, 1)
+
+    def test_intent_still_single_contract_entry(self):
+        it = self._intent_at(-1, self.G5C3_BID, self.G5C3_ASK, self.G5C3_MARK)
+        assert it.size == limits.MAX_CONTRACTS_PER_ORDER
+        assert it.intent_kind == "entry"
+        assert it.order_type == "limit_order"
+
+
 # ---------------------------------------------------------------------------
 # 2 — State machine
 # ---------------------------------------------------------------------------
