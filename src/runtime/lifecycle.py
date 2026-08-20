@@ -76,7 +76,13 @@ from typing import Any, Callable, List, Optional, Tuple
 from src.alerts.heartbeat import HeartbeatService
 from src.alerts.rate_limiter import RateLimiter
 from src.alerts.telegram import send_message
-from src.data.storage import get_connection, init_execution_schema, init_schema
+from src.data.storage import (
+    SharedConnectionError,
+    assert_distinct_connections,
+    get_connection,
+    init_execution_schema,
+    init_schema,
+)
 from src.exchange.delta_client import DeltaClient
 from src.execution.reconciler import Reconciler
 from src.execution.reconciliation_jobs import register_reconciliation_jobs
@@ -215,6 +221,7 @@ class Runtime:
 
         # Component references (all None until bootstrap)
         self._conn:             Optional[sqlite3.Connection]  = None
+        self._owned_conns:      List[Tuple[str, sqlite3.Connection]] = []
         self._client:           Optional[DeltaClient]         = None
         self._reconciler:       Optional[Reconciler]          = None
         self._risk_conn:        Optional[sqlite3.Connection]  = None
@@ -288,6 +295,11 @@ class Runtime:
         self._started_at = time.monotonic()
 
         # 1. DB
+        #
+        # This connection owns the schema and nothing else. Every component
+        # that the scheduler can run on its own thread gets its own handle
+        # (see _open_owned_connection) -- a SQLite transaction belongs to the
+        # connection, so a shared handle means shared transactions.
         logger.info("[runtime] opening DB: %s", self._db_path)
         conn = get_connection(self._db_path)
         init_schema(conn)
@@ -303,9 +315,10 @@ class Runtime:
 
         # 3. ChainRefresher -- initial REST call to get universe
         logger.info("[runtime] initial chain refresh (REST)...")
+        chain_conn = self._open_owned_connection("chain_refresher")
         refresher = ChainRefresher(
             client=client,
-            conn=conn,
+            conn=chain_conn,
             n_strikes=self._n_strikes,
             n_expiries=self._n_expiries,
             on_change=self._on_universe_change,
@@ -357,8 +370,22 @@ class Runtime:
         self._ws_manager = ws_manager
 
         # 6. SnapshotWriter
-        snapshot_writer = SnapshotWriter(conn=conn, state=market_state)
+        snapshot_conn = self._open_owned_connection("snapshot_writer")
+        snapshot_writer = SnapshotWriter(conn=snapshot_conn, state=market_state)
         self._snapshot_writer = snapshot_writer
+
+        # snapshot_quotes (60s) and chain_refresh (hourly) are separate jobs, so
+        # APScheduler may run them on two threads at once. Both commit and both
+        # roll back; through one handle either outcome would apply to the other's
+        # rows.
+        #
+        # Asserted on what each component HOLDS, not on the local variables --
+        # passing the wrong one of two correctly-distinct handles is exactly the
+        # mistake this is here to catch.
+        assert_distinct_connections(
+            chain_refresher=refresher.connection,
+            snapshot_writer=snapshot_writer.connection,
+        )
 
         # 7. Sender adapter
         sender = self._build_sender()
@@ -464,6 +491,15 @@ class Runtime:
         # authenticated calls, no job, collector behaviour bit-for-bit as before.
         reconciler: Optional[Reconciler] = None
         if self._demo_trading_enabled:
+            # The execution stack gets its OWN connection, for the reason the
+            # risk store below already had one: `ingest_fills` opens an explicit
+            # `BEGIN IMMEDIATE`, and issuing that on a handle the collector is
+            # mid-write on raises "cannot start a transaction within a
+            # transaction". That is exactly what halted production on
+            # 2026-08-20 11:16:06 UTC, when the hourly chain refresh overlapped
+            # a reconciliation pass on the then-shared connection.
+            exec_conn = self._open_owned_connection("execution")
+
             # 1. SCHEMA FIRST, on the connection the reconciler will use.
             #
             # boot_reconcile() ingests fills, which requires order_fills. On a
@@ -472,25 +508,22 @@ class Runtime:
             # the 2026-08-19 deployment halt on `no such table: order_fills`.
             # Idempotent (CREATE TABLE IF NOT EXISTS), so this is a no-op on an
             # already-initialised database and never touches existing rows.
-            init_execution_schema(conn)
+            init_execution_schema(exec_conn)
 
-            # Daily risk state gets its OWN connection. It is the only component
-            # that opens an explicit `BEGIN IMMEDIATE`, and the runtime's shared
-            # connection is used concurrently by the collector -- starting a
-            # transaction on it mid-write would raise "cannot start a
-            # transaction within a transaction". A dedicated handle keeps the
-            # cap accounting isolated from market-data writes.
-            risk_conn = get_connection(self._db_path)
-            init_execution_schema(risk_conn)
-            self._risk_conn = risk_conn
-            risk_state = RiskStateStore(risk_conn)
+            # Daily risk state keeps its own connection: cap accounting is the
+            # authority on whether an order may be sent, and must not be able to
+            # be rolled back by an unrelated component's failure.
+            risk_state_conn = self._open_owned_connection("risk_state")
+            init_execution_schema(risk_state_conn)
+            self._risk_conn = risk_state_conn
+            risk_state = RiskStateStore(risk_state_conn)
 
             # 2. Construction order is forced by a genuine cycle: risk manager
             # needs reconciler.gate_state -> executor needs risk manager ->
             # protection needs executor. The reconciler is built first, the
             # executor is attached to it, and only THEN does it boot -- so the
             # first pass can establish a missing stop instead of only halting.
-            reconciler = Reconciler(conn, client, product_id=84,
+            reconciler = Reconciler(exec_conn, client, product_id=84,
                                     risk_state=risk_state)
 
             risk_manager = RiskManager(
@@ -500,9 +533,31 @@ class Runtime:
                 halt_provider=reconciler.gate_state,
                 counters_provider=risk_state.counters,
             )
-            executor = TestnetExecutor(conn, client, risk_manager,
+            # The executor shares the reconciler's handle deliberately: it is
+            # only ever driven from the reconciliation pass (protection.ensure),
+            # so the two never transact concurrently, and sharing keeps an order
+            # row and the fill ledger that justifies it in one transaction scope.
+            executor = TestnetExecutor(exec_conn, client, risk_manager,
                                        strategy="manual", risk_state=risk_state)
             reconciler.set_executor(executor)
+
+            # Every independently scheduled writer, checked before the first
+            # BEGIN IMMEDIATE of the process rather than hours into a soak.
+            # The executor is absent by design: it is driven only from the
+            # reconciliation pass, so it shares that connection deliberately --
+            # asserted below rather than left to the reader.
+            assert_distinct_connections(
+                chain_refresher=refresher.connection,
+                snapshot_writer=snapshot_writer.connection,
+                execution=reconciler.connection,
+                risk_state=risk_state_conn,
+            )
+            if executor.connection is not reconciler.connection:
+                raise SharedConnectionError(
+                    "the executor must transact on the reconciler's connection: "
+                    "an order row and the fill ledger that justifies it belong "
+                    "to one transaction scope"
+                )
 
             reconciler.start()
             register_reconciliation_jobs(scheduler, reconciler)
@@ -763,14 +818,28 @@ class Runtime:
                 "[runtime] '%s' stop() raised: %s: %s", name, type(exc).__name__, exc
             )
 
+    def _open_owned_connection(self, label: str) -> sqlite3.Connection:
+        """A private connection for one component, closed by drain().
+
+        The runtime opens and closes every handle so that ownership is visible
+        in one place; components receive a connection and never manage its
+        lifetime.
+        """
+        conn = get_connection(self._db_path)
+        self._owned_conns.append((label, conn))
+        logger.debug("[runtime] opened '%s' DB connection", label)
+        return conn
+
     def _close_db(self) -> None:
-        if self._risk_conn is not None:
+        # Reverse open order, so the schema-owning connection closes last.
+        for label, conn in reversed(self._owned_conns):
             try:
-                self._risk_conn.close()
-                logger.info("[runtime] risk-state DB closed")
+                conn.close()
+                logger.info("[runtime] %s DB closed", label)
             except Exception as exc:
-                logger.error("[runtime] risk-state DB close error: %s", exc)
-            self._risk_conn = None
+                logger.error("[runtime] %s DB close error: %s", label, exc)
+        self._owned_conns = []
+        self._risk_conn = None
 
         if self._conn is not None:
             try:

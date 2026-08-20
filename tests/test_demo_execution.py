@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pathlib
 import sqlite3
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -2242,11 +2243,11 @@ class TestRuntimeSchemaOrdering:
     def test_lifecycle_initialises_schema_before_boot(self):
         """Source-order guard: the defect was invisible to behaviour tests."""
         src = pathlib.Path("src/runtime/lifecycle.py").read_text(encoding="utf-8")
-        assert src.index("init_execution_schema(conn)") < src.index("reconciler.start()")
+        assert src.index("init_execution_schema(exec_conn)") < src.index("reconciler.start()")
 
     def test_lifecycle_initialises_schema_on_the_runtime_connection(self):
         src = pathlib.Path("src/runtime/lifecycle.py").read_text(encoding="utf-8")
-        assert "init_execution_schema(conn)" in src, \
+        assert "init_execution_schema(exec_conn)" in src, \
             "execution schema must be ensured on the reconciler's connection"
 
 
@@ -2268,7 +2269,7 @@ class TestRuntimeExecutorWiring:
         """No parallel execution path may exist."""
         src = pathlib.Path("src/runtime/lifecycle.py").read_text(encoding="utf-8")
         assert src.count("TestnetExecutor(") == 1
-        assert src.count("Reconciler(conn, client") == 1
+        assert src.count("Reconciler(exec_conn, client") == 1
 
     def test_flat_state_creates_no_protective_stop(self, conn):
         """An executor being present must not mean an order gets placed."""
@@ -3175,6 +3176,473 @@ class TestClientOrderIdLength:
         ex.submit(it, _account(mark_price=64187.5), now=NOON)
         assert captured["client_order_id"] == it.client_order_id
         assert len(captured["client_order_id"]) <= 32
+
+
+# ---------------------------------------------------------------------------
+# 1g - Connection ownership (Gate 5C.7)
+# ---------------------------------------------------------------------------
+
+_INSTRUMENT_ROW = (
+    "INSERT OR REPLACE INTO instruments "
+    "(id, symbol, contract_type, underlying, quoting, tick_size, "
+    " contract_value, state, fetched_at) "
+    "VALUES (?,?,'call_options','BTC','USD',0.1,0.001,'live','t')"
+)
+
+
+def _exec_db(path):
+    """A database with both schemas and BTCUSD present, like production."""
+    c = storage.get_connection(path)
+    storage.init_schema(c)
+    storage.init_execution_schema(c)
+    c.execute(
+        "INSERT OR REPLACE INTO instruments "
+        "(id, symbol, contract_type, underlying, quoting, tick_size, "
+        " contract_value, state, fetched_at) "
+        "VALUES (84,'BTCUSD','perpetual_futures','BTC','USD',0.1,0.001,'live','t')"
+    )
+    c.commit()
+    return c
+
+
+class _ExplodingConn:
+    def close(self):
+        raise sqlite3.OperationalError("close failed")
+
+
+class TestSharedConnectionReproduction:
+    """Gate 5C.7: the exact production halt, reproduced and then prevented.
+
+        2026-08-20T11:16:06Z CRITICAL [reconcile] HALT: fill ingestion failed:
+            OperationalError: cannot start a transaction within a transaction
+
+    The hourly chain refresh was mid-write on the connection the reconciler was
+    also using when `ingest_fills` issued its BEGIN IMMEDIATE. A SQLite
+    transaction belongs to the connection, so "the other thread's write" and
+    "my transaction" were the same transaction.
+    """
+
+    def test_one_connection_reproduces_the_halt_verbatim(self, tmp_path):
+        c = _exec_db(tmp_path / "shared.db")
+        c.execute(_INSTRUMENT_ROW, (85, "C-BTC-71000-200826"))   # refresher, uncommitted
+        with pytest.raises(sqlite3.OperationalError) as exc:
+            fills.ingest_fills(c, [_fill("f1", "buy")])          # reconciler
+        assert "cannot start a transaction within a transaction" in str(exc.value)
+        c.close()
+
+    def test_two_connections_do_not_collide(self, tmp_path):
+        """The production shape: refresh_chain() upserts and commits its batch."""
+        path = tmp_path / "split.db"
+        chain = _exec_db(path)
+        execution = storage.get_connection(path)
+        chain.execute(_INSTRUMENT_ROW, (85, "C-BTC-71000-200826"))
+        chain.commit()
+        fills.ingest_fills(execution, [_fill("f1", "buy")])
+        assert fills.position_size(execution) == 1
+        assert chain.execute(
+            "SELECT COUNT(*) FROM instruments WHERE id = 85").fetchone()[0] == 1
+        chain.close()
+        execution.close()
+
+    def test_an_uncommitted_writer_is_serialised_never_contaminated(self, tmp_path):
+        """The boundary separate connections replace the old one with.
+
+        Holding a write transaction open past the busy timeout now yields
+        `database is locked` -- SQLite refusing to interleave two writers -- and
+        NOT `cannot start a transaction within a transaction`. The distinction
+        matters: the first is the database enforcing isolation and leaves both
+        components' rows intact; the second was two components sharing one
+        transaction. Production writes commit in well under a second, so this
+        path needs a writer that stalls, which is why it is provoked here rather
+        than waited for.
+        """
+        path = tmp_path / "locked.db"
+        chain = _exec_db(path)
+        execution = storage.get_connection(path)
+        execution.execute("PRAGMA busy_timeout = 200")
+
+        chain.execute(_INSTRUMENT_ROW, (85, "C-BTC-71000-200826"))   # not committed
+        with pytest.raises(sqlite3.OperationalError) as exc:
+            fills.ingest_fills(execution, [_fill("f1", "buy")])
+        assert "database is locked" in str(exc.value)
+        assert "within a transaction" not in str(exc.value)
+
+        chain.commit()
+        fills.ingest_fills(execution, [_fill("f1", "buy")])
+        assert fills.position_size(execution) == 1
+        assert chain.execute(
+            "SELECT COUNT(*) FROM instruments WHERE id = 85").fetchone()[0] == 1
+        chain.close()
+        execution.close()
+
+    def test_collision_happens_across_real_threads(self, tmp_path):
+        """The production shape: the refresher's write is on another thread."""
+        c = _exec_db(tmp_path / "threads.db")
+        opened, release = threading.Event(), threading.Event()
+        errors = []
+
+        def refresher():
+            try:
+                c.execute(_INSTRUMENT_ROW, (85, "C-BTC-71000-200826"))
+                opened.set()
+                release.wait(5)
+                c.commit()
+            except Exception as exc:                    # pragma: no cover
+                errors.append(exc)
+
+        t = threading.Thread(target=refresher)
+        t.start()
+        assert opened.wait(5)
+        with pytest.raises(sqlite3.OperationalError) as exc:
+            fills.ingest_fills(c, [_fill("f1", "buy")])
+        assert "within a transaction" in str(exc.value)
+        release.set()
+        t.join(5)
+        assert errors == []
+        c.close()
+
+    def test_separate_connections_survive_the_same_race(self, tmp_path):
+        path = tmp_path / "threads_ok.db"
+        chain = _exec_db(path)
+        execution = storage.get_connection(path)
+        opened, release = threading.Event(), threading.Event()
+        errors = []
+
+        def refresher():
+            try:
+                release.wait(5)
+                chain.execute(_INSTRUMENT_ROW, (85, "C-BTC-71000-200826"))
+                chain.commit()
+                opened.set()
+            except Exception as exc:                    # pragma: no cover
+                errors.append(exc)
+
+        t = threading.Thread(target=refresher)
+        t.start()
+        release.set()
+        fills.ingest_fills(execution, [_fill("f1", "buy")])
+        assert opened.wait(5)
+        t.join(5)
+        assert errors == []
+        assert fills.position_size(execution) == 1
+        assert chain.execute(
+            "SELECT COUNT(*) FROM instruments WHERE id = 85").fetchone()[0] == 1
+        chain.close()
+        execution.close()
+
+    def test_sustained_concurrency_on_separate_connections_is_clean(self, tmp_path):
+        """20 interleaved refresh/ingest rounds -- no errors, everything durable."""
+        path = tmp_path / "soak.db"
+        chain = _exec_db(path)
+        execution = storage.get_connection(path)
+        errors = []
+        rounds = 20
+
+        def refresher():
+            try:
+                for i in range(rounds):
+                    chain.execute(_INSTRUMENT_ROW, (1000 + i, "C-BTC-%d-200826" % (1000 + i)))
+                    chain.commit()
+            except Exception as exc:
+                errors.append(("chain", exc))
+
+        def reconciler():
+            try:
+                for i in range(rounds):
+                    fills.ingest_fills(execution, [_fill("f%d" % i, "buy")])
+            except Exception as exc:
+                errors.append(("execution", exc))
+
+        threads = [threading.Thread(target=refresher), threading.Thread(target=reconciler)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        assert errors == [], errors
+        assert chain.execute(
+            "SELECT COUNT(*) FROM instruments WHERE id >= 1000").fetchone()[0] == rounds
+        assert execution.execute(
+            "SELECT COUNT(*) FROM order_fills").fetchone()[0] == rounds
+        chain.close()
+        execution.close()
+
+
+class TestCrossThreadTransactionContamination:
+    """A shared handle does not merely raise -- it silently corrupts.
+
+    These failure modes are worse than the halt, because nothing logs them.
+    """
+
+    def test_shared_connection_lets_a_rollback_discard_another_components_rows(
+            self, tmp_path):
+        c = _exec_db(tmp_path / "rollback.db")
+        c.execute(_INSTRUMENT_ROW, (85, "C-BTC-71000-200826"))   # component A
+        c.rollback()                                             # component B fails
+        assert c.execute(
+            "SELECT COUNT(*) FROM instruments WHERE id = 85").fetchone()[0] == 0
+        c.close()
+
+    def test_separate_connections_confine_a_rollback_to_its_owner(self, tmp_path):
+        path = tmp_path / "rollback_ok.db"
+        chain = _exec_db(path)
+        other = storage.get_connection(path)
+        chain.execute(_INSTRUMENT_ROW, (85, "C-BTC-71000-200826"))
+        chain.commit()
+        other.execute(_INSTRUMENT_ROW, (86, "C-BTC-71200-200826"))
+        other.rollback()
+        assert chain.execute(
+            "SELECT COUNT(*) FROM instruments WHERE id = 85").fetchone()[0] == 1
+        assert chain.execute(
+            "SELECT COUNT(*) FROM instruments WHERE id = 86").fetchone()[0] == 0
+        chain.close()
+        other.close()
+
+    def test_shared_connection_lets_a_commit_publish_a_half_written_batch(
+            self, tmp_path):
+        """Component A is mid-batch; component B commits; A's partial batch lands."""
+        c = _exec_db(tmp_path / "commit.db")
+        c.execute(_INSTRUMENT_ROW, (85, "C-BTC-71000-200826"))   # A, batch incomplete
+        c.commit()                                               # B, unrelated commit
+        assert c.execute(
+            "SELECT COUNT(*) FROM instruments WHERE id = 85").fetchone()[0] == 1
+        c.close()
+
+    def test_ingest_fills_still_rolls_back_atomically_on_its_own_connection(
+            self, tmp_path):
+        """Transaction semantics preserved, not merely isolated."""
+        c = _exec_db(tmp_path / "atomic.db")
+        with pytest.raises(Exception):
+            fills.ingest_fills(c, [_fill("f1", "buy"), {"garbage": True}])
+        assert c.execute("SELECT COUNT(*) FROM order_fills").fetchone()[0] == 0
+        assert fills.position_size(c) == 0
+        fills.ingest_fills(c, [_fill("f1", "buy")])
+        assert fills.position_size(c) == 1
+        c.close()
+
+    def test_begin_immediate_is_retained_by_fill_ingestion(self):
+        """The authoritative write lock must not be softened by this fix."""
+        src = pathlib.Path("src/execution/fills.py").read_text(encoding="utf-8")
+        assert 'conn.execute("BEGIN IMMEDIATE")' in src
+
+    def test_risk_state_begin_immediate_is_retained(self):
+        src = pathlib.Path("src/risk/state.py").read_text(encoding="utf-8")
+        assert 'conn.execute("BEGIN IMMEDIATE")' in src
+
+
+class TestAssertDistinctConnections:
+    """The boot-time guard. Wiring mistakes must cost a refused start."""
+
+    def test_distinct_connections_pass(self, tmp_path):
+        a = storage.get_connection(tmp_path / "d.db")
+        b = storage.get_connection(tmp_path / "d.db")
+        storage.assert_distinct_connections(chain_refresher=a, snapshot_writer=b)
+        a.close()
+        b.close()
+
+    def test_two_handles_to_one_file_are_the_intended_arrangement(self, tmp_path):
+        """Identity, not the database path, is what must differ."""
+        path = tmp_path / "same.db"
+        a = storage.get_connection(path)
+        b = storage.get_connection(path)
+        assert a is not b
+        storage.assert_distinct_connections(a=a, b=b)
+        a.close()
+        b.close()
+
+    def test_a_shared_connection_is_refused(self, tmp_path):
+        c = storage.get_connection(tmp_path / "s.db")
+        with pytest.raises(storage.SharedConnectionError) as exc:
+            storage.assert_distinct_connections(chain_refresher=c, execution=c)
+        assert "chain_refresher" in str(exc.value)
+        assert "execution" in str(exc.value)
+        c.close()
+
+    def test_the_error_names_every_sharing_component(self, tmp_path):
+        c = storage.get_connection(tmp_path / "s3.db")
+        other = storage.get_connection(tmp_path / "s3.db")
+        with pytest.raises(storage.SharedConnectionError) as exc:
+            storage.assert_distinct_connections(
+                chain_refresher=c, snapshot_writer=other, execution=c, risk_state=c)
+        msg = str(exc.value)
+        for name in ("chain_refresher", "execution", "risk_state"):
+            assert name in msg
+        c.close()
+        other.close()
+
+    def test_no_components_is_not_an_error(self):
+        storage.assert_distinct_connections()
+
+    def test_one_component_is_not_an_error(self, tmp_path):
+        c = storage.get_connection(tmp_path / "one.db")
+        storage.assert_distinct_connections(only=c)
+        c.close()
+
+
+class TestRuntimeConnectionOwnership:
+    """Lifecycle owns every handle: opens it, names it, and closes it."""
+
+    def _runtime(self, tmp_path):
+        from src.runtime.lifecycle import Runtime
+        rt = Runtime.__new__(Runtime)
+        rt._db_path = tmp_path / "own.db"
+        rt._owned_conns = []
+        rt._conn = None
+        rt._risk_conn = None
+        return rt
+
+    def test_each_opened_connection_is_distinct(self, tmp_path):
+        rt = self._runtime(tmp_path)
+        a = rt._open_owned_connection("chain_refresher")
+        b = rt._open_owned_connection("snapshot_writer")
+        c = rt._open_owned_connection("execution")
+        d = rt._open_owned_connection("risk_state")
+        assert len({id(a), id(b), id(c), id(d)}) == 4
+        storage.assert_distinct_connections(
+            chain_refresher=a, snapshot_writer=b, execution=c, risk_state=d)
+        rt._close_db()
+
+    def test_labels_are_recorded_in_open_order(self, tmp_path):
+        rt = self._runtime(tmp_path)
+        for label in ("chain_refresher", "snapshot_writer", "execution"):
+            rt._open_owned_connection(label)
+        assert [n for n, _ in rt._owned_conns] == [
+            "chain_refresher", "snapshot_writer", "execution"]
+        rt._close_db()
+
+    def test_close_db_closes_every_owned_connection(self, tmp_path):
+        rt = self._runtime(tmp_path)
+        conns = [rt._open_owned_connection(n) for n in ("a", "b", "c")]
+        rt._close_db()
+        for c in conns:
+            with pytest.raises(sqlite3.ProgrammingError):
+                c.execute("SELECT 1")
+        assert rt._owned_conns == []
+
+    def test_close_db_is_idempotent(self, tmp_path):
+        rt = self._runtime(tmp_path)
+        rt._open_owned_connection("a")
+        rt._close_db()
+        rt._close_db()
+        assert rt._owned_conns == [] and rt._risk_conn is None
+
+    def test_close_db_continues_past_a_failing_close(self, tmp_path):
+        """One bad handle must not strand the others open."""
+        rt = self._runtime(tmp_path)
+        good = rt._open_owned_connection("good")
+        rt._owned_conns.insert(0, ("exploding", _ExplodingConn()))
+        rt._close_db()
+        with pytest.raises(sqlite3.ProgrammingError):
+            good.execute("SELECT 1")
+        assert rt._owned_conns == []
+
+    def test_close_db_clears_the_risk_connection_reference(self, tmp_path):
+        rt = self._runtime(tmp_path)
+        rt._risk_conn = rt._open_owned_connection("risk_state")
+        rt._close_db()
+        assert rt._risk_conn is None
+
+
+class TestLifecycleConnectionWiring:
+    """Source-level guards: the defect was invisible to behaviour tests.
+
+    Nothing in the collector's observable behaviour changed when the reconciler
+    was handed the collector's connection -- it took an hourly job overlapping a
+    minute job to surface it. These pin the wiring itself.
+    """
+
+    def _src(self):
+        return pathlib.Path("src/runtime/lifecycle.py").read_text(encoding="utf-8")
+
+    def test_chain_refresher_receives_its_own_connection(self):
+        src = self._src()
+        assert "conn=chain_conn" in src
+        assert "            conn=conn," not in src
+
+    def test_snapshot_writer_receives_its_own_connection(self):
+        src = self._src()
+        assert "SnapshotWriter(conn=snapshot_conn" in src
+        assert "SnapshotWriter(conn=conn" not in src
+
+    def test_reconciler_receives_its_own_connection(self):
+        src = self._src()
+        assert "Reconciler(exec_conn, client" in src
+        assert "Reconciler(conn, client" not in src
+
+    def test_executor_receives_the_execution_connection(self):
+        src = self._src()
+        assert "TestnetExecutor(exec_conn, client" in src
+        assert "TestnetExecutor(conn, client" not in src
+
+    def test_execution_schema_is_initialised_on_the_execution_connection(self):
+        assert "init_execution_schema(exec_conn)" in self._src()
+
+    def test_risk_state_keeps_its_own_connection(self):
+        src = self._src()
+        assert 'risk_state_conn = self._open_owned_connection("risk_state")' in src
+        assert "RiskStateStore(risk_state_conn)" in src
+        assert "RiskStateStore(exec_conn)" not in src
+
+    def test_the_guard_runs_before_the_first_begin_immediate(self):
+        src = self._src()
+        assert src.index("assert_distinct_connections(") < src.index("reconciler.start()")
+
+    def test_the_guard_covers_all_four_writers(self):
+        src = self._src()
+        block = src[src.index("            assert_distinct_connections("):]
+        block = block[:block.index(")")]
+        for name in ("chain_refresher", "snapshot_writer", "execution", "risk_state"):
+            assert name in block
+
+    def test_the_guard_asserts_on_components_not_on_local_variables(self):
+        """Handing a component the wrong (still distinct) handle must be caught."""
+        src = self._src()
+        block = src[src.index("            assert_distinct_connections("):]
+        block = block[:block.index(")")]
+        for expr in ("refresher.connection", "snapshot_writer.connection",
+                     "reconciler.connection"):
+            assert expr in block
+
+    def test_the_executor_sharing_the_reconcilers_handle_is_asserted(self):
+        src = self._src()
+        assert "if executor.connection is not reconciler.connection:" in src
+        assert src.index("executor.connection is not reconciler.connection") <             src.index("reconciler.start()")
+
+    def test_components_expose_the_connection_they_hold(self, conn):
+        """The guard needs a fact, not a promise."""
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        ex = TestnetExecutor(conn, _FakeReconcileClient(), _risk())
+        assert r.connection is conn
+        assert ex.connection is conn
+
+    def test_snapshot_writer_and_chain_refresher_expose_their_connection(self, conn):
+        from src.ingestion.chain_refresher import ChainRefresher
+        from src.persistence.snapshot_writer import SnapshotWriter
+        from src.state.market_state import MarketState
+        cr = ChainRefresher(client=_NoNetworkClient(), conn=conn)
+        sw = SnapshotWriter(conn=conn, state=MarketState(universe=["BTCUSD"]))
+        assert cr.connection is conn
+        assert sw.connection is conn
+
+    def test_the_collector_pair_is_guarded_even_with_trading_disarmed(self):
+        """The chain/snapshot collision needs no execution stack to happen."""
+        src = self._src()
+        first = src.index("assert_distinct_connections(")
+        gate = src.index("if self._demo_trading_enabled:")
+        assert first < gate
+
+    def test_exactly_one_reconciler_and_one_executor_are_built(self):
+        src = self._src()
+        assert src.count("TestnetExecutor(") == 1
+        assert src.count("Reconciler(exec_conn, client") == 1
+
+    def test_every_concurrent_component_uses_the_ownership_helper(self):
+        src = self._src()
+        for label in ("chain_refresher", "snapshot_writer", "execution", "risk_state"):
+            assert 'self._open_owned_connection("%s")' % label in src
+
+    def test_only_the_schema_connection_is_opened_outside_the_helper(self):
+        src = self._src()
+        assert src.count("get_connection(self._db_path)") == 2
 
 
 # ---------------------------------------------------------------------------

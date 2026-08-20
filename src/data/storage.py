@@ -353,6 +353,44 @@ def get_connection(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+class SharedConnectionError(RuntimeError):
+    """Two independently scheduled components were handed one connection."""
+
+
+def assert_distinct_connections(**owners: sqlite3.Connection) -> None:
+    """Refuse to run components that would transact through one connection.
+
+    A SQLite transaction belongs to the CONNECTION, not to the thread that
+    opened it, and `check_same_thread=False` removes the only guard rail
+    against noticing. Two scheduler threads writing through one handle
+    therefore share one transaction: either thread's commit publishes the
+    other's half-written batch, either thread's rollback discards it, and an
+    explicit ``BEGIN IMMEDIATE`` issued while the other holds an implicit
+    transaction raises ``cannot start a transaction within a transaction`` --
+    which halted production on 2026-08-20 at 11:16:06 UTC when the hourly
+    chain refresh overlapped a reconciliation pass.
+
+    Correct wiring is invisible at the call site: passing the same name twice
+    reads exactly like passing two different ones. So it is asserted at boot,
+    where a mistake costs a refused start instead of a silent halt hours later.
+
+    Identity, not equality: two handles to the same file are the correct,
+    intended arrangement (SQLite serialises them properly); one handle used by
+    two components is the defect.
+    """
+    by_handle: dict[int, list[str]] = {}
+    for name, conn in owners.items():
+        by_handle.setdefault(id(conn), []).append(name)
+
+    shared = [names for names in by_handle.values() if len(names) > 1]
+    if shared:
+        detail = "; ".join(" and ".join(sorted(names)) for names in shared)
+        raise SharedConnectionError(
+            f"components share one sqlite3.Connection: {detail}. Each "
+            f"independently scheduled component must own its own connection."
+        )
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     conn.commit()

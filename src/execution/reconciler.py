@@ -22,6 +22,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import logging
+import sqlite3
 from datetime import datetime, timezone
 
 from src.data import storage
@@ -92,6 +93,16 @@ class Reconciler:
         self._running = False
         self._booted = False
         self._pass_halted = False
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The handle this component transacts on.
+
+        Exposed so the runtime can assert at boot that no two independently
+        scheduled components hold the same one -- a check on what a component
+        actually holds, not on what the wiring code meant to hand it.
+        """
+        return self._conn
 
     # -- state -------------------------------------------------------------
 

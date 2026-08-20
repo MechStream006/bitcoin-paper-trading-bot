@@ -146,6 +146,16 @@ class ChainRefresher:
 
         self._started: bool = False
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The handle this component transacts on.
+
+        Exposed so the runtime can assert at boot that no two independently
+        scheduled components hold the same one -- a check on what a component
+        actually holds, not on what the wiring code meant to hand it.
+        """
+        return self._conn
+
     # -----------------------------------------------------------------------
     # Lifecycle (Component contract)
     # -----------------------------------------------------------------------
