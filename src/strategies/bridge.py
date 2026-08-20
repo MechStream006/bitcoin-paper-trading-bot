@@ -15,6 +15,7 @@ Deliberately does NOT: recompute signals, touch the research pipeline, write to
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import pathlib
@@ -112,6 +113,60 @@ def latest_direction(forward_db_path: str, signal_id: str = SIGNAL_ID) -> int | 
                 conn.close()
             except Exception:
                 pass
+
+
+#: Delta refuses a longer client_order_id. Measured, not assumed -- Gate 5C.5
+#: captured the exact rejection:
+#:   HTTP 400 error.code=bad_schema
+#:   schema_errors: {"message": "String length must be at most 32",
+#:                   "param": "client_order_id"}
+#: The 32-character id `supervised-gate-20260818T084125Z` was ACCEPTED, so the
+#: bound is inclusive. No restriction on underscores was established and none
+#: is assumed here.
+CLIENT_ORDER_ID_MAX_LEN = 32
+
+#: Hex digest characters appended to the readable prefix. 6 hex = 24 bits over
+#: the FULL signal id, which is what makes two signals sharing a prefix
+#: distinct -- plain truncation would silently collapse them.
+_SIGNAL_DIGEST_LEN = 6
+
+
+def _signal_token(signal_id: str, budget: int) -> str:
+    """A compact, deterministic, collision-safe stand-in for `signal_id`.
+
+    Readable prefix + digest of the WHOLE id. Truncation alone is unsafe:
+    "g3_momentum_tsmom" and "g3_momentum_tsmom_v2" share every character of any
+    prefix short enough to fit, so a truncating scheme would map two distinct
+    signals to one client_order_id -- and since the id is the idempotency key,
+    that would make one signal's order silently suppress the other's.
+    """
+    digest = hashlib.sha256(signal_id.encode("utf-8")).hexdigest()[:_SIGNAL_DIGEST_LEN]
+    alnum = "".join(ch for ch in signal_id.lower() if ch.isalnum())
+    prefix = alnum[: max(0, budget - len(digest))]
+    return prefix + digest
+
+
+def client_order_id(signal_id: str, utc_day: str, side: str, seq: int) -> str:
+    """Deterministic client_order_id, guaranteed <= 32 characters.
+
+        <signal-prefix><digest>-<YYYYMMDD>-<side-initial><seq>
+
+    Every component the old format carried is retained -- signal, day, side,
+    sequence -- with only the signal name compressed, because it is the one
+    unbounded field. The date, side and sequence are kept verbatim so the id
+    stays traceable and so two orders differing in any of them can never share
+    an id. The signal prefix absorbs the length budget, so a longer sequence
+    number shortens the prefix rather than overflowing the limit.
+    """
+    day = utc_day.replace("-", "")
+    tail = f"-{day}-{side[:1]}{int(seq)}"
+    token = _signal_token(signal_id, CLIENT_ORDER_ID_MAX_LEN - len(tail))
+    coid = token + tail
+    if len(coid) > CLIENT_ORDER_ID_MAX_LEN:          # unreachable by construction
+        raise ValueError(
+            f"client_order_id {coid!r} is {len(coid)} chars, "
+            f"exceeds Delta's limit of {CLIENT_ORDER_ID_MAX_LEN}")
+    return coid
 
 
 def executable_limit_price(direction: int, best_bid: float, best_ask: float) -> float:
@@ -225,7 +280,7 @@ def build_intent(
         stop = round((limit_price - dist) if direction == 1
                      else (limit_price + dist), 1)
         return OrderIntent(
-            client_order_id=f"{SIGNAL_ID}-{day}-{side}-{seq}",
+            client_order_id=client_order_id(SIGNAL_ID, day, side, seq),
             symbol="BTCUSD",
             product_id=limits.BTCUSD_PRODUCT_ID,
             side=side,

@@ -3006,6 +3006,177 @@ class TestStopDistanceCalibration:
         assert it.order_type == "limit_order"
 
 
+class TestClientOrderIdLength:
+    """5C.6: Delta refuses client_order_id longer than 32 characters.
+
+    Authoritative evidence, Gate 5C.5:
+        HTTP 400 error.code=bad_schema
+        schema_errors: message="String length must be at most 32",
+                       param="client_order_id"
+    No restriction on underscores was established, and none is assumed.
+    """
+
+    # The id Delta actually refused, and the one it actually accepted.
+    REJECTED = "g3_momentum_tsmom-2026-08-20-sell-1"   # 35
+    ACCEPTED = "supervised-gate-20260818T084125Z"      # 32
+
+    def test_the_rejected_id_was_over_the_limit(self):
+        assert len(self.REJECTED) == 35
+        assert len(self.REJECTED) > bridge.CLIENT_ORDER_ID_MAX_LEN
+
+    def test_the_accepted_id_sat_exactly_on_the_boundary(self):
+        """32 was ACCEPTED, so the bound is inclusive, not exclusive."""
+        assert len(self.ACCEPTED) == 32
+        assert len(self.ACCEPTED) == bridge.CLIENT_ORDER_ID_MAX_LEN
+
+    def test_the_previously_failing_case_now_fits(self):
+        coid = bridge.client_order_id(bridge.SIGNAL_ID, "2026-08-20", "sell", 1)
+        assert len(coid) <= bridge.CLIENT_ORDER_ID_MAX_LEN
+        assert len(coid) == 32
+
+    def test_underscores_are_not_forbidden(self):
+        """The constraint is length only; do not encode a phantom rule."""
+        import inspect
+        src = inspect.getsource(bridge.client_order_id) + \
+            inspect.getsource(bridge._signal_token)
+        assert "underscore" not in src.lower().replace("underscores", "")  # doc only
+
+    # --- requirement 9: never exceed 32, across the whole domain --------
+    @pytest.mark.parametrize("signal_id", [
+        "g3_momentum_tsmom", "h5_vol_regime", "g1_market_regime_sma200",
+        "ivrv_vrp_spread", "g3_atr_expansion", "x", "",
+        "a" * 64, "a" * 200, "signal.with.dots-and-dashes_and_underscores",
+    ])
+    @pytest.mark.parametrize("side", ["buy", "sell"])
+    @pytest.mark.parametrize("seq", [1, 9, 10, 99, 1000, 999999])
+    def test_never_exceeds_the_limit(self, signal_id, side, seq):
+        coid = bridge.client_order_id(signal_id, "2026-08-20", side, seq)
+        assert len(coid) <= bridge.CLIENT_ORDER_ID_MAX_LEN, f"{coid} = {len(coid)}"
+
+    def test_built_intent_id_is_within_the_limit(self):
+        for direction in (1, -1):
+            it = bridge.build_intent(direction=direction, mark_price=64187.5,
+                                     enabled=True, best_bid=64186.0,
+                                     best_ask=64187.0, utc_day="2026-08-20")
+            assert len(it.client_order_id) <= bridge.CLIENT_ORDER_ID_MAX_LEN
+
+    # --- requirements 4-7: every component stays distinguishing ---------
+    def test_different_signals_do_not_collapse(self):
+        a = bridge.client_order_id("g3_momentum_tsmom", "2026-08-20", "sell", 1)
+        b = bridge.client_order_id("g3_momentum_tsmom_v2", "2026-08-20", "sell", 1)
+        assert a != b, "two distinct signals produced the same id"
+
+    def test_signals_sharing_every_truncatable_character_differ(self):
+        """The precise case naive truncation gets wrong."""
+        base = "a" * 40
+        ids = {bridge.client_order_id(base + suffix, "2026-08-20", "sell", 1)
+               for suffix in ("", "1", "2", "_v2", "_variant_b")}
+        assert len(ids) == 5, ids
+
+    def test_different_dates_remain_distinct(self):
+        ids = {bridge.client_order_id(bridge.SIGNAL_ID, d, "sell", 1)
+               for d in ("2026-08-19", "2026-08-20", "2026-08-21", "2027-08-20")}
+        assert len(ids) == 4
+
+    def test_different_sides_remain_distinct(self):
+        a = bridge.client_order_id(bridge.SIGNAL_ID, "2026-08-20", "buy", 1)
+        b = bridge.client_order_id(bridge.SIGNAL_ID, "2026-08-20", "sell", 1)
+        assert a != b
+
+    def test_different_sequences_remain_distinct(self):
+        ids = {bridge.client_order_id(bridge.SIGNAL_ID, "2026-08-20", "sell", n)
+               for n in (1, 2, 3, 10, 99)}
+        assert len(ids) == 5
+
+    # --- requirement 8: determinism / idempotency ------------------------
+    def test_regeneration_is_identical(self):
+        args = (bridge.SIGNAL_ID, "2026-08-20", "sell", 1)
+        first = bridge.client_order_id(*args)
+        for _ in range(50):
+            assert bridge.client_order_id(*args) == first
+
+    def test_determinism_across_a_fresh_interpreter(self):
+        """No PYTHONHASHSEED dependence -- sha256, not hash()."""
+        import subprocess, sys, pathlib
+        code = ("import sys; sys.path.insert(0, r'%s');"
+                "from src.strategies import bridge;"
+                "print(bridge.client_order_id(bridge.SIGNAL_ID,'2026-08-20','sell',1))"
+                % pathlib.Path.cwd())
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                             text=True, env={"PYTHONHASHSEED": "12345", **__import__("os").environ})
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == bridge.client_order_id(
+            bridge.SIGNAL_ID, "2026-08-20", "sell", 1)
+
+    def test_build_intent_id_is_idempotent(self):
+        ids = {bridge.build_intent(direction=-1, mark_price=64187.5, enabled=True,
+                                   best_bid=64186.0, best_ask=64187.0,
+                                   utc_day="2026-08-20").client_order_id
+               for _ in range(10)}
+        assert len(ids) == 1
+
+    # --- collision safety over the real generation domain ---------------
+    def test_no_collisions_across_the_real_domain(self):
+        """Every signal the platform actually collects x dates x sides x seqs."""
+        signals = ["g3_momentum_tsmom", "h5_vol_regime", "g1_market_regime_sma200",
+                   "ivrv_vrp_spread", "g3_atr_expansion"]
+        seen = {}
+        import datetime
+        day = datetime.date(2026, 1, 1)
+        for _ in range(400):                      # >13 months of dates
+            for sig in signals:
+                for side in ("buy", "sell"):
+                    for seq in (1, 2, 3):
+                        key = (sig, day.isoformat(), side, seq)
+                        coid = bridge.client_order_id(*key)
+                        assert len(coid) <= 32
+                        if coid in seen:
+                            assert seen[coid] == key, f"COLLISION {coid}: {seen[coid]} vs {key}"
+                        seen[coid] = key
+            day += datetime.timedelta(days=1)
+        assert len(seen) == 400 * len(signals) * 2 * 3
+
+    # --- traceability retained -------------------------------------------
+    def test_id_retains_day_side_and_sequence_verbatim(self):
+        coid = bridge.client_order_id(bridge.SIGNAL_ID, "2026-08-20", "sell", 7)
+        assert "-20260820-" in coid
+        assert coid.endswith("-s7")
+
+    def test_buy_side_initial(self):
+        assert bridge.client_order_id(bridge.SIGNAL_ID, "2026-08-20", "buy", 1).endswith("-b1")
+
+    def test_signal_prefix_is_recognisable(self):
+        coid = bridge.client_order_id("g3_momentum_tsmom", "2026-08-20", "sell", 1)
+        assert coid.startswith("g3momentum")
+
+    # --- requirement 10: nothing else changed ----------------------------
+    def test_protective_coid_scheme_is_untouched(self):
+        assert protection.protective_coid(1, 1) == "stop-p1-q1"
+        assert len(protection.protective_coid(999999, 999)) <= 32
+
+    def test_protective_ids_also_fit_the_limit(self):
+        for pid in (1, 42, 999999):
+            for size in (1, 10, 999):
+                assert len(protection.protective_coid(pid, size)) <= \
+                    bridge.CLIENT_ORDER_ID_MAX_LEN
+
+    def test_executor_transmits_the_intent_id_unchanged(self, conn):
+        captured = {}
+
+        class Capturing(_FakeClient):
+            def place_order(self, **kw):
+                captured.update(kw)
+                return {"success": True, "result": {"id": 31}}
+
+        it = bridge.build_intent(direction=-1, mark_price=64187.5, enabled=True,
+                                 best_bid=64186.0, best_ask=64187.0,
+                                 utc_day="2026-08-20")
+        ex = TestnetExecutor(conn, Capturing(), _risk())
+        ex.submit(it, _account(mark_price=64187.5), now=NOON)
+        assert captured["client_order_id"] == it.client_order_id
+        assert len(captured["client_order_id"]) <= 32
+
+
 # ---------------------------------------------------------------------------
 # 2 — State machine
 # ---------------------------------------------------------------------------
@@ -3303,7 +3474,12 @@ class TestStrategyBridge:
                                  utc_day="2026-08-18")
         assert it.size == 1 and it.symbol == "BTCUSD" and it.product_id == 84
         assert it.order_type == "limit_order" and it.side == "buy"
-        assert it.client_order_id == "g3_momentum_tsmom-2026-08-18-buy-1"
+        # 5C.6: compressed to satisfy Delta's 32-char limit; day, side and
+        # sequence are still carried verbatim.
+        assert it.client_order_id == bridge.client_order_id(
+            bridge.SIGNAL_ID, "2026-08-18", "buy", 1)
+        assert len(it.client_order_id) <= bridge.CLIENT_ORDER_ID_MAX_LEN
+        assert it.client_order_id.endswith("-20260818-b1")
         assert _risk().validate(it, _account(), now=NOON).approved
 
     def test_short_direction(self):
