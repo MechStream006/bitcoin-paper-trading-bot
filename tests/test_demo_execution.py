@@ -10,6 +10,7 @@ Run:
 """
 from __future__ import annotations
 
+import ast
 import pathlib
 import sqlite3
 import threading
@@ -1179,10 +1180,13 @@ class TestFillLifecycle:
     """1-4 - fill -> position -> trade -> realised P&L."""
 
     def test_entry_fill_creates_position_and_trade(self, conn):
+        # delta_order_id matches _fill()'s order_id: an order that produced a
+        # fill always carries the exchange id, and that is now the linkage key.
         storage.write_order(conn, client_order_id="entry-1", instrument_id=84,
                             side="buy", order_type="limit_order", quantity=1.0,
                             price=64000.0, status="acked", strategy="t",
-                            placed_ts="2026-08-19T04:00:00+00:00")
+                            placed_ts="2026-08-19T04:00:00+00:00",
+                            delta_order_id="900")
         conn.commit()
         r = fills.ingest_fills(conn, [_fill("f1", "buy", price=64000.0)])
         assert r.ingested == 1 and r.position_after == 1
@@ -1207,10 +1211,13 @@ class TestFillLifecycle:
         assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
 
     def test_duplicate_fill_is_ignored(self, conn):
+        # delta_order_id matches _fill()'s order_id: an order that produced a
+        # fill always carries the exchange id, and that is now the linkage key.
         storage.write_order(conn, client_order_id="entry-1", instrument_id=84,
                             side="buy", order_type="limit_order", quantity=1.0,
                             price=64000.0, status="acked", strategy="t",
-                            placed_ts="2026-08-19T04:00:00+00:00")
+                            placed_ts="2026-08-19T04:00:00+00:00",
+                            delta_order_id="900")
         conn.commit()
         fills.ingest_fills(conn, [_fill("f1", "buy")])
         r = fills.ingest_fills(conn, [_fill("f1", "buy")])
@@ -3643,6 +3650,358 @@ class TestLifecycleConnectionWiring:
     def test_only_the_schema_connection_is_opened_outside_the_helper(self):
         src = self._src()
         assert src.count("get_connection(self._db_path)") == 2
+
+
+# ---------------------------------------------------------------------------
+# 1h - Realised P&L accounting and fill->order linkage (Gate 5C.10)
+# ---------------------------------------------------------------------------
+
+#: The real Gate 5C.8 round trip, from Delta's own fill payloads.
+G5C8_ENTRY_PRICE = 72797.0
+G5C8_ENTRY_FEE = 0.04295023
+G5C8_EXIT_PRICE = 72728.0
+G5C8_EXIT_FEE = 0.01716381
+G5C8_GROSS = 0.069                       # (72797-72728) * 0.001 * 1, short
+G5C8_WALLET_DELTA = 0.00888596           # 200.00000000 -> 200.00888596
+G5C8_OLD_STORED = 0.05183619             # what the defect recorded
+
+
+def _order(conn, coid, delta_order_id, side="sell", price=72797.0, status="acked"):
+    storage.write_order(
+        conn, client_order_id=coid, instrument_id=84, side=side,
+        order_type="limit_order", quantity=1.0, price=price, status=status,
+        strategy="g3_momentum_tsmom", placed_ts="2026-08-20T20:43:11+00:00",
+        delta_order_id=delta_order_id)
+    conn.commit()
+
+
+def _dfill(fid, side, price, fee, *, oid=None, coid=None, size=1):
+    """A fill shaped like Delta's: client_order_id is null, order_id is not."""
+    return {"id": fid, "client_order_id": coid, "order_id": oid, "product_id": 84,
+            "side": side, "size": size, "price": price, "commission": fee,
+            "created_at": "2026-08-20T20:43:12.235519Z"}
+
+
+class TestRealisedPnlIncludesBothFees:
+    """Gate 5C.8 recorded +0.05183619 while the wallet moved +0.00888596.
+
+    The difference was exactly the entry commission, which the ingestor never
+    subtracted. A loss understated by its entry fee makes MAX_DAILY_LOSS_USD
+    permissive, so this is a risk defect, not only a bookkeeping one.
+    """
+
+    def _round_trip(self, conn, entry_fee=G5C8_ENTRY_FEE, exit_fee=G5C8_EXIT_FEE,
+                    entry=G5C8_ENTRY_PRICE, exit_=G5C8_EXIT_PRICE):
+        fills.ingest_fills(conn, [_dfill("e1", "sell", entry, entry_fee)])
+        fills.ingest_fills(conn, [_dfill("x1", "buy", exit_, exit_fee)])
+        return conn.execute(
+            "SELECT realised_pnl FROM order_fills WHERE fill_id = 'x1'").fetchone()[0]
+
+    def test_both_fees_are_subtracted(self, conn):
+        realised = self._round_trip(conn)
+        assert realised == pytest.approx(
+            G5C8_GROSS - G5C8_ENTRY_FEE - G5C8_EXIT_FEE, abs=1e-9)
+
+    def test_matches_the_real_wallet_delta(self, conn):
+        """The exchange is the authority: 200.00000000 -> 200.00888596."""
+        assert self._round_trip(conn) == pytest.approx(G5C8_WALLET_DELTA, abs=1e-8)
+
+    def test_is_no_longer_the_defective_value(self, conn):
+        realised = self._round_trip(conn)
+        assert realised != pytest.approx(G5C8_OLD_STORED, abs=1e-8)
+        assert G5C8_OLD_STORED - realised == pytest.approx(G5C8_ENTRY_FEE, abs=1e-9)
+
+    def test_a_loss_is_more_negative_by_the_entry_fee(self, conn):
+        """The direction that matters: losses must not shrink."""
+        realised = self._round_trip(conn, entry=72728.0, exit_=72797.0)
+        gross = -G5C8_GROSS
+        assert realised == pytest.approx(gross - G5C8_ENTRY_FEE - G5C8_EXIT_FEE, abs=1e-9)
+        assert realised < gross - G5C8_EXIT_FEE          # strictly worse than before
+        assert realised < 0
+
+    def test_zero_fees_leave_the_price_arithmetic_untouched(self, conn):
+        assert self._round_trip(conn, entry_fee=0.0, exit_fee=0.0) == \
+            pytest.approx(G5C8_GROSS, abs=1e-9)
+
+    def test_long_side_is_symmetric(self, conn):
+        fills.ingest_fills(conn, [_dfill("e1", "buy", 70000.0, 0.03)])
+        fills.ingest_fills(conn, [_dfill("x1", "sell", 71000.0, 0.02)])
+        realised = conn.execute(
+            "SELECT realised_pnl FROM order_fills WHERE fill_id='x1'").fetchone()[0]
+        assert realised == pytest.approx(1000 * 0.001 - 0.03 - 0.02, abs=1e-9)
+
+    def test_the_corrected_value_reaches_position_risk_ledger_and_state(self, tmp_path):
+        """One number, four stores -- they must not disagree again."""
+        c = _exec_db(tmp_path / "flow.db")
+        risk_state = RiskStateStore(c)
+        now = datetime(2026, 8, 20, 20, 45, tzinfo=timezone.utc)
+        fills.ingest_fills(c, [_dfill("e1", "sell", G5C8_ENTRY_PRICE, G5C8_ENTRY_FEE)],
+                           risk_state=risk_state, now=now)
+        res = fills.ingest_fills(c, [_dfill("x1", "buy", G5C8_EXIT_PRICE, G5C8_EXIT_FEE)],
+                                 risk_state=risk_state, now=now)
+        expected = G5C8_WALLET_DELTA
+        assert res.realised_pnl == pytest.approx(expected, abs=1e-8)
+        assert c.execute("SELECT realised_pnl FROM order_fills WHERE fill_id='x1'"
+                         ).fetchone()[0] == pytest.approx(expected, abs=1e-8)
+        assert c.execute("SELECT pnl FROM positions ORDER BY id DESC LIMIT 1"
+                         ).fetchone()[0] == pytest.approx(expected, abs=1e-8)
+        assert c.execute("SELECT amount FROM risk_day_events WHERE kind='pnl'"
+                         ).fetchone()[0] == pytest.approx(expected, abs=1e-8)
+        assert risk_state.state(now).realised_pnl == pytest.approx(expected, abs=1e-8)
+        c.close()
+
+    def test_the_fee_model_is_not_reimplemented(self):
+        """Fees are subtracted in exactly one place: realised_pnl_usd.
+
+        Scans executable code only -- a docstring may legitimately explain why
+        round_trip_fees_usd is the wrong tool here without calling it.
+        """
+        src = pathlib.Path("src/execution/fills.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        called = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        called |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert "round_trip_fees_usd" not in called, \
+            "the pre-trade fee ESTIMATE must not enter the realised ledger"
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "realised_pnl_usd")
+        subs = [n for n in ast.walk(fn) if isinstance(n, ast.BinOp)
+                and isinstance(n.op, ast.Sub)]
+        assert subs, "realised_pnl_usd no longer subtracts fees"
+
+    def test_entry_fee_is_attributed_once_across_partial_exits(self, conn):
+        """Two half-exits must consume the whole entry fee, never twice."""
+        fills.ingest_fills(conn, [_dfill("e1", "sell", 72797.0, 0.04, size=2)])
+        fills.ingest_fills(conn, [_dfill("x1", "buy", 72728.0, 0.01, size=1)])
+        fills.ingest_fills(conn, [_dfill("x2", "buy", 72728.0, 0.01, size=1)])
+        rows = conn.execute(
+            "SELECT fill_id, realised_pnl FROM order_fills WHERE role='exit' "
+            "ORDER BY rowid").fetchall()
+        total = sum(r[1] for r in rows)
+        gross = (72797.0 - 72728.0) * 0.001 * 2
+        assert total == pytest.approx(gross - 0.04 - 0.02, abs=1e-9)
+        assert rows[0][1] == pytest.approx(rows[1][1], abs=1e-9)
+
+
+class TestCycleScoping:
+    """A second round trip must not inherit the first one's entry.
+
+    Found while implementing the fee fix: `_weighted_entry_price` read every
+    `role='entry'` row ever written, so after one short at 72797 was covered, a
+    fresh short at 80000 averaged to 76398.5 and a +1.00 winner was recorded as
+    a -2.60 loss. The fee fix is worthless without this -- the entry fee would
+    have been drawn from the same contaminated set.
+    """
+
+    def _two_cycles(self, conn):
+        fills.ingest_fills(conn, [_dfill("a1", "sell", 72797.0, G5C8_ENTRY_FEE)])
+        fills.ingest_fills(conn, [_dfill("a2", "buy", 72728.0, G5C8_EXIT_FEE)])
+        fills.ingest_fills(conn, [_dfill("b1", "sell", 80000.0, 0.0)])
+        fills.ingest_fills(conn, [_dfill("b2", "buy", 79000.0, 0.0)])
+
+    def test_second_cycle_entry_price_excludes_the_first(self, conn):
+        fills.ingest_fills(conn, [_dfill("a1", "sell", 72797.0, 0.0)])
+        fills.ingest_fills(conn, [_dfill("a2", "buy", 72728.0, 0.0)])
+        fills.ingest_fills(conn, [_dfill("b1", "sell", 80000.0, 0.0)])
+        assert fills._weighted_entry_price(conn) == pytest.approx(80000.0)
+
+    def test_second_cycle_pnl_is_its_own(self, conn):
+        self._two_cycles(conn)
+        realised = conn.execute(
+            "SELECT realised_pnl FROM order_fills WHERE fill_id='b2'").fetchone()[0]
+        assert realised == pytest.approx(1000 * 0.001, abs=1e-9)
+
+    def test_the_defect_would_have_inverted_the_sign(self, conn):
+        """Guards the magnitude, not just the value: -2.60 vs +1.00."""
+        self._two_cycles(conn)
+        realised = conn.execute(
+            "SELECT realised_pnl FROM order_fills WHERE fill_id='b2'").fetchone()[0]
+        assert realised > 0, "a winning cycle must not be recorded as a loss"
+        assert realised == pytest.approx(1.0, abs=1e-9)
+
+    def test_entry_fee_does_not_leak_across_cycles(self, conn):
+        self._two_cycles(conn)
+        realised = conn.execute(
+            "SELECT realised_pnl FROM order_fills WHERE fill_id='b2'").fetchone()[0]
+        assert realised == pytest.approx(1.0, abs=1e-9), \
+            "cycle 1's entry fee was charged to cycle 2"
+
+    def test_closed_position_pnl_is_per_cycle(self, conn):
+        self._two_cycles(conn)
+        rows = conn.execute(
+            "SELECT pnl FROM positions ORDER BY id").fetchall()
+        assert rows[-1][0] == pytest.approx(1.0, abs=1e-9)
+
+    def test_open_cycle_is_used_while_exposure_is_live(self, conn):
+        fills.ingest_fills(conn, [_dfill("e1", "sell", 72000.0, 0.0, size=1)])
+        fills.ingest_fills(conn, [_dfill("e2", "sell", 74000.0, 0.0, size=1)])
+        assert fills._weighted_entry_price(conn) == pytest.approx(73000.0)
+        assert fills.position_size(conn) == -2
+
+
+class TestFillOrderLinkage:
+    """Delta's /v2/fills returns client_order_id=null; order_id is authoritative."""
+
+    def test_delta_order_id_is_the_primary_key(self, conn):
+        _order(conn, "coid-A", "2169700358")
+        fills.ingest_fills(conn, [_dfill("f1", "sell", 72797.0, 0.04,
+                                         oid="2169700358")])
+        row = conn.execute("SELECT order_id FROM trades").fetchone()
+        assert row is not None, "no trade row created from the native order id"
+        assert row[0] == conn.execute(
+            "SELECT id FROM orders WHERE client_order_id='coid-A'").fetchone()[0]
+
+    def test_null_client_order_id_does_not_block_a_trade(self, conn):
+        """The exact Gate 5C.8 payload shape."""
+        _order(conn, "g3momentumtsmo3ad48e-20260820-s1", "2169700358")
+        f = _dfill("693dee267ab4445d9c9ad27ac0b96e9e", "sell",
+                   G5C8_ENTRY_PRICE, G5C8_ENTRY_FEE, oid="2169700358")
+        assert f["client_order_id"] is None
+        fills.ingest_fills(conn, [f])
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
+
+    def test_both_gate_5c8_fills_link(self, conn):
+        _order(conn, "g3momentumtsmo3ad48e-20260820-s1", "2169700358", side="sell")
+        _order(conn, "exit-p1-20260820-b1", "2169700561", side="buy",
+               price=G5C8_EXIT_PRICE)
+        fills.ingest_fills(conn, [_dfill("693dee267ab4445d9c9ad27ac0b96e9e", "sell",
+                                         G5C8_ENTRY_PRICE, G5C8_ENTRY_FEE,
+                                         oid="2169700358")])
+        fills.ingest_fills(conn, [_dfill("a0c586107e764feda525b9a35200756f", "buy",
+                                         G5C8_EXIT_PRICE, G5C8_EXIT_FEE,
+                                         oid="2169700561")])
+        rows = [tuple(r) for r in conn.execute(
+            "SELECT t.side, o.client_order_id FROM trades t "
+            "JOIN orders o ON o.id = t.order_id ORDER BY t.id").fetchall()]
+        assert rows == [("sell", "g3momentumtsmo3ad48e-20260820-s1"),
+                        ("buy", "exit-p1-20260820-b1")]
+
+    def test_client_order_id_fallback_when_no_native_id(self, conn):
+        """The UNKNOWN-submission case: an order row exists, no exchange id yet."""
+        _order(conn, "coid-B", None)
+        fills.ingest_fills(conn, [_dfill("f1", "sell", 72797.0, 0.04,
+                                         oid=None, coid="coid-B")])
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
+
+    def test_unmatched_native_id_fails_closed_and_does_not_fall_back(self, conn):
+        """A coid that WOULD match must not rescue an unknown native id."""
+        _order(conn, "coid-C", "111")
+        fills.ingest_fills(conn, [_dfill("f1", "sell", 72797.0, 0.04,
+                                         oid="999", coid="coid-C")])
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM order_fills").fetchone()[0] == 1
+
+    def test_ambiguous_native_id_fails_closed(self, conn):
+        _order(conn, "coid-D", "777")
+        _order(conn, "coid-E", "777", side="buy")
+        fills.ingest_fills(conn, [_dfill("f1", "sell", 72797.0, 0.04, oid="777")])
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+
+    def test_fill_with_no_identifier_at_all_fails_closed(self, conn):
+        fills.ingest_fills(conn, [_dfill("f1", "sell", 72797.0, 0.04)])
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+        assert fills.position_size(conn) == -1        # the fill is still recorded
+
+    def test_rejected_orders_are_unaffected(self, conn):
+        """delta_order_id IS NULL must never be matched by a native lookup."""
+        _order(conn, "rejected-1", None, status="rejected")
+        _order(conn, "rejected-2", None, status="rejected", side="buy")
+        fills.ingest_fills(conn, [_dfill("f1", "sell", 72797.0, 0.04,
+                                         oid="2169700358")])
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE status='rejected'").fetchone()[0] == 2
+
+    def test_partial_fills_each_produce_a_trade_row(self, conn):
+        _order(conn, "coid-F", "555")
+        fills.ingest_fills(conn, [
+            _dfill("p1", "sell", 72797.0, 0.02, oid="555"),
+            _dfill("p2", "sell", 72800.0, 0.02, oid="555"),
+        ])
+        rows = conn.execute("SELECT order_id, quantity FROM trades ORDER BY id").fetchall()
+        assert len(rows) == 2
+        assert rows[0][0] == rows[1][0]
+        assert fills.position_size(conn) == -2
+
+    def test_duplicate_ingestion_stays_idempotent(self, conn):
+        _order(conn, "coid-G", "666")
+        payload = [_dfill("dup1", "sell", 72797.0, 0.04, oid="666")]
+        fills.ingest_fills(conn, payload)
+        r = fills.ingest_fills(conn, payload)
+        assert r.ingested == 0 and r.skipped_duplicate == 1
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM order_fills").fetchone()[0] == 1
+        assert fills.position_size(conn) == -1
+
+    def test_linkage_is_deterministic_across_repeat_runs(self, tmp_path):
+        results = []
+        for i in range(3):
+            c = _exec_db(tmp_path / ("det%d.db" % i))
+            _order(c, "coid-H", "888")
+            fills.ingest_fills(c, [_dfill("f1", "sell", 72797.0, 0.04, oid="888")])
+            results.append(c.execute(
+                "SELECT order_id, side, quantity, price, fee FROM trades").fetchall())
+            c.close()
+        assert results[0] == results[1] == results[2]
+
+    def test_no_trade_is_fabricated_without_an_order(self, conn):
+        fills.ingest_fills(conn, [_dfill("f1", "sell", 72797.0, 0.04, oid="does-not-exist")])
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
+
+    def test_source_uses_delta_order_id_before_client_order_id(self):
+        """Executable order, not docstring order."""
+        src = pathlib.Path("src/execution/fills.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_resolve_order")
+        body = list(fn.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(
+                getattr(body[0], "value", None), ast.Constant):
+            body = body[1:]                       # drop the docstring
+        seen = []
+        for node in body:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Attribute) and sub.attr in (
+                        "delta_order_id", "client_order_id"):
+                    if sub.attr not in seen:
+                        seen.append(sub.attr)
+        assert seen[0] == "delta_order_id", seen
+
+
+class TestDailyLossSemanticsUnchanged:
+    """Requirement 12: only the number changes, never the rule."""
+
+    def test_daily_loss_cap_still_blocks_at_the_same_threshold(self, conn):
+        risk = RiskManager(kill_switch_engaged=False, platform="testnet",
+                           base_url=TESTNET_URL,
+                           counters_provider=lambda now=None:
+                               (-limits.MAX_DAILY_LOSS_USD, 0))
+        decision = risk.validate(_intent(), _account())
+        assert not decision.approved
+        assert "loss" in decision.reason.lower()
+
+    def test_a_correct_loss_reaches_the_cap_sooner_than_the_defective_one(self, tmp_path):
+        """The safety consequence, made concrete."""
+        c = _exec_db(tmp_path / "cap.db")
+        rs = RiskStateStore(c)
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        fills.ingest_fills(c, [_dfill("e1", "sell", 72728.0, G5C8_ENTRY_FEE)],
+                           risk_state=rs, now=now)
+        fills.ingest_fills(c, [_dfill("x1", "buy", 72797.0, G5C8_EXIT_FEE)],
+                           risk_state=rs, now=now)
+        corrected = rs.state(now).realised_pnl
+        defective = -G5C8_GROSS - G5C8_EXIT_FEE
+        assert corrected < defective
+        assert defective - corrected == pytest.approx(G5C8_ENTRY_FEE, abs=1e-9)
+        c.close()
+
+    def test_realised_pnl_usd_signature_and_arithmetic_are_unchanged(self):
+        assert fills.realised_pnl_usd(entry_price=100.0, exit_price=110.0, size=1,
+                                      direction=1, fees=0.0) == \
+            pytest.approx(10 * limits.BTCUSD_CONTRACT_VALUE)
+        assert fills.realised_pnl_usd(entry_price=100.0, exit_price=110.0, size=1,
+                                      direction=-1, fees=0.0) == \
+            pytest.approx(-10 * limits.BTCUSD_CONTRACT_VALUE)
 
 
 # ---------------------------------------------------------------------------

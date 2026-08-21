@@ -158,18 +158,77 @@ def open_position(conn: sqlite3.Connection) -> dict | None:
     return dict(row) if row else None
 
 
+def _cycle_fills(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """The fills of the current cycle: since exposure was last flat.
+
+    A cycle is one round trip. Exposure returning to zero ends it, and the
+    fills before that point belong to a completed trade whose entry price and
+    entry fees must not leak into the next one. Reading every `role='entry'`
+    row ever written does exactly that leaking: after one short at 72797 is
+    covered, a fresh short at 80000 averages to 76398.5, and a +1.00 winner is
+    recorded as a -2.60 loss.
+
+    Returns the still-open segment when exposure is non-zero, and the segment
+    that just closed when it is -- so a position can be finalised with the P&L
+    of its own round trip rather than of every round trip so far.
+    """
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT fill_id, side, size, price, fee, role, realised_pnl "
+        "FROM order_fills ORDER BY processed_ts, rowid"
+    ).fetchall()
+
+    flat_at: list[int] = []
+    running = 0.0
+    for i, r in enumerate(rows):
+        running += float(r["size"]) if r["side"] == "buy" else -float(r["size"])
+        if abs(running) < 1e-9:
+            flat_at.append(i)
+
+    if not flat_at:
+        return list(rows)
+    if flat_at[-1] == len(rows) - 1:
+        previous = flat_at[-2] if len(flat_at) >= 2 else -1
+        return list(rows[previous + 1:])
+    return list(rows[flat_at[-1] + 1:])
+
+
 def _weighted_entry_price(conn: sqlite3.Connection) -> float:
     """Average price of the fills that built the currently-open exposure."""
-    rows = conn.execute(
-        "SELECT side, size, price FROM order_fills WHERE role = 'entry' "
-        "ORDER BY processed_ts, rowid"
-    ).fetchall()
     qty = 0.0
     notional = 0.0
-    for side, size, price in rows:
-        qty += float(size)
-        notional += float(size) * float(price)
+    for r in _cycle_fills(conn):
+        if r["role"] != "entry":
+            continue
+        qty += float(r["size"])
+        notional += float(r["size"]) * float(r["price"])
     return (notional / qty) if qty else 0.0
+
+
+def _entry_fee_share(conn: sqlite3.Connection, closing_size: float) -> float:
+    """The entry commission attributable to closing `closing_size` contracts.
+
+    The exchange charges on both legs. The entry leg is charged when the
+    position is opened and is already recorded on the entry fill, but it is
+    only *realised* when the position is closed, so it belongs to the closing
+    fill's P&L. Attributed pro rata by size so a partial exit carries its own
+    share and a sequence of partial exits sums to the whole fee, never more.
+
+    These are the fees Delta actually charged, read back from the fill ledger
+    -- not `round_trip_fees_usd`, which is the pre-trade ESTIMATE the risk
+    budget is sized against. Using the estimate here would put a prediction in
+    the realised ledger, and would double-count the model.
+    """
+    entry_fee = 0.0
+    entry_qty = 0.0
+    for r in _cycle_fills(conn):
+        if r["role"] != "entry":
+            continue
+        entry_fee += float(r["fee"] or 0.0)
+        entry_qty += float(r["size"])
+    if entry_qty <= 0:
+        return 0.0
+    return entry_fee * (float(closing_size) / entry_qty)
 
 
 def realised_pnl_usd(*, entry_price: float, exit_price: float, size: float,
@@ -227,9 +286,16 @@ def ingest_fills(conn: sqlite3.Connection, payloads, *, instrument_id: int = 84,
             if is_exit:
                 direction = 1 if before > 0 else -1
                 entry_price = _weighted_entry_price(conn)
+                # BOTH legs. Passing only f.fee recorded Gate 5C.8's round trip
+                # as +0.05183619 when the wallet moved +0.00888596 -- overstated
+                # by exactly the entry commission, which makes a loss look
+                # smaller than it was and MAX_DAILY_LOSS_USD correspondingly
+                # permissive. One subtraction, inside realised_pnl_usd, so the
+                # fee model is not reimplemented here.
+                fees = f.fee + _entry_fee_share(conn, f.size)
                 realised = realised_pnl_usd(
                     entry_price=entry_price, exit_price=f.price,
-                    size=f.size, direction=direction, fees=f.fee)
+                    size=f.size, direction=direction, fees=fees)
                 realised_total += realised
                 pnl_refs.append(f.fill_id)
 
@@ -245,20 +311,18 @@ def ingest_fills(conn: sqlite3.Connection, payloads, *, instrument_id: int = 84,
             # the fill belongs to an order we have no record of, that is a real
             # divergence for the reconciler to surface -- not something to
             # paper over by inventing an order row to satisfy the constraint.
-            order_row = conn.execute(
-                "SELECT id FROM orders WHERE client_order_id = ?",
-                (f.client_order_id,)).fetchone()
-            if order_row is not None:
+            order_id, why = _resolve_order(conn, f)
+            if order_id is not None:
                 conn.execute(
                     "INSERT INTO trades (order_id, instrument_id, side, quantity, "
                     "price, fee, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (order_row[0], f.instrument_id, f.side, f.size, f.price,
+                    (order_id, f.instrument_id, f.side, f.size, f.price,
                      f.fee, f.exch_ts or ts),
                 )
             else:
-                log.warning("[fills] fill %s references unknown order %r; "
+                log.warning("[fills] fill %s not linked to an order (%s); "
                             "recorded in order_fills, no trade row",
-                            f.fill_id, f.client_order_id)
+                            f.fill_id, why)
             ingested += 1
 
         _project_positions(conn, strategy=strategy, ts=ts)
@@ -286,6 +350,47 @@ def ingest_fills(conn: sqlite3.Connection, payloads, *, instrument_id: int = 84,
     return result
 
 
+def _resolve_order(conn: sqlite3.Connection, f: Fill) -> tuple[int | None, str]:
+    """Local order row for a fill, by the exchange's own identifier.
+
+    Delta's `/v2/fills` does not echo `client_order_id` -- it is null on every
+    fill, even for orders submitted with one (`/v2/orders` does return it).
+    Keying the join on it therefore matched nothing, and Gate 5C.8's complete
+    round trip produced no trade rows at all. `order_id` IS present on the
+    fill, and the executor already stores it as `orders.delta_order_id`, so the
+    authoritative link was there the whole time.
+
+    When the native id is present it is the ONLY key consulted: an unmatched
+    one means the exchange filled an order this database has no record of,
+    which is a real divergence and must fail closed rather than fall through to
+    a weaker key and guess. The client_order_id fallback exists for the one
+    case where the native id is genuinely unavailable -- a submission that
+    ended UNKNOWN, whose order row was written before any exchange id came
+    back. Returns (order_id, reason) with reason set only on failure.
+    """
+    if f.delta_order_id:
+        rows = conn.execute(
+            "SELECT id FROM orders WHERE delta_order_id = ?",
+            (f.delta_order_id,)).fetchall()
+        if len(rows) == 1:
+            return int(rows[0][0]), ""
+        if not rows:
+            return None, "no local order with delta_order_id=%r" % (f.delta_order_id,)
+        return None, ("delta_order_id=%r matches %d local orders; ambiguous"
+                      % (f.delta_order_id, len(rows)))
+
+    if f.client_order_id:
+        rows = conn.execute(
+            "SELECT id FROM orders WHERE client_order_id = ?",
+            (f.client_order_id,)).fetchall()
+        if len(rows) == 1:
+            return int(rows[0][0]), ""
+        return None, ("fallback client_order_id=%r matched %d local orders"
+                      % (f.client_order_id, len(rows)))
+
+    return None, "fill carries neither delta_order_id nor client_order_id"
+
+
 def _project_positions(conn: sqlite3.Connection, *, strategy: str, ts: str) -> None:
     """Rewrite the positions projection from the fill ledger.
 
@@ -301,19 +406,18 @@ def _project_positions(conn: sqlite3.Connection, *, strategy: str, ts: str) -> N
 
     if size == 0:
         if row is not None:
-            realised = conn.execute(
-                "SELECT COALESCE(SUM(realised_pnl), 0.0) FROM order_fills "
-                "WHERE role = 'exit'"
-            ).fetchone()[0]
-            last_exit = conn.execute(
-                "SELECT price FROM order_fills WHERE role = 'exit' "
-                "ORDER BY processed_ts DESC, rowid DESC LIMIT 1"
-            ).fetchone()
+            # This position's own round trip, not every round trip ever
+            # closed -- summing across cycles made each closed position inherit
+            # its predecessors' P&L.
+            cycle = _cycle_fills(conn)
+            exits = [r for r in cycle if r["role"] == "exit"]
+            realised = sum(float(r["realised_pnl"] or 0.0) for r in exits)
+            last_exit = exits[-1]["price"] if exits else None
             conn.execute(
                 "UPDATE positions SET status = 'closed', exit_price = ?, "
                 "exit_ts = ?, pnl = ?, quantity = 0 WHERE id = ?",
-                (float(last_exit[0]) if last_exit else None, ts,
-                 float(realised or 0.0), row[0]),
+                (float(last_exit) if last_exit is not None else None, ts,
+                 float(realised), row[0]),
             )
         return
 
