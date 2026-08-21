@@ -12,11 +12,13 @@ Run from repo root:
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import pathlib
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -1066,3 +1068,304 @@ def test_snapshot_open_failure_is_fail_closed(tmp_path, monkeypatch, capsys):
     assert "SHIPPED" not in out.out                 # upload never ran
     assert list(bdir.glob("*.age")) == []           # nothing encrypted
     assert list(bdir.glob("*.manifest.json")) == [] # no manifest written
+
+
+# ---------------------------------------------------------------------------
+# Backup-policy remediation (2026-08-21): duplicate prevention, orphan
+# ciphertext retention, and failure isolation.
+# ---------------------------------------------------------------------------
+
+def _dated(bdir: Path, label: str, stamp: str, *, ciphertext=False,
+           plaintext=True) -> None:
+    """Materialise a backup artifact set for `{label}_{stamp}`."""
+    bdir.mkdir(parents=True, exist_ok=True)
+    if plaintext:
+        (bdir / f"{label}_{stamp}.db").write_bytes(b"x" * 16)
+        (bdir / f"{label}_{stamp}.manifest.json").write_text("{}", encoding="utf-8")
+    if ciphertext:
+        (bdir / f"{label}_{stamp}.db.age").write_bytes(b"y" * 16)
+        (bdir / f"{label}_{stamp}.db.age-manifest.json").write_text("{}", encoding="utf-8")
+
+
+class TestNoDuplicateFullTradingBackup:
+    """The disk defect: two timers backed up the same 1.5 GB DB every night.
+
+    btcbot-backup (--all, unencrypted, never shipped off-host) and
+    btcbot-trading-backup (--encrypt, shipped) both wrote btc_trading into
+    data/backups/. The BK3 timer was added without narrowing --all's scope.
+    """
+
+    def test_all_excluding_trading_makes_no_trading_backup(self, tmp_path, monkeypatch):
+        _setup_root(tmp_path)
+        _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+        _make_db(tmp_path / "research" / "data" / "forward_evidence.db", _H6_TABLES)
+        monkeypatch.setattr(backup, "ROOT", tmp_path)
+        monkeypatch.setattr(sys, "argv",
+                            ["backup.py", "--all", "--exclude", "btc_trading"])
+        assert backup.main() == 0
+        assert _latest_backup(tmp_path / "data" / "backups", "btc_trading") is None
+
+    def test_the_other_databases_are_still_backed_up(self, tmp_path, monkeypatch):
+        """Excluding one label must not silently disable the rest."""
+        _setup_root(tmp_path)
+        _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+        _make_db(tmp_path / "research" / "data" / "forward_evidence.db", _H6_TABLES)
+        _make_db(tmp_path / "research" / "data" / "evidence_forward.db",
+                 _EVIDENCE_FWD_TABLES)
+        monkeypatch.setattr(backup, "ROOT", tmp_path)
+        monkeypatch.setattr(sys, "argv",
+                            ["backup.py", "--all", "--exclude", "btc_trading"])
+        assert backup.main() == 0
+        assert _latest_backup(tmp_path / "data" / "evidence-backups", "evidence")
+        assert _latest_backup(tmp_path / "data" / "evidence-fwd-backups", "fwd_hg")
+
+    def test_ledger_can_also_be_excluded(self, tmp_path, monkeypatch):
+        _setup_root(tmp_path)
+        _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+        _make_db(tmp_path / "research" / "evidence_library" / "ledger.db",
+                 _LEDGER_TABLES)
+        monkeypatch.setattr(backup, "ROOT", tmp_path)
+        monkeypatch.setattr(sys, "argv", ["backup.py", "--all",
+                                          "--exclude", "ledger",
+                                          "--exclude", "btc_trading"])
+        assert backup.main() == 0
+        assert _latest_backup(tmp_path / "data" / "ledger-backups", "ledger") is None
+        assert _latest_backup(tmp_path / "data" / "backups", "btc_trading") is None
+
+    def test_without_exclusions_all_still_backs_up_trading(self, tmp_path, monkeypatch):
+        """The default must be unchanged: --exclude is opt-in."""
+        _setup_root(tmp_path)
+        _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+        monkeypatch.setattr(backup, "ROOT", tmp_path)
+        monkeypatch.setattr(sys, "argv", ["backup.py", "--all"])
+        assert backup.main() == 0
+        assert _latest_backup(tmp_path / "data" / "backups", "btc_trading") is not None
+
+    def test_unknown_label_fails_loudly(self, tmp_path, monkeypatch):
+        """A typo in a systemd unit must fail, not silently back up the wrong set."""
+        _setup_root(tmp_path)
+        _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+        monkeypatch.setattr(backup, "ROOT", tmp_path)
+        monkeypatch.setattr(sys, "argv",
+                            ["backup.py", "--all", "--exclude", "btc-trading"])
+        assert backup.main() == 1
+        assert _latest_backup(tmp_path / "data" / "backups", "btc_trading") is None
+
+    def test_explicit_single_flag_ignores_exclusion(self, tmp_path, monkeypatch):
+        """`--ledger --exclude ledger` is a contradiction; the explicit ask wins."""
+        _setup_root(tmp_path)
+        _make_db(tmp_path / "research" / "evidence_library" / "ledger.db",
+                 _LEDGER_TABLES)
+        monkeypatch.setattr(backup, "ROOT", tmp_path)
+        monkeypatch.setattr(sys, "argv",
+                            ["backup.py", "--ledger", "--exclude", "ledger"])
+        assert backup.main() == 0
+        assert _latest_backup(tmp_path / "data" / "ledger-backups", "ledger")
+
+    def test_deployed_unit_carries_the_exclusions(self):
+        """The fix is worthless if the unit does not pass them."""
+        unit = pathlib.Path("deploy/btcbot-backup.service").read_text(encoding="utf-8")
+        exec_line = next(l for l in unit.splitlines() if l.startswith("ExecStart="))
+        assert "--all" in exec_line
+        assert "--exclude btc_trading" in exec_line
+        assert "--exclude ledger" in exec_line
+
+    def test_the_two_encrypted_timers_still_own_those_labels(self):
+        """Excluding them from --all is only safe because these still run."""
+        trading = pathlib.Path(
+            "deploy/btcbot-trading-backup.service").read_text(encoding="utf-8")
+        ledger = pathlib.Path(
+            "deploy/btcbot-ledger-backup.service").read_text(encoding="utf-8")
+        assert "--encrypt" in trading
+        assert "--exclude" not in trading
+        assert "--ledger" in ledger and "--encrypt" in ledger
+
+
+class TestOrphanCiphertextRetention:
+    """A .age whose plaintext vanished used to be unreachable forever.
+
+    _apply_retention could only delete a ciphertext as a side effect of
+    deleting its plaintext sibling, so any plaintext removed by another path
+    stranded its .age permanently -- 12 orphans (~14 GB) on production.
+    """
+
+    def test_orphan_ciphertext_outside_the_window_is_reclaimed(self, tmp_path):
+        bdir = tmp_path / "backups"
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        _dated(bdir, "btc_trading", "20260715_020000", ciphertext=True, plaintext=False)
+        backup._apply_retention(bdir, now, dry_run=False, db_label="btc_trading")
+        assert not (bdir / "btc_trading_20260715_020000.db.age").exists()
+        assert not (bdir / "btc_trading_20260715_020000.db.age-manifest.json").exists()
+
+    def test_recent_orphan_ciphertext_is_kept(self, tmp_path):
+        """Age it out on the same schedule -- do not delete it for being orphaned."""
+        bdir = tmp_path / "backups"
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        _dated(bdir, "btc_trading", "20260820_020000", ciphertext=True, plaintext=False)
+        backup._apply_retention(bdir, now, dry_run=False, db_label="btc_trading")
+        assert (bdir / "btc_trading_20260820_020000.db.age").exists()
+
+    def test_paired_ciphertext_is_still_handled_by_the_plaintext_pass(self, tmp_path):
+        bdir = tmp_path / "backups"
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        _dated(bdir, "btc_trading", "20260715_020000", ciphertext=True, plaintext=True)
+        backup._apply_retention(bdir, now, dry_run=False, db_label="btc_trading")
+        for suffix in (".db", ".manifest.json", ".db.age", ".db.age-manifest.json"):
+            assert not (bdir / f"btc_trading_20260715_020000{suffix}").exists()
+
+    def test_orphan_sweep_does_not_touch_a_live_pair(self, tmp_path):
+        bdir = tmp_path / "backups"
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        _dated(bdir, "btc_trading", "20260820_020000", ciphertext=True, plaintext=True)
+        backup._apply_retention(bdir, now, dry_run=False, db_label="btc_trading")
+        assert (bdir / "btc_trading_20260820_020000.db").exists()
+        assert (bdir / "btc_trading_20260820_020000.db.age").exists()
+
+    def test_live_pairs_are_not_reported_as_orphans(self, tmp_path, capsys):
+        """The counter is what an operator reads to judge orphan accumulation.
+
+        Deletion is already safe without the plaintext-exists guard -- pass 1
+        removes expired pairs, so whatever survives into pass 2 is inside the
+        window anyway. What the guard actually protects is the reported number:
+        without it, every live pair is counted as a kept orphan and the line
+        stops meaning anything.
+        """
+        bdir = tmp_path / "backups"
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        _dated(bdir, "btc_trading", "20260820_020000", ciphertext=True, plaintext=True)
+        _dated(bdir, "btc_trading", "20260819_020000", ciphertext=True, plaintext=True)
+        backup._apply_retention(bdir, now, dry_run=False, db_label="btc_trading")
+        out = capsys.readouterr().out
+        assert "orphan_ciphertext_kept=0" in out, out
+        assert "orphan_ciphertext_deleted=0" in out, out
+
+    def test_orphan_sweep_is_label_scoped(self, tmp_path):
+        """One label's retention must never reach into another's artifacts."""
+        bdir = tmp_path / "backups"
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        _dated(bdir, "ledger", "20260715_020000", ciphertext=True, plaintext=False)
+        backup._apply_retention(bdir, now, dry_run=False, db_label="btc_trading")
+        assert (bdir / "ledger_20260715_020000.db.age").exists()
+
+    def test_dry_run_deletes_no_orphan(self, tmp_path):
+        bdir = tmp_path / "backups"
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        _dated(bdir, "btc_trading", "20260715_020000", ciphertext=True, plaintext=False)
+        backup._apply_retention(bdir, now, dry_run=True, db_label="btc_trading")
+        assert (bdir / "btc_trading_20260715_020000.db.age").exists()
+
+    def test_undated_orphan_is_never_deleted(self, tmp_path):
+        """Unparseable name => keep. Never guess at an artifact's age."""
+        bdir = tmp_path / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "btc_trading_manual.db.age").write_bytes(b"z")
+        backup._apply_retention(bdir, datetime(2026, 8, 21, tzinfo=timezone.utc),
+                                dry_run=False, db_label="btc_trading")
+        assert (bdir / "btc_trading_manual.db.age").exists()
+
+    def test_the_production_orphan_set_would_be_reclaimed(self, tmp_path):
+        """The 12 real stranded ciphertexts, by name, at a later clock."""
+        bdir = tmp_path / "backups"
+        stamps = ["20260817_085042", "20260817_093115", "20260818_024325",
+                  "20260818_060822", "20260818_162704", "20260819_024040",
+                  "20260819_035039", "20260819_062304", "20260819_095157",
+                  "20260820_024340", "20260820_053754", "20260821_024440"]
+        for s in stamps:
+            _dated(bdir, "btc_trading", s, ciphertext=True, plaintext=False)
+        backup._apply_retention(bdir, datetime(2026, 9, 30, tzinfo=timezone.utc),
+                                dry_run=False, db_label="btc_trading")
+        assert list(bdir.glob("*.age")) == []
+
+
+class TestRetentionWindowUnchanged:
+    """The rotation itself is NOT being redesigned in this change."""
+
+    def test_constants_are_untouched(self):
+        assert backup.KEEP_DAILY_DAYS == 7
+        assert backup.KEEP_WEEKLY_DAYS == 28
+        assert backup.KEEP_MONTHLY_DAYS == 365
+
+    def test_daily_weekly_monthly_rule_is_preserved(self):
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        assert backup._within_retention(datetime(2026, 8, 20, tzinfo=timezone.utc), now)
+        sunday = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        assert sunday.weekday() == 6
+        assert backup._within_retention(sunday, now)
+        assert backup._within_retention(datetime(2026, 3, 1, tzinfo=timezone.utc), now)
+        assert not backup._within_retention(
+            datetime(2026, 3, 17, tzinfo=timezone.utc), now)
+
+    def test_backup_date_reads_the_name_not_the_mtime(self, tmp_path):
+        p = tmp_path / "btc_trading_20260415_101112.db"
+        p.write_bytes(b"x")
+        assert backup._backup_date(p, "btc_trading") == datetime(
+            2026, 4, 15, tzinfo=timezone.utc)
+
+    def test_backup_date_handles_the_ciphertext_suffix(self, tmp_path):
+        p = tmp_path / "btc_trading_20260415_101112.db.age"
+        p.write_bytes(b"x")
+        assert backup._backup_date(p, "btc_trading") == datetime(
+            2026, 4, 15, tzinfo=timezone.utc)
+
+
+class TestBackupCannotDisturbTheCollector:
+    """The collector is the irreplaceable asset; backups must stay out of its way."""
+
+    def test_backup_script_imports_no_runtime_module(self):
+        src = pathlib.Path("scripts/backup.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    assert not a.name.startswith("src."), a.name
+            elif isinstance(node, ast.ImportFrom):
+                assert not (node.module or "").startswith("src."), node.module
+
+    def test_backup_never_changes_the_source_data(self, tmp_path):
+        """Backup may re-journal the source, but must not touch a single row.
+
+        run_backup sets PRAGMA journal_mode=WAL on the source (long-standing,
+        see CLAUDE.md TD-P1-002), so the file header legitimately changes. What
+        must never change is the data the collector owns.
+        """
+        src = _make_db(tmp_path / "source.db", _TRADING_TABLES)
+        conn = sqlite3.connect(str(src))
+        before = conn.execute("SELECT COUNT(*) FROM option_quotes").fetchone()[0]
+        before_rows = conn.execute(
+            "SELECT * FROM option_quotes ORDER BY id").fetchall()
+        conn.close()
+
+        backup.run_backup(src, tmp_path / "backups", dry_run=False,
+                          db_label="btc_trading")
+
+        conn = sqlite3.connect(str(src))
+        assert conn.execute("SELECT COUNT(*) FROM option_quotes").fetchone()[0] == before
+        assert conn.execute(
+            "SELECT * FROM option_quotes ORDER BY id").fetchall() == before_rows
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        conn.close()
+
+    def test_retention_dates_used_by_these_tests_are_outside_every_tier(self):
+        """Guards the tests above: a 1st-of-month or Sunday date is KEPT."""
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        chosen = datetime(2026, 7, 15, tzinfo=timezone.utc)
+        assert chosen.day != 1 and chosen.weekday() != 6
+        assert not backup._within_retention(chosen, now)
+
+    def test_units_are_oneshot_and_independent_of_the_collector(self):
+        """No ordering or dependency DIRECTIVE may bind a backup to the collector.
+
+        Checks directives, not prose: these units legitimately mention
+        btcbot.service in comments to record that it keeps running throughout.
+        """
+        for name in ("btcbot-backup.service", "btcbot-trading-backup.service",
+                     "btcbot-ledger-backup.service"):
+            text = (pathlib.Path("deploy") / name).read_text(encoding="utf-8")
+            directives = [l.strip() for l in text.splitlines()
+                          if l.strip() and not l.strip().startswith("#")]
+            assert "Type=oneshot" in directives
+            for d in directives:
+                key = d.split("=", 1)[0]
+                if key in ("After", "Before", "Requires", "Requisite", "Wants",
+                           "BindsTo", "PartOf", "Conflicts"):
+                    assert "btcbot.service" not in d, f"{name}: {d}"

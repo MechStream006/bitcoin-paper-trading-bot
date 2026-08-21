@@ -7,7 +7,13 @@ Type=oneshot
 User=btcbot
 Group=btcbot
 WorkingDirectory=/opt/btcbot
-ExecStart=/opt/btcbot/venv/bin/python scripts/backup.py --all
+# btc_trading and ledger are EXCLUDED here because each already has its own
+# dedicated encrypted BK3 timer (btcbot-trading-backup 02:40,
+# btcbot-ledger-backup 02:20) that produces both the local plaintext
+# fast-restore copy and the off-host ciphertext. Without these exclusions
+# this unit made a SECOND full 1.5 GB snapshot of btc_trading every night
+# that was never shipped off-host -- ~1.5 GB/day of pure duplication.
+ExecStart=/opt/btcbot/venv/bin/python scripts/backup.py --all --exclude btc_trading --exclude ledger
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=btcbot-backup

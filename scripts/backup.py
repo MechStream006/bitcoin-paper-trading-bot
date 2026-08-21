@@ -66,6 +66,28 @@ AGE_MANIFEST_SUFFIX = ".age-manifest.json"
 
 OFFHOST_STATUS_FILENAME = ".offhost-status.json"
 
+#: Every db_label `--all` can produce, in the order it produces them.
+#: `--exclude` is validated against this so a typo in a systemd unit fails the
+#: backup loudly at 02:00 instead of silently backing up the wrong set.
+ALL_LABELS = (
+    "evidence", "fwd_hg", "ledger", "label_store",
+    "dataset_builder", "feature_store", "btc_trading",
+)
+
+
+class UnknownLabel(ValueError):
+    """--exclude named a db_label that does not exist."""
+
+
+def _validate_excludes(excludes) -> set[str]:
+    unknown = sorted(set(excludes) - set(ALL_LABELS))
+    if unknown:
+        raise UnknownLabel(
+            f"unknown --exclude label(s): {', '.join(unknown)}; "
+            f"valid labels are: {', '.join(ALL_LABELS)}"
+        )
+    return set(excludes)
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -124,31 +146,56 @@ def _load_env_var(key: str) -> str:
     return ""
 
 
+def _backup_date(path: Path, db_label: str) -> datetime | None:
+    """UTC date encoded in `{db_label}_YYYYMMDD_HHMMSS...`, or None if unreadable.
+
+    Reads the name rather than mtime on purpose: a file copied or restored
+    keeps its logical backup date, and retention must not be fooled into
+    treating a recovered artifact as brand new.
+    """
+    name = path.name[len(db_label) + 1:] if path.name.startswith(db_label + "_") else path.name
+    for part in name.split("_"):
+        if part.isdigit() and len(part) == 8:
+            try:
+                return datetime.strptime(part, "%Y%m%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                return None
+    return None
+
+
+def _within_retention(bdate: datetime, now: datetime) -> bool:
+    """The 7-daily / 4-weekly / 12-monthly rotation, unchanged."""
+    age_days = (now - bdate).days
+    return (age_days <= KEEP_DAILY_DAYS
+            or (bdate.weekday() == 6 and age_days <= KEEP_WEEKLY_DAYS)
+            or (bdate.day == 1 and age_days <= KEEP_MONTHLY_DAYS))
+
+
 def _apply_retention(backup_dir: Path, now: datetime, dry_run: bool,
                      db_label: str = "btc_trading") -> None:
-    """Delete backup files outside the retention window."""
-    backups = sorted(backup_dir.glob(f"{db_label}_*.db"))
+    """Delete backup files outside the retention window.
+
+    Two passes, because a ciphertext can outlive its plaintext. The first pass
+    expires plaintext snapshots and takes their `.age` / `.age-manifest.json`
+    with them. The second sweeps ciphertexts that no longer HAVE a plaintext
+    sibling: any plaintext removed by something other than this function -- an
+    operator reclaiming disk, a storage-preservation gate, a stray `rm` --
+    used to strand its ciphertext permanently, because the only path that
+    could ever delete a `.age` was the deletion of the plaintext whose name
+    derived it. Twelve such orphans had accumulated on production by
+    2026-08-21, ~14 GB that retention could no longer see.
+
+    The second pass applies the SAME date rule as the first: a stranded
+    ciphertext ages out on its own schedule rather than living forever.
+    """
     kept, deleted = [], []
 
-    for f in backups:
-        # Filename: {db_label}_YYYYMMDD_HHMMSS.db — find the 8-digit date part.
-        try:
-            parts = f.stem.split("_")
-            date_str = next(p for p in parts if p.isdigit() and len(p) == 8)
-            bdate = datetime.strptime(date_str, "%Y%m%d").replace(tzinfo=timezone.utc)
-        except (ValueError, StopIteration):
+    for f in sorted(backup_dir.glob(f"{db_label}_*.db")):
+        bdate = _backup_date(f, db_label)
+        if bdate is None:
             kept.append(f)
             continue
-
-        age_days     = (now - bdate).days
-        in_daily     = age_days <= KEEP_DAILY_DAYS
-        in_weekly    = bdate.weekday() == 6 and age_days <= KEEP_WEEKLY_DAYS
-        in_monthly   = bdate.day == 1 and age_days <= KEEP_MONTHLY_DAYS
-
-        if in_daily or in_weekly or in_monthly:
-            kept.append(f)
-        else:
-            deleted.append(f)
+        (kept if _within_retention(bdate, now) else deleted).append(f)
 
     for f in deleted:
         manifest   = f.parent / (f.stem + ".manifest.json")
@@ -163,7 +210,31 @@ def _apply_retention(backup_dir: Path, now: datetime, dry_run: bool,
             age_manifest.unlink(missing_ok=True)
             print(f"[retention] deleted {f.name}")
 
-    print(f"[retention] kept={len(kept)}  deleted={len(deleted)}")
+    orphans_kept, orphans_deleted = [], []
+    for ct in sorted(backup_dir.glob(f"{db_label}_*{CIPHERTEXT_SUFFIX}")):
+        plaintext = ct.parent / ct.name[: -len(CIPHERTEXT_SUFFIX)]
+        if plaintext.exists():
+            continue                      # pass 1 owns this pair
+        bdate = _backup_date(ct, db_label)
+        if bdate is None:
+            orphans_kept.append(ct)
+            continue
+        (orphans_kept if _within_retention(bdate, now)
+         else orphans_deleted).append(ct)
+
+    for ct in orphans_deleted:
+        age_manifest = ct.parent / (ct.name[: -len(CIPHERTEXT_SUFFIX)]
+                                    + AGE_MANIFEST_SUFFIX)
+        if dry_run:
+            print(f"[DRY RUN] would delete orphaned ciphertext {ct.name}")
+        else:
+            ct.unlink(missing_ok=True)
+            age_manifest.unlink(missing_ok=True)
+            print(f"[retention] deleted orphaned ciphertext {ct.name}")
+
+    print(f"[retention] kept={len(kept)}  deleted={len(deleted)}"
+          f"  orphan_ciphertext_kept={len(orphans_kept)}"
+          f"  orphan_ciphertext_deleted={len(orphans_deleted)}")
 
 
 def _write_offhost_status(
@@ -443,6 +514,15 @@ def main() -> int:
              "evidence_forward, ledger, label_store, dataset_builder)",
     )
     parser.add_argument(
+        "--exclude", action="append", default=[], metavar="LABEL",
+        help="Skip this db_label (repeatable). Exists so a database that has "
+             "its OWN dedicated encrypted timer is not ALSO backed up by the "
+             "--all unit: btc_trading and ledger each acquired a BK3 timer "
+             "without being removed from --all's scope, which produced two "
+             "full snapshots of the same 1.5 GB database every night. "
+             f"Valid labels: {', '.join(ALL_LABELS)}",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Show what would happen without writing anything",
     )
@@ -454,6 +534,24 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    try:
+        excluded = _validate_excludes(args.exclude)
+    except UnknownLabel as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 1
+
+    def skip(label: str) -> bool:
+        """Exclusions apply to --all only.
+
+        An explicit single-database flag is an operator asking for that exact
+        backup; silently doing nothing would be worse than ignoring the
+        exclusion, so `--ledger --exclude ledger` still backs up the ledger.
+        """
+        if label in excluded and args.backup_all:
+            print(f"[skip] {label}: excluded by --exclude")
+            return True
+        return False
+
     rc_evidence    = 0
     rc_fwd_hg      = 0
     rc_ledger      = 0
@@ -462,7 +560,7 @@ def main() -> int:
     rc_feature_store = 0
     rc_trading     = 0
 
-    if args.evidence or args.backup_all:
+    if (args.evidence or args.backup_all) and not skip("evidence"):
         evidence_db  = ROOT / "research" / "data" / "forward_evidence.db"
         evidence_dir = ROOT / "data" / "evidence-backups"
         rc_evidence  = run_backup(evidence_db, evidence_dir, args.dry_run,
@@ -470,7 +568,7 @@ def main() -> int:
         if args.evidence and not args.backup_all:
             return rc_evidence
 
-    if args.fwd_hg or args.backup_all:
+    if (args.fwd_hg or args.backup_all) and not skip("fwd_hg"):
         rc_fwd_hg = run_backup(
             ROOT / "research" / "data" / "evidence_forward.db",
             ROOT / "data" / "evidence-fwd-backups",
@@ -481,7 +579,7 @@ def main() -> int:
         if args.fwd_hg and not args.backup_all:
             return rc_fwd_hg
 
-    if args.ledger or args.backup_all:
+    if (args.ledger or args.backup_all) and not skip("ledger"):
         rc_ledger = run_backup(
             ROOT / "research" / "evidence_library" / "ledger.db",
             ROOT / "data" / "ledger-backups",
@@ -492,7 +590,7 @@ def main() -> int:
         if args.ledger and not args.backup_all:
             return rc_ledger
 
-    if args.label_store or args.backup_all:
+    if (args.label_store or args.backup_all) and not skip("label_store"):
         rc_label_store = run_backup(
             ROOT / "research" / "label_store" / "label_store.db",
             ROOT / "data" / "label-store-backups",
@@ -503,7 +601,7 @@ def main() -> int:
         if args.label_store and not args.backup_all:
             return rc_label_store
 
-    if args.dataset_builder or args.backup_all:
+    if (args.dataset_builder or args.backup_all) and not skip("dataset_builder"):
         rc_dataset_builder = run_backup(
             ROOT / "research" / "dataset_builder" / "dataset_builder.db",
             ROOT / "data" / "dataset-builder-backups",
@@ -514,7 +612,7 @@ def main() -> int:
         if args.dataset_builder and not args.backup_all:
             return rc_dataset_builder
 
-    if args.feature_store or args.backup_all:
+    if (args.feature_store or args.backup_all) and not skip("feature_store"):
         rc_feature_store = run_backup(
             ROOT / "research" / "feature_store" / "feature_store.db",
             ROOT / "data" / "feature-store-backups",
@@ -525,9 +623,9 @@ def main() -> int:
         if args.feature_store and not args.backup_all:
             return rc_feature_store
 
-    if args.backup_all or not (args.evidence or args.fwd_hg or args.ledger
-                               or args.label_store or args.dataset_builder
-                               or args.feature_store):
+    if (args.backup_all or not (args.evidence or args.fwd_hg or args.ledger
+                                or args.label_store or args.dataset_builder
+                                or args.feature_store)) and not skip("btc_trading"):
         rc_trading = run_backup(args.db_path, args.backup_dir, args.dry_run,
                                 db_label="btc_trading", encrypt=args.encrypt)
 
