@@ -23,6 +23,8 @@ Run from repo root:
 """
 from __future__ import annotations
 
+import ast
+import pathlib
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -158,6 +160,40 @@ def _build_evidence_db(path: Path, sig_counts=None, latest_date=None, statuses=N
     con.close()
 
 
+def _append_run_days(path: Path, signal_id: str, n: int) -> list[str]:
+    """Append `n` consecutive run_log days AFTER whatever the fixture already holds.
+
+    Derived from the corpus, never from a literal. A hardcoded start date
+    collides with the fixture the moment the calendar reaches it: the fixture
+    ends at ``_fresh_run_date()``, which is *yesterday*, so a run of days
+    beginning at 2026-08-20 sat clear of a fixture ending 2026-08-19 and then
+    overlapped it exactly one day later, failing UNIQUE(signal_id, run_date) on
+    a morning nobody changed any code. Same failure mode ``_fresh_run_date``
+    already exists to prevent, one layer further in.
+
+    Returns the dates written, so a caller can assert on them.
+    """
+    con = sqlite3.connect(str(path))
+    try:
+        newest = con.execute(
+            "SELECT MAX(run_date) FROM run_log WHERE signal_id = ?", (signal_id,)
+        ).fetchone()[0]
+        base = datetime.fromisoformat(newest).replace(tzinfo=timezone.utc)
+        written = []
+        for i in range(1, n + 1):
+            d = (base + timedelta(days=i)).date().isoformat()
+            con.execute(
+                "INSERT INTO run_log (signal_id, run_date, fn_hash, status) "
+                "VALUES (?,?,?,?)",
+                (signal_id, d, "ab" * 32, "ok"),
+            )
+            written.append(d)
+        con.commit()
+        return written
+    finally:
+        con.close()
+
+
 def _build_h6_db(path: Path, rows):
     """rows: list of (run_ts_ms, status)."""
     con = sqlite3.connect(str(path))
@@ -236,15 +272,7 @@ class TestEvidenceDeltas:
         hb.send_heartbeat()  # commits baseline at 10 rows
 
         # advance: add 5 more rows for h5
-        con = sqlite3.connect(str(ev))
-        for i in range(5):
-            d = (datetime(2026, 8, 20, tzinfo=timezone.utc) + timedelta(days=i)).date().isoformat()
-            con.execute(
-                "INSERT INTO run_log (signal_id, run_date, fn_hash, status) VALUES (?,?,?,?)",
-                ("h5_vol_regime", d, "ab" * 32, "ok"),
-            )
-        con.commit()
-        con.close()
+        _append_run_days(ev, "h5_vol_regime", 5)
 
         hb.send_heartbeat()  # the delta must be captured from THIS send's own
         # composition -- composing again afterward would see the baseline
@@ -273,6 +301,80 @@ class TestEvidenceDeltas:
         assert "rows     : 10 total" in text
         assert "since last" not in text
         assert "first sample" not in text.split("rows")[1].split("\n")[0]
+
+
+class TestEvidenceDeltaDateIndependence:
+    """The +5 delta must not depend on what day it is run.
+
+    CI #76 went red with UNIQUE(signal_id, run_date) on a morning nobody
+    changed any code: the advance rows started at a hardcoded 2026-08-20 while
+    the fixture ends at _fresh_run_date(), which is *yesterday*. On 2026-08-20
+    that was 08-19 and the ranges were disjoint; at the next UTC midnight the
+    fixture's newest row became 08-20 and the two collided on exactly one day.
+    These pin the scenario against the clock instead of hoping.
+    """
+
+    @pytest.mark.parametrize("latest_date", [
+        "2026-08-19",   # the last date on which the old literal did not collide
+        "2026-08-20",   # the date it started colliding
+        "2026-08-21",
+        "2026-08-24",   # inside the old hardcoded run
+        "2026-12-31",   # year boundary
+        "2027-03-01",
+    ])
+    def test_positive_delta_holds_on_any_calendar_date(self, tmp_path: Path,
+                                                       latest_date: str):
+        ev = tmp_path / "evidence_forward.db"
+        _build_evidence_db(ev, sig_counts={"h5_vol_regime": (10, 1, 0)},
+                           latest_date=latest_date)
+        sent: list = []
+        hb = _make_hb(forward_status_path=str(ev))
+        hb._sender = sent.append
+        hb.send_heartbeat()
+        _append_run_days(ev, "h5_vol_regime", 5)
+        hb.send_heartbeat()
+        assert len(sent) == 2
+        assert "(+5 since last)" in sent[1]
+
+    def test_appended_days_are_strictly_after_the_fixture(self, tmp_path: Path):
+        ev = tmp_path / "evidence_forward.db"
+        _build_evidence_db(ev, sig_counts={"h5_vol_regime": (10, 1, 0)})
+        con = sqlite3.connect(str(ev))
+        before = con.execute(
+            "SELECT MAX(run_date) FROM run_log WHERE signal_id='h5_vol_regime'"
+        ).fetchone()[0]
+        con.close()
+        written = _append_run_days(ev, "h5_vol_regime", 5)
+        assert len(written) == 5
+        assert all(d > before for d in written)
+        assert written == sorted(written)
+
+    def test_appending_twice_never_collides(self, tmp_path: Path):
+        """Idempotent in the sense that matters: it never raises on re-use."""
+        ev = tmp_path / "evidence_forward.db"
+        _build_evidence_db(ev, sig_counts={"h5_vol_regime": (10, 1, 0)})
+        first = _append_run_days(ev, "h5_vol_regime", 5)
+        second = _append_run_days(ev, "h5_vol_regime", 5)
+        assert not set(first) & set(second)
+        con = sqlite3.connect(str(ev))
+        n = con.execute(
+            "SELECT COUNT(*) FROM run_log WHERE signal_id='h5_vol_regime'").fetchone()[0]
+        con.close()
+        assert n == 20
+
+    def test_the_delta_test_carries_no_calendar_literal(self):
+        """The defect was a literal date. Refuse its return."""
+        src = pathlib.Path("tests/test_heartbeat_phase_e.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        target = next(
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+            and n.name == "test_second_heartbeat_shows_correct_positive_delta")
+        for node in ast.walk(target):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id == "datetime":
+                raise AssertionError(
+                    "hardcoded datetime(...) is back in the delta test; derive "
+                    "the advance days from the fixture instead")
 
 
 # ---------------------------------------------------------------------------
