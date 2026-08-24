@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 from src.risk import limits
 from src.risk.manager import (
+    affordable_stop_distance as _affordable_stop_distance,
     OrderIntent, compute_trade_risk_usd, round_trip_fees_usd,
 )
 
@@ -193,23 +194,10 @@ def executable_limit_price(direction: int, best_bid: float, best_ask: float) -> 
     return round(math.floor(best_bid / tick) * tick, 1)
 
 
-def affordable_stop_distance(mark_price: float, size: int = 1) -> float:
-    """Largest stop distance the per-trade budget can fund, after fees.
-
-    Derived from RiskManager's OWN arithmetic rather than a parallel formula:
-    compute_trade_risk_usd() is
-
-        |limit - stop| * contract_value * size + round_trip_fees_usd(mark, size)
-
-    so the affordable distance is simply that identity solved for the distance.
-    round_trip_fees_usd is imported, not reimplemented, so a change to the fee
-    model (FEE_RESERVE_MULTIPLIER, the taker rate) moves both sides together and
-    this cannot silently drift out of agreement with the guard it must satisfy.
-    """
-    budget = limits.MAX_TRADE_RISK_USD - round_trip_fees_usd(mark_price, size)
-    if budget <= 0:
-        return 0.0
-    return budget / (limits.BTCUSD_CONTRACT_VALUE * size)
+#: Re-exported from src.risk.manager, where it now lives beside the fee model
+#: it inverts. The protective sizing needs the identical function, and
+#: execution must not import a strategy module to get it.
+affordable_stop_distance = _affordable_stop_distance
 
 
 def stop_distance(limit_price: float, mark_price: float, size: int = 1) -> float:

@@ -81,6 +81,32 @@ def round_trip_fees_usd(mark_price: float, size: int) -> float:
     return notional * limits.TAKER_FEE_RATE * 2 * limits.FEE_RESERVE_MULTIPLIER
 
 
+def affordable_stop_distance(price: float, size: int = 1) -> float:
+    """Largest stop distance the per-trade budget can fund, after fees.
+
+    Derived from compute_trade_risk_usd's OWN arithmetic rather than a parallel
+    formula:
+
+        |limit - stop| * contract_value * size + round_trip_fees_usd(price, size)
+
+    solved for the distance. round_trip_fees_usd is called, not reimplemented,
+    so a change to the fee model (FEE_RESERVE_MULTIPLIER, the taker rate) moves
+    both sides together and this cannot silently drift out of agreement with
+    the guard it must satisfy.
+
+    Lives here, beside the fee model and the risk identity it inverts, because
+    BOTH the entry sizing (strategies.bridge) and the protective sizing
+    (execution.protection) must obey the same budget. Keeping one copy is what
+    stops those two paths diverging -- which is exactly what happened between
+    Gate 5C.4 and Gate 5C.11, when the entry path was made budget-aware and the
+    protection path was left on a flat percentage.
+    """
+    budget = limits.MAX_TRADE_RISK_USD - round_trip_fees_usd(price, size)
+    if budget <= 0:
+        return 0.0
+    return budget / (limits.BTCUSD_CONTRACT_VALUE * size)
+
+
 def required_margin_usd(notional: float) -> float:
     """Margin the exchange will actually reserve for `notional`.
 

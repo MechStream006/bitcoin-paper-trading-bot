@@ -38,7 +38,8 @@ from src.risk.state import (
     MalformedRiskState, RiskStateStore, record_order_placed, utc_day_of,
 )
 from src.risk.manager import (
-    AccountSnapshot, OrderIntent, RiskManager, compute_trade_risk_usd,
+    AccountSnapshot, OrderIntent, RiskManager, affordable_stop_distance,
+    compute_trade_risk_usd,
     required_margin_usd, round_trip_fees_usd,
 )
 from src.strategies import bridge
@@ -4369,3 +4370,271 @@ class TestEndToEnd:
         _seed_order(conn, "nodelta", "submitted")
         with pytest.raises(ValueError, match="reconciliation"):
             TestnetExecutor(conn, _FakeClient(), _risk()).cancel("nodelta")
+
+
+class TestProtectiveRiskBudget:
+    """Gate 5C.12: the protective stop must obey the budget that authorised
+    the trade.
+
+    The invariant, for every open position:
+
+        |entry - trigger| * BTCUSD_CONTRACT_VALUE * size
+            + round_trip_fees_usd(entry, size)   <=   MAX_TRADE_RISK_USD
+
+    Gate 5C.4 made ENTRY sizing budget-aware and left PROTECTION on a flat
+    PROTECTIVE_STOP_DISTANCE_PCT. Gate 5C.11 measured the resulting gap on two
+    live lifecycles (10.5% and 20.2% over budget) and established that Guard 11
+    structurally cannot catch it: for a protective intent |limit - stop| is the
+    trigger-to-limit slippage band, not the loss. Nothing computed
+    |entry - trigger| anywhere, so nothing tested it. This class does.
+    """
+
+    # The audited sweep: below, at, and far above the crossover where a flat
+    # 1.4% stop stops fitting the budget.
+    PRICES = (60000.0, 65876.0, 71429.0, 79210.0, 100000.0, 131752.0, 150000.0)
+
+    # The two real Gate 5C lifecycles, as regression fixtures.
+    G5C8_SHORT_ENTRY = 72797.0
+    G5C11_LONG_ENTRY = 79210.0
+
+    @staticmethod
+    def _exposure(entry, position_size):
+        trigger, _ = protection.stop_prices(entry, position_size)
+        size = abs(position_size)
+        return (abs(entry - trigger) * limits.BTCUSD_CONTRACT_VALUE * size
+                + round_trip_fees_usd(entry, size))
+
+    # --- requirements 1-3: the invariant, both directions, fees included ---
+    @pytest.mark.parametrize("entry", PRICES)
+    @pytest.mark.parametrize("position_size", (1, -1))
+    def test_invariant_holds_across_the_price_sweep(self, entry, position_size):
+        exposure = self._exposure(entry, position_size)
+        assert exposure <= limits.MAX_TRADE_RISK_USD + 1e-9, (
+            f"protective stop at {entry} risks {exposure:.4f} "
+            f"against a {limits.MAX_TRADE_RISK_USD:.2f} budget")
+
+    @pytest.mark.parametrize("entry", PRICES)
+    def test_fees_are_part_of_the_budget_not_extra(self, entry):
+        """Price risk alone clearing the cap is not the invariant."""
+        trigger, _ = protection.stop_prices(entry, 1)
+        price_risk = abs(entry - trigger) * limits.BTCUSD_CONTRACT_VALUE
+        fees = round_trip_fees_usd(entry, 1)
+        assert fees > 0
+        assert price_risk + fees <= limits.MAX_TRADE_RISK_USD + 1e-9
+
+    @pytest.mark.parametrize("entry", PRICES)
+    def test_long_and_short_are_exactly_symmetric(self, entry):
+        long_d = abs(entry - protection.stop_prices(entry, 1)[0])
+        short_d = abs(entry - protection.stop_prices(entry, -1)[0])
+        assert long_d == pytest.approx(short_d, abs=1e-9)
+        assert self._exposure(entry, 1) == pytest.approx(
+            self._exposure(entry, -1), abs=1e-9)
+
+    def test_off_grid_entry_stays_symmetric_to_within_one_tick(self):
+        """An entry between ticks cannot be exactly symmetric AND stay in budget.
+
+        The grid sits at a different offset above and below such a price, so
+        snapping toward entry differs by up to one tick either side. Where the
+        two properties conflict the budget wins; the residual asymmetry is
+        bounded at one tick (USD 0.0001) and is never a real Delta fill anyway.
+        """
+        tick = limits.BTCUSD_TICK_SIZE
+        for base in self.PRICES:
+            for off in (0.03, 0.049, 0.07):
+                entry = base + off
+                long_d = abs(entry - protection.stop_prices(entry, 1)[0])
+                short_d = abs(entry - protection.stop_prices(entry, -1)[0])
+                assert abs(long_d - short_d) <= tick + 1e-9
+                assert self._exposure(entry, 1) <= limits.MAX_TRADE_RISK_USD + 1e-9
+                assert self._exposure(entry, -1) <= limits.MAX_TRADE_RISK_USD + 1e-9
+
+    def test_direction_still_places_the_stop_on_the_losing_side(self):
+        """Symmetry must not be bought by losing the sign."""
+        for entry in self.PRICES:
+            assert protection.stop_prices(entry, 1)[0] < entry
+            assert protection.stop_prices(entry, -1)[0] > entry
+
+    # --- requirement 4: tick rounding can only tighten ---------------------
+    def test_tick_rounding_never_widens_past_the_budget(self):
+        """Rounding a distance UP is the one direction that breaks the budget."""
+        entry = 60000.0
+        while entry <= 150000.0:
+            for px in (entry, entry + 0.03, entry + 0.07, entry + 0.049):
+                for size in (1, -1):
+                    assert self._exposure(px, size) <= limits.MAX_TRADE_RISK_USD + 1e-9
+                    trigger, limit = protection.stop_prices(px, size)
+                    for v in (trigger, limit):
+                        assert abs(round(v / limits.BTCUSD_TICK_SIZE)
+                                   * limits.BTCUSD_TICK_SIZE - v) < 1e-6
+            entry += 733.7
+
+    def test_distance_is_floored_to_a_tick_never_ceilinged(self):
+        for entry in self.PRICES:
+            d = protection.protective_stop_distance(entry, 1)
+            allowed = min(entry * limits.PROTECTIVE_STOP_DISTANCE_PCT / 100.0,
+                          affordable_stop_distance(entry, 1))
+            assert d <= allowed + 1e-9
+            assert allowed - d < limits.BTCUSD_TICK_SIZE + 1e-9
+
+    # --- requirement 5: protection is still PLACED when the budget binds ---
+    def test_budget_binding_protection_is_still_created(self, conn):
+        """Never refuse protection. An unprotected position is strictly worse."""
+        for entry in (100000.0, 131752.0, 150000.0):
+            for size in (1, -1):
+                it = protection.build_intent(conn, size, 1, entry)
+                assert it is not None
+                assert it.intent_kind == "protective"
+                assert it.stop_price > 0 and it.limit_price > 0
+                assert it.size == abs(size)
+                assert it.side == ("sell" if size > 0 else "buy")
+
+    def test_distance_is_never_zero_even_if_fees_eat_the_budget(self, monkeypatch):
+        """A stop one tick wide still beats no stop at all."""
+        monkeypatch.setattr(limits, "FEE_RESERVE_MULTIPLIER", 10_000.0)
+        assert affordable_stop_distance(150000.0, 1) == 0.0
+        d = protection.protective_stop_distance(150000.0, 1)
+        assert d >= limits.BTCUSD_TICK_SIZE
+        trigger, limit = protection.stop_prices(150000.0, 1)
+        assert trigger < 150000.0 and limit < trigger
+
+    def test_the_budget_actually_binds_above_the_crossover(self):
+        """Otherwise every assertion above passes vacuously."""
+        assert (protection.protective_stop_distance(150000.0, 1)
+                < 150000.0 * limits.PROTECTIVE_STOP_DISTANCE_PCT / 100.0)
+        # ...and below it, the strategy maximum still governs.
+        assert (protection.protective_stop_distance(60000.0, 1)
+                == pytest.approx(60000.0 * limits.PROTECTIVE_STOP_DISTANCE_PCT
+                                 / 100.0, abs=limits.BTCUSD_TICK_SIZE))
+
+    # --- requirement 7: the two live lifecycles as regression fixtures -----
+    def test_gate_5c8_short_lifecycle_would_now_be_within_budget(self):
+        """Live 2026-08-20: entry 72797 short, trigger 73816.2, risked 1.1051."""
+        before = (1019.2 * limits.BTCUSD_CONTRACT_VALUE
+                  + round_trip_fees_usd(self.G5C8_SHORT_ENTRY, 1))
+        assert before > limits.MAX_TRADE_RISK_USD
+        after = self._exposure(self.G5C8_SHORT_ENTRY, -1)
+        assert after <= limits.MAX_TRADE_RISK_USD + 1e-9
+        assert after < before
+
+    def test_gate_5c11_long_lifecycle_would_now_be_within_budget(self):
+        """Live 2026-08-24: entry 79210 long, trigger 78101.1, risked 1.2024."""
+        before = (1108.9 * limits.BTCUSD_CONTRACT_VALUE
+                  + round_trip_fees_usd(self.G5C11_LONG_ENTRY, 1))
+        assert before > limits.MAX_TRADE_RISK_USD
+        after = self._exposure(self.G5C11_LONG_ENTRY, 1)
+        assert after <= limits.MAX_TRADE_RISK_USD + 1e-9
+        assert after < before
+
+    def test_protection_now_agrees_with_the_entry_sizing_that_authorised_it(self):
+        """The Gate 5C.11 root cause was these two disagreeing by 12-22%."""
+        for entry in (self.G5C8_SHORT_ENTRY, self.G5C11_LONG_ENTRY) + self.PRICES:
+            assert (protection.protective_stop_distance(entry, 1)
+                    == pytest.approx(bridge.stop_distance(entry, entry, 1), abs=1e-9))
+
+    # --- requirement 8: a naive reversion is caught ------------------------
+    def test_flat_percentage_protection_is_rejected(self):
+        """Reverting to a raw entry-times-percentage stop must not pass."""
+        for entry in (79210.0, 100000.0, 150000.0):
+            flat = entry * limits.PROTECTIVE_STOP_DISTANCE_PCT / 100.0
+            flat_exposure = (flat * limits.BTCUSD_CONTRACT_VALUE
+                             + round_trip_fees_usd(entry, 1))
+            assert flat_exposure > limits.MAX_TRADE_RISK_USD, (
+                "fixture no longer exercises the defect")
+            assert protection.protective_stop_distance(entry, 1) < flat
+
+    def test_fee_model_change_moves_the_protective_distance(self, monkeypatch):
+        """Proves the fee model is shared, not reimplemented alongside."""
+        before = protection.protective_stop_distance(150000.0, 1)
+        monkeypatch.setattr(limits, "FEE_RESERVE_MULTIPLIER", 3.0)
+        after = protection.protective_stop_distance(150000.0, 1)
+        assert after < before
+
+    def test_protection_uses_the_shared_helper_not_a_parallel_formula(self):
+        import ast
+        import inspect
+        # Scan CODE, not prose. A docstring naming the constants it explains is
+        # not a reimplementation -- matching raw source text here would report
+        # the opposite of the truth in both directions.
+        tree = ast.parse(inspect.getsource(protection.protective_stop_distance))
+        fn = tree.body[0]
+        if (fn.body and isinstance(fn.body[0], ast.Expr)
+                and isinstance(fn.body[0].value, ast.Constant)
+                and isinstance(fn.body[0].value.value, str)):
+            fn.body = fn.body[1:]
+        names = {n.id for n in ast.walk(ast.Module(body=fn.body, type_ignores=[]))
+                 if isinstance(n, ast.Name)}
+        names |= {n.attr for n in ast.walk(ast.Module(body=fn.body, type_ignores=[]))
+                  if isinstance(n, ast.Attribute)}
+        assert "affordable_stop_distance" in names
+        assert "TAKER_FEE_RATE" not in names, "fee arithmetic was reimplemented"
+        assert "MAX_TRADE_RISK_USD" not in names, "budget arithmetic was reimplemented"
+
+    def test_execution_does_not_depend_on_a_strategy_module(self):
+        """Protection is safety infrastructure; a strategy edit must not reach it."""
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(protection))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+            elif isinstance(node, ast.Import):
+                imported |= {a.name for a in node.names}
+        assert not any(m.startswith("src.strategies") for m in imported), imported
+
+    # --- requirement 6: the 5C.1 exemptions survive ------------------------
+    def test_budget_bound_protection_keeps_every_cap_exemption(self, conn):
+        """Tightening the stop must not make protection blockable."""
+        it = protection.build_intent(conn, 1, 1, 150000.0)
+        acct = _account(position_size=1, mark_price=150000.0)
+        store = RiskStateStore(conn)
+        store.record_order_placed("a", now=NOON)
+        store.record_order_placed("b", now=NOON)
+        store.record_realised_pnl("big", -99.0, now=NOON)
+        exhausted = _risk(counters_provider=lambda: store.counters(NOON))
+        assert exhausted.validate(it, acct, now=NOON).approved
+        assert _risk(kill_switch_engaged=True).validate(it, acct, now=NOON).approved
+        dead = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+        assert _risk().validate(it, acct, now=dead).approved
+
+    def test_protective_intent_still_passes_guard_11_unchanged(self, conn):
+        """Guard 11 is untouched by this gate: it still sees |limit - stop|."""
+        it = protection.build_intent(conn, 1, 1, 150000.0)
+        seen = compute_trade_risk_usd(it, 150000.0)
+        expected = (abs(it.limit_price - it.stop_price)
+                    * limits.BTCUSD_CONTRACT_VALUE * it.size
+                    + round_trip_fees_usd(150000.0, 1))
+        assert seen == pytest.approx(expected, abs=1e-9)
+        assert _risk().validate(it, _account(position_size=1,
+                                             mark_price=150000.0), now=NOON).approved
+
+    # --- requirement 10: nothing else moved --------------------------------
+    def test_entry_sizing_semantics_are_unchanged(self):
+        """bridge.stop_distance is still min(strategy_max, affordable), floored."""
+        for mark in (64187.5, 69551.8, 79210.0, 120000.0):
+            expected = min(mark * bridge.STOP_DISTANCE_PCT / 100.0,
+                           affordable_stop_distance(mark, 1))
+            got = bridge.stop_distance(mark, mark, 1)
+            assert got <= expected + 1e-9
+            assert expected - got < limits.BTCUSD_TICK_SIZE + 1e-9
+
+    def test_order_size_and_side_are_untouched_by_the_budget(self, conn):
+        for entry in (60000.0, 150000.0):
+            assert protection.build_intent(conn, 1, 1, entry).size == 1
+            assert protection.build_intent(conn, 2, 1, entry).size == 2
+            assert protection.build_intent(conn, 1, 1, entry).side == "sell"
+            assert protection.build_intent(conn, -1, 1, entry).side == "buy"
+
+    def test_protective_coid_is_unaffected_by_the_budget(self, conn):
+        a = protection.build_intent(conn, 1, 7, 60000.0).client_order_id
+        b = protection.build_intent(conn, 1, 7, 150000.0).client_order_id
+        assert a == b == protection.protective_coid(7, 1)
+
+    def test_larger_size_tightens_rather_than_scaling_the_distance(self):
+        """The budget is per trade, not per contract."""
+        one = protection.protective_stop_distance(150000.0, 1)
+        two = protection.protective_stop_distance(150000.0, 2)
+        assert two < one
+        exposure = (two * limits.BTCUSD_CONTRACT_VALUE * 2
+                    + round_trip_fees_usd(150000.0, 2))
+        assert exposure <= limits.MAX_TRADE_RISK_USD + 1e-9

@@ -32,12 +32,17 @@ from __future__ import annotations
 import dataclasses
 import enum
 import logging
+import math
 
 from src.data import storage
 from src.execution import fills as fills_mod
 from src.execution.order_state import OPEN_STATES, OrderState
 from src.risk import limits
-from src.risk.manager import AccountSnapshot, OrderIntent
+from src.risk.manager import (
+    AccountSnapshot,
+    OrderIntent,
+    affordable_stop_distance,
+)
 
 log = logging.getLogger(__name__)
 
@@ -80,19 +85,82 @@ def protective_coid(position_id: int, size: int) -> str:
     return f"stop-p{int(position_id)}-q{int(abs(size))}"
 
 
+#: Tolerance for "this price is already on the tick grid". Well below half a
+#: tick, so it can only absorb float representation error, never a real offset.
+_TICK_EPSILON = 1e-6
+
+
+def protective_stop_distance(entry_price: float, size: int = 1) -> float:
+    """How far from entry the protective stop may sit, in price points.
+
+    The tighter of two bounds:
+
+      1. PROTECTIVE_STOP_DISTANCE_PCT -- the strategy's MAXIMUM, and
+      2. what MAX_TRADE_RISK_USD can actually fund at this entry, fees included.
+
+    Taking the minimum is the whole fix. A flat percentage against a fixed
+    dollar budget breaks as price rises: at BTC 79,210 a 1.4% stop implies
+    $1.2024 of risk against a $1.00 budget (Gate 5C.11 measured it live), and
+    above ~$131,752 it would breach even HARD_RISK_CEILING_USD. This is the
+    same correction Gate 5C.4 applied to entry sizing; protection was left
+    behind, so the two paths disagreed by 12-22%.
+
+    Floored to a whole tick: rounding a distance UP is the one direction that
+    can break the budget.
+
+    Never returns zero. A budget too small to fund even one tick still yields
+    the tightest stop the instrument can express -- an unprotected position is
+    a far worse outcome than a stop one tick wide, and refusing to protect is
+    never the safer choice.
+    """
+    tick = limits.BTCUSD_TICK_SIZE
+    strategy_max = entry_price * limits.PROTECTIVE_STOP_DISTANCE_PCT / 100.0
+    affordable = affordable_stop_distance(entry_price, size)
+    # Floored exactly as bridge.stop_distance floors the entry distance -- no
+    # epsilon here, so the two paths cannot land a tick apart.
+    distance = math.floor(min(strategy_max, affordable) / tick) * tick
+    return max(distance, tick)
+
+
 def stop_prices(entry_price: float, position_size: int) -> tuple[float, float]:
     """(trigger, limit) for a protective stop on `position_size` at `entry_price`.
 
     A long is protected below entry and a short above it. The limit sits
     further along the same direction so a triggered stop can actually fill
     rather than resting through the move it exists to escape.
+
+    The trigger is derived from a budget-bounded DISTANCE (see
+    protective_stop_distance) rather than from a raw percentage, and is snapped
+    back TOWARD entry so tick alignment can only tighten the stop, never widen
+    it past what the budget funded.
+
+    Long and short are exactly symmetric for a tick-aligned entry, which is
+    every real Delta fill. For an entry price sitting BETWEEN ticks the two
+    directions can differ by up to one tick (USD 0.0001 of risk), because the
+    grid falls at a different offset above and below it and snapping toward
+    entry is what preserves the budget. Where the two properties conflict, the
+    budget wins: never widen.
     """
     tick = limits.BTCUSD_TICK_SIZE
+    size = abs(int(position_size)) or 1
     direction = 1 if position_size > 0 else -1
-    trigger = entry_price * (1 - direction * limits.PROTECTIVE_STOP_DISTANCE_PCT / 100.0)
+    distance = protective_stop_distance(entry_price, size)
+
+    raw_trigger = entry_price - direction * distance
+    steps = raw_trigger / tick
+    if abs(steps - round(steps)) < _TICK_EPSILON:
+        # Already on the grid. Binary float division alone would decide this by
+        # its own representation error and snap one side a tick tighter than
+        # the other, breaking long/short symmetry for no economic reason.
+        steps = round(steps)
+    else:
+        # Snap toward entry -- up for a long (trigger sits below entry), down
+        # for a short -- so alignment can only tighten, never widen, the risk.
+        steps = math.ceil(steps) if direction > 0 else math.floor(steps)
+    trigger = round(steps * tick, 1)
+
     limit = trigger * (1 - direction * limits.PROTECTIVE_STOP_LIMIT_SLIPPAGE_PCT / 100.0)
-    return (round(round(trigger / tick) * tick, 1),
-            round(round(limit / tick) * tick, 1))
+    return (trigger, round(round(limit / tick) * tick, 1))
 
 
 def _live_stops(exchange_orders) -> list[dict]:

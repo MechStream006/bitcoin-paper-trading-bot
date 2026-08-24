@@ -50,9 +50,17 @@ BTCUSD_CONTRACT_VALUE = 0.001
 STOP_ORDER_TYPE = "stop_loss_order"
 STOP_TRIGGER_METHOD = "mark_price"
 
-# Distance from the position's entry price at which protection triggers.
-# Matches the strategy bridge's STOP_DISTANCE_PCT so the stop that authorised
-# the trade's risk budget is the stop that actually exists.
+# MAXIMUM distance from the position's entry price at which protection
+# triggers -- not a mandatory distance. protection.protective_stop_distance()
+# takes the tighter of this and what MAX_TRADE_RISK_USD can fund at the entry
+# price, exactly as the strategy bridge does for entry sizing.
+#
+# The previous comment here claimed this "matches the strategy bridge's
+# STOP_DISTANCE_PCT so the stop that authorised the trade's risk budget is the
+# stop that actually exists". That stopped being true at Gate 5C.4, which made
+# entry sizing budget-aware and left protection on a flat percentage; Gate
+# 5C.11 measured the resulting gap live at 12-22%. The invariant is now
+# enforced in code rather than asserted in a comment.
 PROTECTIVE_STOP_DISTANCE_PCT = 1.4
 
 # The stop is a stop-LIMIT: once triggered it becomes a limit order at this
