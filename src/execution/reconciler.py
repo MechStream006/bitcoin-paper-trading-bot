@@ -187,9 +187,28 @@ class Reconciler:
         by_coid = {
             o.get("client_order_id"): o for o in live_orders if o.get("client_order_id")
         }
-        filled_coids = {
-            f.get("client_order_id") for f in fills if f.get("client_order_id")
-        }
+        # Keyed on delta_order_id, NOT client_order_id: Delta's /v2/fills does
+        # not carry a client_order_id at all (verified live -- the field is
+        # absent from the fill record, CLAUDE.md section 11). A set built from
+        # it is therefore always empty, which silently made the FILLED branch
+        # below unreachable and classified every genuine fill as an orphaned
+        # local order. order_id is present on every fill and is already stored
+        # on every acked order, so it is the linkage the exchange actually
+        # provides -- the same correction Gate 5C.10 applied to fills.py.
+        filled_order_ids: set[str] = set()
+        #: order_id -> the latest fill timestamp for it. A partially filled
+        #: order has several fills; the one that completed it is the last, so
+        #: max() is the moment the order became FILLED.
+        fill_ts_by_order: dict[str, str] = {}
+        for f in fills:
+            oid = f.get("order_id")
+            if not oid:
+                continue
+            oid = str(oid)
+            filled_order_ids.add(oid)
+            ts = f.get("created_at")
+            if ts and ts > fill_ts_by_order.get(oid, ""):
+                fill_ts_by_order[oid] = ts
 
         local_open = storage.get_open_orders(
             self._conn, tuple(s.value for s in OPEN_STATES)
@@ -218,8 +237,13 @@ class Reconciler:
                 continue
 
             # Not live on the exchange. Did it fill, or never arrive?
-            if coid in filled_coids:
-                self._adopt(row, OrderState.FILLED, None)
+            # An order with no delta_order_id never reached matching, so it has
+            # no fill to find: it falls through to the cancelled/rejected paths
+            # below rather than being optimistically resolved as FILLED.
+            delta_id = row["delta_order_id"]
+            if delta_id and str(delta_id) in filled_order_ids:
+                self._adopt(row, OrderState.FILLED, delta_id,
+                            filled_ts=fill_ts_by_order.get(str(delta_id)))
                 findings.append((coid, Divergence.LOCAL_STALE,
                                  f"{current.value} -> filled (via fills)"))
             elif current is OrderState.UNKNOWN:
@@ -342,9 +366,15 @@ class Reconciler:
         ).fetchone()
         return int(abs(row[0])) if row and row[0] is not None else 0
 
-    def _adopt(self, row: dict, new_state: OrderState, delta_id) -> None:
+    def _adopt(self, row: dict, new_state: OrderState, delta_id,
+               filled_ts: str | None = None) -> None:
         """Adopt the exchange's view. reconcile_only=True is what permits an
-        UNKNOWN order to leave that state -- nothing else in the codebase may."""
+        UNKNOWN order to leave that state -- nothing else in the codebase may.
+
+        `filled_ts` carries the exchange's own fill timestamp when adopting
+        FILLED. storage.write_order COALESCEs it, so it is write-once: a later
+        reconciliation pass that re-adopts the same order cannot blank it.
+        """
         current = OrderState(row["status"])
         new_state = transition(current, new_state, reconcile_only=True)
         storage.write_order(
@@ -359,6 +389,7 @@ class Reconciler:
             strategy=row["strategy"],
             placed_ts=row["placed_ts"],
             delta_order_id=str(delta_id) if delta_id else row.get("delta_order_id"),
+            filled_ts=filled_ts,
         )
         log.info("[reconcile] adopted %s: %s -> %s",
                  row["client_order_id"], current.value, new_state.value)

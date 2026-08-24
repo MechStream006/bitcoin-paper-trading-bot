@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import sqlite3
+import textwrap
 import threading
 from datetime import datetime, timezone
 
@@ -4183,8 +4184,18 @@ class TestReconciliation:
         assert storage.get_order(conn, "c2")["status"] == "partial"
 
     def test_unknown_resolved_by_fills(self, conn):
-        _seed_order(conn, "c3", "unknown")
-        c = _FakeClient(fills={"success": True, "result": [{"client_order_id": "c3"}]})
+        # Fixture corrected at Gate 5C.13: the fill is linked by order_id, the
+        # only key Delta actually returns on /v2/fills (client_order_id is
+        # absent from the record -- verified live, 0 of 6 production fills had
+        # one). The assertion is unchanged: an UNKNOWN order that did fill is
+        # resolved to FILLED by the fills feed. An UNKNOWN order with no
+        # delta_order_id has no linkable key at all and still becomes REJECTED
+        # -- see test_unknown_with_no_trace_becomes_rejected just below.
+        _seed_order(conn, "c3", "unknown", "900")
+        c = _FakeClient(fills={"success": True, "result": [
+            {"id": "f1", "order_id": "900", "product_id": 84, "side": "buy",
+             "size": 1, "price": 64187.5, "commission": 0.032,
+             "created_at": "2026-08-18T09:05:00Z"}]})
         Reconciler(conn, c, product_id=84).reconcile()
         assert storage.get_order(conn, "c3")["status"] == "filled"
 
@@ -4342,7 +4353,14 @@ class TestEndToEnd:
         state, d = TestnetExecutor(conn, c, _risk()).submit(_intent(), _account(), now=NOON)
         assert state is OrderState.ACKED and d.approved
 
-        c._fills = {"success": True, "result": [{"client_order_id": "test-2026-08-18-buy-1"}]}
+        # Linked by order_id (Gate 5C.13): _ok_place acks with this id, so the
+        # local row carries it and the fill resolves through the same key the
+        # exchange really provides.
+        acked = storage.get_order(conn, "test-2026-08-18-buy-1")["delta_order_id"]
+        c._fills = {"success": True, "result": [
+            {"id": "f1", "order_id": acked, "product_id": 84, "side": "buy",
+             "size": 1, "price": 64187.5, "commission": 0.032,
+             "created_at": "2026-08-18T09:05:00Z"}]}
         c._live = {"success": True, "result": []}
         Reconciler(conn, c, product_id=84).reconcile()
         assert storage.get_order(conn, "test-2026-08-18-buy-1")["status"] == "filled"
@@ -4638,3 +4656,286 @@ class TestProtectiveRiskBudget:
         exposure = (two * limits.BTCUSD_CONTRACT_VALUE * 2
                     + round_trip_fees_usd(150000.0, 2))
         assert exposure <= limits.MAX_TRADE_RISK_USD + 1e-9
+
+
+_NO_COID = object()
+
+
+def _prod_fill(fid, side, *, oid, price=64000.0, size=1, fee=0.032,
+               created_at="2026-08-19T04:00:00Z", coid=_NO_COID):
+    """A fill shaped as Delta ACTUALLY returns it: no client_order_id field.
+
+    Verified live on production 2026-08-24 -- 0 of 6 fills carried the key, and
+    it is absent from the record entirely. The module-level _fill() helper
+    includes one, which is why the reconciler's client_order_id keying looked
+    correct under test while being dead on the exchange.
+    """
+    f = {"id": fid, "order_id": oid, "product_id": 84, "side": side,
+         "size": size, "price": price, "commission": fee,
+         "created_at": created_at}
+    if coid is not _NO_COID:
+        f["client_order_id"] = coid
+    return f
+
+
+def _local_order(conn, coid, *, delta_order_id, status="acked", side="buy",
+                 price=64000.0, size=1):
+    storage.write_order(conn, client_order_id=coid, instrument_id=84, side=side,
+                        order_type="limit_order", quantity=float(size),
+                        price=price, status=status, strategy="g3_momentum_tsmom",
+                        placed_ts="2026-08-19T03:59:00+00:00",
+                        delta_order_id=delta_order_id)
+    conn.commit()
+
+
+class TestReconcilerFillLinkage:
+    """Gate 5C.13: filled orders are detected via delta_order_id.
+
+    Delta's /v2/fills does not return client_order_id -- the field is absent
+    from the record, not merely null (verified live: 0 of 6 production fills
+    carried it). The reconciler keyed its filled-order set on exactly that
+    field, so the set was always empty, the FILLED branch was unreachable, and
+    every genuine fill was adopted as CANCELLED with an ORPHAN_LOCAL finding.
+
+    Accounting was never affected -- order_fills is keyed on delta_order_id and
+    was already correct -- but the orders table asserted that no order had ever
+    filled, and filled_ts was NULL by construction.
+    """
+
+    @staticmethod
+    def _status(conn, coid):
+        return storage.get_order(conn, coid)["status"]
+
+    @staticmethod
+    def _filled_ts(conn, coid):
+        return storage.get_order(conn, coid)["filled_ts"]
+
+    # --- 1: a production-shaped fill (no coid) still reaches FILLED --------
+    def test_fill_without_client_order_id_still_reaches_filled(self, conn):
+        _local_order(conn, "entry-A", delta_order_id="900")
+        _local_order(conn, "exit-A", delta_order_id="901", side="sell")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                _prod_fill("f1", "buy", oid="900"),
+                _prod_fill("f2", "sell", oid="901", price=64100.0)]},
+            positions={"success": True, "result": []})
+        r = Reconciler(conn, client, product_id=84)
+        result = r.reconcile()
+        assert not r.halted, r.halt_reason
+        assert self._status(conn, "entry-A") == "filled"
+        assert self._status(conn, "exit-A") == "filled"
+        assert result.clean
+
+    # --- 2: delta_order_id resolves the CORRECT local order ---------------
+    def test_delta_order_id_resolves_the_correct_order(self, conn):
+        _local_order(conn, "entry-A", delta_order_id="900")
+        _local_order(conn, "entry-B", delta_order_id="901")
+        _local_order(conn, "exit-A", delta_order_id="902", side="sell")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                _prod_fill("f1", "buy", oid="900"),
+                _prod_fill("f2", "sell", oid="902", price=64100.0)]},
+            positions={"success": True, "result": []})
+        Reconciler(conn, client, product_id=84).reconcile()
+        assert self._status(conn, "entry-A") == "filled"
+        assert self._status(conn, "exit-A") == "filled"
+        # 901 never filled: it must NOT be dragged along.
+        assert self._status(conn, "entry-B") == "cancelled"
+
+    # --- 3: filled_ts comes from the exchange's own fill timestamp --------
+    def test_filled_ts_is_populated_from_the_fill(self, conn):
+        _local_order(conn, "entry-A", delta_order_id="900")
+        _local_order(conn, "exit-A", delta_order_id="901", side="sell")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                _prod_fill("f1", "buy", oid="900",
+                           created_at="2026-08-19T04:00:00Z"),
+                _prod_fill("f2", "sell", oid="901", price=64100.0,
+                           created_at="2026-08-19T04:05:00Z")]},
+            positions={"success": True, "result": []})
+        Reconciler(conn, client, product_id=84).reconcile()
+        assert self._filled_ts(conn, "entry-A") == "2026-08-19T04:00:00Z"
+        assert self._filled_ts(conn, "exit-A") == "2026-08-19T04:05:00Z"
+
+    def test_partial_fills_take_the_completing_timestamp(self, conn):
+        """Several fills for one order: the last one is when it became FILLED."""
+        _local_order(conn, "entry-A", delta_order_id="900", size=2)
+        _local_order(conn, "exit-A", delta_order_id="901", side="sell", size=2)
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                _prod_fill("f1", "buy", oid="900", created_at="2026-08-19T04:00:00Z"),
+                _prod_fill("f2", "buy", oid="900", created_at="2026-08-19T04:02:00Z"),
+                _prod_fill("f3", "sell", oid="901", size=2, price=64100.0,
+                           created_at="2026-08-19T04:05:00Z")]},
+            positions={"success": True, "result": []})
+        Reconciler(conn, client, product_id=84).reconcile()
+        assert self._filled_ts(conn, "entry-A") == "2026-08-19T04:02:00Z"
+
+    def test_filled_ts_is_write_once_across_repeated_passes(self, conn):
+        _local_order(conn, "entry-A", delta_order_id="900")
+        _local_order(conn, "exit-A", delta_order_id="901", side="sell")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                _prod_fill("f1", "buy", oid="900"),
+                _prod_fill("f2", "sell", oid="901", price=64100.0)]},
+            positions={"success": True, "result": []})
+        r = Reconciler(conn, client, product_id=84)
+        for _ in range(4):
+            r.reconcile()
+        assert self._filled_ts(conn, "entry-A") == "2026-08-19T04:00:00Z"
+        assert self._status(conn, "entry-A") == "filled"
+        assert not r.halted
+
+    # --- 4: a normal fill is not an orphan -------------------------------
+    def test_normal_fill_is_not_classified_as_orphan(self, conn):
+        _local_order(conn, "entry-A", delta_order_id="900")
+        _local_order(conn, "exit-A", delta_order_id="901", side="sell")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                _prod_fill("f1", "buy", oid="900"),
+                _prod_fill("f2", "sell", oid="901", price=64100.0)]},
+            positions={"success": True, "result": []})
+        result = Reconciler(conn, client, product_id=84).reconcile()
+        assert Divergence.ORPHAN_LOCAL not in result.divergences
+        reasons = [why for _, d, why in result.findings
+                   if d is Divergence.LOCAL_STALE]
+        assert any("filled (via fills)" in w for w in reasons), result.findings
+
+    # --- 5: unresolvable linkage fails closed ----------------------------
+    def test_order_without_delta_order_id_is_never_guessed_filled(self, conn):
+        """No exchange id means it never reached matching: never infer FILLED."""
+        _local_order(conn, "entry-A", delta_order_id=None)
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [_prod_fill("f1", "buy", oid="900")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84)
+        r.reconcile()
+        assert self._status(conn, "entry-A") == "cancelled"
+        assert self._filled_ts(conn, "entry-A") is None
+
+    def test_unknown_delta_order_id_does_not_mark_any_order_filled(self, conn):
+        """A fill for an order id we do not hold must not resolve a bystander."""
+        _local_order(conn, "entry-A", delta_order_id="900")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                _prod_fill("f1", "buy", oid="999999")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84)
+        r.reconcile()
+        assert self._status(conn, "entry-A") != "filled"
+        # The unexplained exchange position is still the thing that halts.
+        assert r.halted
+
+    def test_unknown_order_with_no_exchange_id_stays_unlinkable(self, conn):
+        """Residual, disclosed limitation -- pinned so it cannot drift silently.
+
+        An ambiguous submit that never returned an id has no key on either
+        side: Delta puts no client_order_id on a fill, and we hold no
+        delta_order_id. Such an order is adopted REJECTED even if a fill for it
+        exists. The old client_order_id branch appeared to cover this case but
+        never could in production, so nothing real is lost -- the fill itself
+        is still ingested, so position and P&L remain correct.
+        """
+        _local_order(conn, "entry-A", delta_order_id=None, status="unknown")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [_prod_fill("f1", "buy", oid="900")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        Reconciler(conn, client, product_id=84).reconcile()
+        assert self._status(conn, "entry-A") == "rejected"
+        # The money is still right: the fill was ingested regardless.
+        assert fills.position_size(conn) == 1
+
+    def test_fill_with_no_order_id_is_ignored_for_linkage(self, conn):
+        _local_order(conn, "entry-A", delta_order_id="900")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                dict(_prod_fill("f1", "buy", oid="900"), order_id=None)]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84)
+        r.reconcile()
+        assert self._status(conn, "entry-A") != "filled"
+
+    # --- 6: the client_order_id assumption cannot come back --------------
+    def test_a_misleading_client_order_id_cannot_resolve_the_wrong_order(self, conn):
+        """The adversarial case: if the coid key returned, B would be filled.
+
+        The fill genuinely belongs to order 900 (entry-A) but carries a
+        client_order_id naming entry-B. Only delta_order_id is authoritative.
+        """
+        _local_order(conn, "entry-A", delta_order_id="900")
+        _local_order(conn, "entry-B", delta_order_id="901")
+        _local_order(conn, "exit-A", delta_order_id="902", side="sell")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                _prod_fill("f1", "buy", oid="900", coid="entry-B"),
+                _prod_fill("f2", "sell", oid="902", price=64100.0, coid="entry-B")]},
+            positions={"success": True, "result": []})
+        Reconciler(conn, client, product_id=84).reconcile()
+        assert self._status(conn, "entry-A") == "filled"
+        assert self._status(conn, "entry-B") == "cancelled", \
+            "client_order_id keying returned: the wrong order was resolved"
+
+    def test_filled_set_is_not_built_from_client_order_id(self):
+        """Structural guard, on code rather than prose."""
+        import ast
+        import inspect
+        src = inspect.getsource(Reconciler.reconcile)
+        tree = ast.parse(textwrap.dedent(src))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if isinstance(fn, ast.Attribute) and fn.attr == "get" and node.args:
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and arg.value == "client_order_id":
+                    # Permitted only for LIVE orders, which do carry it.
+                    src_seg = ast.get_source_segment(textwrap.dedent(src), node) or ""
+                    assert "f." not in src_seg, \
+                        "a fill is being keyed by client_order_id again"
+
+    # --- 7: cancellation / rejection semantics unchanged -----------------
+    def test_absent_acked_order_still_becomes_cancelled(self, conn):
+        _local_order(conn, "entry-A", delta_order_id="900")
+        client = _FakeReconcileClient(positions={"success": True, "result": []})
+        result = Reconciler(conn, client, product_id=84).reconcile()
+        assert self._status(conn, "entry-A") == "cancelled"
+        assert self._filled_ts(conn, "entry-A") is None
+        assert Divergence.ORPHAN_LOCAL in result.divergences
+
+    def test_unknown_with_no_trace_still_becomes_rejected(self, conn):
+        _local_order(conn, "entry-A", delta_order_id=None, status="unknown")
+        client = _FakeReconcileClient(positions={"success": True, "result": []})
+        result = Reconciler(conn, client, product_id=84).reconcile()
+        assert self._status(conn, "entry-A") == "rejected"
+        assert Divergence.ORPHAN_LOCAL in result.divergences
+
+    def test_live_order_path_is_untouched(self, conn):
+        """Orders still live on the exchange are matched by coid, as before."""
+        _local_stop_row(conn)
+        client = _FakeReconcileClient(
+            orders={"success": True, "result": [_stop_order()]},
+            fills={"success": True, "result": [_prod_fill("f1", "buy", oid="900")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        _local_order(conn, "entry-A", delta_order_id="900")
+        r = Reconciler(conn, client, product_id=84)
+        result = r.reconcile()
+        assert not r.halted, r.halt_reason
+        assert self._status(conn, "stop-p1-q1") == "acked"
+        assert Divergence.IN_SYNC in result.divergences
+
+    # --- accounting must not move ----------------------------------------
+    def test_position_and_pnl_are_unaffected_by_the_status_change(self, conn):
+        _local_order(conn, "entry-A", delta_order_id="900")
+        _local_order(conn, "exit-A", delta_order_id="901", side="sell")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [
+                _prod_fill("f1", "buy", oid="900", price=64000.0),
+                _prod_fill("f2", "sell", oid="901", price=64100.0)]},
+            positions={"success": True, "result": []})
+        Reconciler(conn, client, product_id=84).reconcile()
+        assert fills.position_size(conn) == 0
+        assert fills.open_position(conn) is None
+        realised = conn.execute(
+            "SELECT SUM(COALESCE(realised_pnl, 0)) FROM order_fills").fetchone()[0]
+        # (64100 - 64000) * 0.001 - both fees; unchanged by order status.
+        assert realised == pytest.approx(0.1 - 0.064, abs=1e-9)
