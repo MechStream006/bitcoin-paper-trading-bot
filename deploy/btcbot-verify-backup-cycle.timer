@@ -1,0 +1,15 @@
+[Unit]
+Description=Verify the nightly backup cycle every morning, after it has finished
+Documentation=file:/opt/btcbot/docs/ops/offhost-backup.md
+
+[Timer]
+# Recurring, not a one-shot date. 02:55 is after the trading backup's observed
+# completion (02:43:40 -> 02:46:24); the first verifier sampled at 02:45 and
+# reported a false INCOMPLETE because it landed inside that run.
+OnCalendar=*-*-* 02:55:00 UTC
+AccuracySec=1min
+# A missed morning runs on the next boot rather than being skipped silently.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
