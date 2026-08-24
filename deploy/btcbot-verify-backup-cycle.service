@@ -1,0 +1,32 @@
+[Unit]
+Description=BTC Bot backup-policy cycle verification (read-only)
+Documentation=file:/opt/btcbot/docs/ops/offhost-backup.md
+# Deliberately NO After=/Requires=/BindsTo= on btcbot.service: this unit must
+# never be able to order, delay or influence the collector.
+After=network.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+# Journal read access, granted to THIS PROCESS only. The btcbot system account
+# itself is not modified.
+SupplementaryGroups=systemd-journal
+ExecStart=/opt/btcbot/venv/bin/python scripts/verify_backup_cycle.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-verify-cycle
+
+# --- containment: the report directory is the ONLY writable path ------------
+StateDirectory=btcbot-verification
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+# Cannot reach Delta or S3. This verifier reads local evidence only, and the
+# production IAM role is write-only anyway, so probing S3 would prove nothing.
+PrivateNetwork=yes
