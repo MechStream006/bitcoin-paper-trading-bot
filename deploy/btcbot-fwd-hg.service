@@ -23,7 +23,14 @@ SyslogIdentifier=btcbot-fwd-hg
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/opt/btcbot/data /opt/btcbot/research/data
+# evidence_library is required by the DEPLOYED unit (host, since
+# 2026-06-27) and was missing here -- repo drift, not an intentional
+# tightening. run_daily invokes evidence_library/report.py --check, and
+# although 18 consecutive daily runs left ledger.db untouched (mtime
+# 2026-08-07, the migration), SQLite may still require write access to
+# OPEN a database. Removing the path is unproven and would risk the
+# Gate 5C.26 failure class, so the deployed grant is preserved.
+ReadWritePaths=/opt/btcbot/data /opt/btcbot/research/data /opt/btcbot/research/evidence_library
 
 [Install]
 WantedBy=multi-user.target

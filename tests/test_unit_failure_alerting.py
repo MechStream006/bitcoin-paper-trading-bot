@@ -101,6 +101,21 @@ class TestOnFailureWiring:
         assert "OnCalendar=*-*-* 01:00:00 UTC" in d
         assert "Persistent=true" in d
 
+    def test_forward_unit_keeps_the_deployed_write_paths(self):
+        """Repo/host drift caught at Gate 5C.28.
+
+        The deployed unit has granted /opt/btcbot/research/evidence_library
+        since 2026-06-27; the repo copy did not. run_daily invokes
+        evidence_library/report.py --check, so installing the repo unit as-was
+        would have removed a write path the running job may need to OPEN its
+        database -- risking the very failure class 5C.26/5C.27 addressed.
+        """
+        rwp = [x for x in _directives(FWD_UNIT) if x.startswith("ReadWritePaths=")]
+        assert len(rwp) == 1, rwp
+        for required in ("/opt/btcbot/data", "/opt/btcbot/research/data",
+                         "/opt/btcbot/research/evidence_library"):
+            assert required in rwp[0], f"{required} missing from {rwp[0]}"
+
     def test_forward_unit_still_oneshot_and_unprivileged(self):
         d = _directives(FWD_UNIT)
         assert "Type=oneshot" in d
