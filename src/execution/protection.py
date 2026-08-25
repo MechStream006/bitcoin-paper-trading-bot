@@ -163,6 +163,59 @@ def stop_prices(entry_price: float, position_size: int) -> tuple[float, float]:
     return (trigger, round(round(limit / tick) * tick, 1))
 
 
+def cancel_stale_reducing_orders(conn, client, exchange_orders,
+                                 position_size: int) -> list[str]:
+    """Cancel live reduce-only NON-stop orders once exposure is flat.
+
+    A supervised exit is a reduce-only limit with time_in_force=gtc. If it does
+    not cross it rests indefinitely -- Gate 5C.14 observed one resting for 3.5
+    minutes -- and nothing else in the system removes it: protection's orphan
+    sweep only inspects orders carrying a stop_order_type (see _live_stops),
+    and the reconciler never cancels anything by design.
+
+    So a stop-first close leaves the exit resting after the position is flat.
+    reduce_only should make the exchange refuse to open a new position from it,
+    but that is an unverified external guarantee (Gate 5C.15) and is the ONLY
+    barrier. Removing the order locally is the barrier we control.
+
+    Deliberately narrow, so it can never cancel something it should not:
+      - `reduce_only` is REQUIRED. An entry is never reduce-only, so an entry
+        can never be selected here.
+      - orders carrying a `stop_order_type` are skipped: a protective stop is
+        owned by evaluate()/ensure() and has its own orphan handling.
+      - it only ever runs at position_size == 0.
+
+    Cancellation is best-effort: a failure is logged and returned as not
+    cancelled, never raised. The caller is a reconciliation pass whose job is
+    to observe and halt, and an exchange we cannot reach must not turn a
+    cleanup into a crash. The order remains visible to the next pass.
+    """
+    if position_size != 0:
+        return []
+    cancelled: list[str] = []
+    for o in exchange_orders or []:
+        if not isinstance(o, dict):
+            continue
+        if o.get("stop_order_type"):
+            continue
+        if not bool(o.get("reduce_only")):
+            continue
+        if str(o.get("state", "")).lower() not in LIVE_STOP_STATES:
+            continue
+        oid = o.get("id")
+        if oid is None:
+            continue
+        try:
+            client.cancel_order(int(oid), limits.BTCUSD_PRODUCT_ID)
+            cancelled.append(str(oid))
+            log.warning("[protection] cancelled stale reducing order %s (%s) "
+                        "left resting while flat", oid, o.get("client_order_id"))
+        except Exception as exc:
+            log.error("[protection] failed to cancel stale reducing order %s: %s",
+                      oid, exc)
+    return cancelled
+
+
 def _live_stops(exchange_orders) -> list[dict]:
     out = []
     for o in exchange_orders or []:

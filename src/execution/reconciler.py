@@ -289,12 +289,25 @@ class Reconciler:
                 return ReconcileResult(False, reason, tuple(findings))
 
         # --- positions ----------------------------------------------------
-        exch_size = sum(abs(int(p.get("size") or 0)) for p in positions)
-        local_size = self._local_position_size()
+        # SIGNED, not magnitude. abs() on both sides made the comparison blind
+        # to direction: an exchange long of 1 and a local short of 1 both
+        # reduced to 1 and agreed. Direction is the whole point of a position,
+        # so a disagreement about it must halt (Gate 5C.15).
+        exch_size = sum(int(p.get("size") or 0) for p in positions)
+        local_size = self._local_signed_position()
         if exch_size != local_size:
             findings.append(("<position>", Divergence.POSITION_MISMATCH,
-                             f"exchange={exch_size} local={local_size}"))
-            self._halt(f"position mismatch: exchange={exch_size} local={local_size}")
+                             f"exchange={exch_size:+d} local={local_size:+d}"))
+            self._halt(
+                f"position mismatch: exchange={exch_size:+d} local={local_size:+d}")
+
+        # --- stale reducing orders ----------------------------------------
+        # Only once flat, and only reduce-only non-stop orders: a resting exit
+        # that outlived its position. Best-effort by construction; a cleanup
+        # that cannot reach the exchange must not fail the pass.
+        if local_size == 0:
+            protection_mod.cancel_stale_reducing_orders(
+                self._conn, self._client, live_orders, local_size)
 
         # --- protection: the invariant, checked AFTER positions are current -
         # open_position != 0 => a valid reduce-only stop must exist.
@@ -359,12 +372,21 @@ class Reconciler:
             pos = fills_mod.open_position(self._conn)
             return float(pos["entry_price"]) if pos else 0.0
 
-    def _local_position_size(self) -> int:
-        """Absolute local exposure, from the fill-derived positions projection."""
-        row = self._conn.execute(
-            "SELECT COALESCE(SUM(quantity), 0) FROM positions WHERE status = 'open'"
-        ).fetchone()
-        return int(abs(row[0])) if row and row[0] is not None else 0
+    def _local_signed_position(self) -> int:
+        """Signed local exposure, from the fills themselves.
+
+        abs() is NOT preserved: direction is exactly what this comparison
+        exists to check.
+
+        Reads fills_mod.position_size -- the SAME source protection.evaluate()
+        uses -- rather than the positions projection the old magnitude check
+        read. Those were two different notions of "the local position": the
+        projection stores quantity as a magnitude with direction in a separate
+        `side` column, so a sign had to be reassembled from it, and any drift
+        between projection and fills would have made the position check and the
+        protection check disagree about the very thing they both guard.
+        """
+        return fills_mod.position_size(self._conn)
 
     def _adopt(self, row: dict, new_state: OrderState, delta_id,
                filled_ts: str | None = None) -> None:

@@ -4939,3 +4939,278 @@ class TestReconcilerFillLinkage:
             "SELECT SUM(COALESCE(realised_pnl, 0)) FROM order_fills").fetchone()[0]
         # (64100 - 64000) * 0.001 - both fees; unchanged by order status.
         assert realised == pytest.approx(0.1 - 0.064, abs=1e-9)
+
+
+def _resting_exit(oid=6001, coid="exit-p1-20260819-s1", side="sell",
+                  state="open", reduce_only=True, size=1):
+    """A supervised exit as Delta returns it: reduce-only, no stop_order_type.
+
+    Shape confirmed against /v2/orders/history at Gate 5C.15 -- every exit in
+    production history carries reduce_only=True and stop_order_type=None.
+    """
+    return {"id": oid, "client_order_id": coid, "product_id": 84, "side": side,
+            "size": size, "unfilled_size": size, "state": state,
+            "limit_price": "64500", "stop_order_type": None,
+            "reduce_only": reduce_only}
+
+
+def _entry_order(oid=6002, coid="entry-1", side="buy", state="open"):
+    """An entry: never reduce-only. Must never be selected for cleanup."""
+    return {"id": oid, "client_order_id": coid, "product_id": 84, "side": side,
+            "size": 1, "unfilled_size": 1, "state": state,
+            "limit_price": "64000", "stop_order_type": None,
+            "reduce_only": False}
+
+
+def _local_exit_row(conn, coid="exit-p1-20260819-s1", side="sell",
+                    delta_order_id="6001", status="acked"):
+    """The local row the executor always writes when it places an exit.
+
+    Without it the exit is, correctly, an ORPHAN exchange order and the
+    reconciler halts before cleanup is even the question.
+    """
+    storage.write_order(conn, client_order_id=coid, instrument_id=84, side=side,
+                        order_type="limit_order", quantity=1.0, price=64500.0,
+                        status=status, strategy="g3_momentum_tsmom",
+                        placed_ts="2026-08-19T05:00:00+00:00",
+                        delta_order_id=delta_order_id)
+    conn.commit()
+
+
+class _CancelRecordingClient(_FakeReconcileClient):
+    """Records cancels and can be told to fail them."""
+
+    def __init__(self, *a, cancel_exc=None, **kw):
+        super().__init__(*a, **kw)
+        self.cancelled: list[int] = []
+        self._cancel_exc = cancel_exc
+
+    def cancel_order(self, order_id, product_id):
+        if self._cancel_exc is not None:
+            raise self._cancel_exc
+        self.cancelled.append(int(order_id))
+        return {"success": True, "result": {}}
+
+
+class TestSignedPositionReconciliation:
+    """Gate 5C.16 Fix 1: direction is part of a position, so compare it.
+
+    The old check was `abs(exchange) != abs(local)`. An exchange long of 1 and
+    a local short of 1 both collapsed to 1 and were declared in sync -- the one
+    disagreement that matters most was the one it could not see.
+    """
+
+    @staticmethod
+    def _seed_local(conn, side, qty=1):
+        """Seed through the real fills path -- the source the check reads."""
+        fills.ingest_fills(conn, [_fill("seed-%s" % side, side, size=qty)],
+                           instrument_id=84)
+
+    def test_exact_signed_match_is_clean(self, conn):
+        self._seed_local(conn, "buy")
+        _local_stop_row(conn)
+        client = _FakeReconcileClient(
+            positions={"success": True, "result": [{"size": 1}]},
+            orders={"success": True, "result": [_stop_order()]})
+        r = Reconciler(conn, client, product_id=84, ingest_fills=False)
+        result = r.reconcile()
+        assert not r.halted, r.halt_reason
+        assert Divergence.POSITION_MISMATCH not in result.divergences
+
+    def test_short_exact_signed_match_is_clean(self, conn):
+        self._seed_local(conn, "sell")
+        _local_stop_row(conn, side="buy")
+        client = _FakeReconcileClient(
+            positions={"success": True, "result": [{"size": -1}]},
+            orders={"success": True, "result": [_stop_order(side="buy")]})
+        r = Reconciler(conn, client, product_id=84, ingest_fills=False)
+        r.reconcile()
+        assert not r.halted, r.halt_reason
+
+    def test_long_versus_short_halts(self, conn):
+        """The case abs() hid: same magnitude, opposite direction."""
+        self._seed_local(conn, "sell")                       # local short 1
+        client = _FakeReconcileClient(
+            positions={"success": True, "result": [{"size": 1}]})   # exchange long 1
+        r = Reconciler(conn, client, product_id=84, ingest_fills=False)
+        result = r.reconcile()
+        assert r.halted, "opposite directions were treated as in sync"
+        assert Divergence.POSITION_MISMATCH in result.divergences
+        # halt_reason holds the LAST halt of the pass -- an unprotected short
+        # also halts here -- so assert on the finding, which is per-check.
+        detail = [why for who, d, why in result.findings
+                  if who == "<position>" and d is Divergence.POSITION_MISMATCH]
+        assert detail and "+1" in detail[0] and "-1" in detail[0], result.findings
+
+    def test_short_versus_long_halts(self, conn):
+        self._seed_local(conn, "buy")
+        client = _FakeReconcileClient(
+            positions={"success": True, "result": [{"size": -1}]})
+        r = Reconciler(conn, client, product_id=84, ingest_fills=False)
+        result = r.reconcile()
+        assert r.halted
+        assert Divergence.POSITION_MISMATCH in result.divergences
+
+    def test_magnitude_mismatch_still_halts(self, conn):
+        """Pre-existing behaviour must survive the change."""
+        self._seed_local(conn, "buy", qty=1.0)
+        client = _FakeReconcileClient(
+            positions={"success": True, "result": [{"size": 2}]})
+        r = Reconciler(conn, client, product_id=84, ingest_fills=False)
+        assert Divergence.POSITION_MISMATCH in r.reconcile().divergences
+        assert r.halted
+
+    def test_flat_both_sides_is_clean(self, conn):
+        client = _FakeReconcileClient(positions={"success": True, "result": []})
+        r = Reconciler(conn, client, product_id=84, ingest_fills=False)
+        assert not r.halted and r.reconcile().clean
+
+    def test_helper_returns_a_signed_value(self, conn):
+        self._seed_local(conn, "sell")
+        r = Reconciler(conn, _FakeReconcileClient(), product_id=84)
+        assert r._local_signed_position() == -1
+        fills.ingest_fills(conn, [_fill("flip-a", "buy"), _fill("flip-b", "buy")],
+                           instrument_id=84)
+        assert r._local_signed_position() == 1
+
+    def test_comparison_does_not_use_abs(self):
+        """Structural guard: abs() on the position comparison must not return."""
+        import ast
+        import inspect
+        src = textwrap.dedent(inspect.getsource(Reconciler.reconcile))
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "abs"):
+                seg = ast.get_source_segment(src, node) or ""
+                assert "size" not in seg, f"abs() reintroduced on a size: {seg}"
+
+
+class TestStaleReducingOrderCleanup:
+    """Gate 5C.16 Fix 2: a resting exit must not outlive its position.
+
+    A supervised exit is reduce-only and gtc. If it does not cross it rests
+    (Gate 5C.14 saw one rest 3.5 minutes). Protection's orphan sweep only looks
+    at orders carrying a stop_order_type, and the reconciler never cancels, so
+    nothing removed it. reduce_only is expected to stop the exchange filling it
+    into a fresh position, but that guarantee is unverified (Gate 5C.15) and
+    was the only barrier. This removes the order instead of trusting it.
+    """
+
+    def test_stale_reducing_order_cancelled_when_flat(self, conn):
+        _local_exit_row(conn)
+        client = _CancelRecordingClient(
+            orders={"success": True, "result": [_resting_exit()]},
+            positions={"success": True, "result": []})
+        Reconciler(conn, client, product_id=84, ingest_fills=False).reconcile()
+        assert client.cancelled == [6001]
+
+    def test_short_side_resting_exit_also_cancelled(self, conn):
+        """Long/short symmetry: a short's exit is a reduce-only BUY."""
+        _local_exit_row(conn, coid="exit-p1-b1", side="buy", delta_order_id="6011")
+        client = _CancelRecordingClient(
+            orders={"success": True, "result": [
+                _resting_exit(oid=6011, coid="exit-p1-b1", side="buy")]},
+            positions={"success": True, "result": []})
+        Reconciler(conn, client, product_id=84, ingest_fills=False).reconcile()
+        assert client.cancelled == [6011]
+
+    def test_not_cancelled_while_a_position_is_open(self, conn):
+        """A live exit for a live position is exactly what should be resting."""
+        fills.ingest_fills(conn, [_fill("open-1", "buy")], instrument_id=84)
+        _local_stop_row(conn)
+        _local_exit_row(conn)
+        client = _CancelRecordingClient(
+            orders={"success": True, "result": [_resting_exit(), _stop_order()]},
+            positions={"success": True, "result": [{"size": 1}]})
+        Reconciler(conn, client, product_id=84, ingest_fills=False).reconcile()
+        assert client.cancelled == [], "cancelled an exit that still had a position"
+
+    def test_entry_order_is_never_cancelled(self, conn):
+        """An entry is not reduce-only, so it can never be selected."""
+        _local_exit_row(conn, coid="entry-1", side="buy", delta_order_id="6002")
+        client = _CancelRecordingClient(
+            orders={"success": True, "result": [_entry_order()]},
+            positions={"success": True, "result": []})
+        Reconciler(conn, client, product_id=84, ingest_fills=False).reconcile()
+        assert client.cancelled == []
+
+    def test_protective_stop_is_never_cancelled_by_this_path(self, conn):
+        """Stops are owned by evaluate()/ensure(), not by this cleanup."""
+        cancelled = protection.cancel_stale_reducing_orders(
+            conn, _CancelRecordingClient(), [_stop_order()], 0)
+        assert cancelled == []
+
+    def test_cancel_failure_is_contained(self, conn):
+        """An unreachable exchange must not turn cleanup into a crash."""
+        _local_exit_row(conn)
+        client = _CancelRecordingClient(
+            orders={"success": True, "result": [_resting_exit()]},
+            positions={"success": True, "result": []},
+            cancel_exc=requests.exceptions.Timeout("boom"))
+        r = Reconciler(conn, client, product_id=84, ingest_fills=False)
+        result = r.reconcile()          # must not raise
+        assert not r.halted, r.halt_reason
+        assert result.clean
+
+    def test_direct_call_is_a_noop_when_not_flat(self, conn):
+        client = _CancelRecordingClient()
+        assert protection.cancel_stale_reducing_orders(
+            conn, client, [_resting_exit()], 1) == []
+        assert protection.cancel_stale_reducing_orders(
+            conn, client, [_resting_exit()], -1) == []
+        assert client.cancelled == []
+
+    def test_only_live_states_are_cancelled(self, conn):
+        client = _CancelRecordingClient()
+        for dead in ("closed", "cancelled", "filled"):
+            assert protection.cancel_stale_reducing_orders(
+                conn, client, [_resting_exit(state=dead)], 0) == []
+        assert client.cancelled == []
+
+    def test_malformed_orders_are_skipped(self, conn):
+        client = _CancelRecordingClient()
+        junk = ["not-a-dict", {}, {"reduce_only": True, "state": "open"}]
+        assert protection.cancel_stale_reducing_orders(conn, client, junk, 0) == []
+
+    def test_cleanup_runs_before_protection_and_leaves_the_pass_clean(self, conn):
+        _local_exit_row(conn)
+        client = _CancelRecordingClient(
+            orders={"success": True, "result": [_resting_exit()]},
+            positions={"success": True, "result": []})
+        r = Reconciler(conn, client, product_id=84, ingest_fills=False)
+        result = r.reconcile()
+        assert client.cancelled == [6001]
+        assert result.clean and not r.halted
+
+
+class TestReversalPathAfterBothFixes:
+    """What actually happens on the Gate 5C.15 stop-first sequence."""
+
+    def test_reversal_is_prevented_by_removing_the_resting_exit(self, conn):
+        """Fix 2 is the barrier: the exit is gone before it can fill."""
+        _local_exit_row(conn)
+        client = _CancelRecordingClient(
+            orders={"success": True, "result": [_resting_exit()]},
+            positions={"success": True, "result": []})
+        Reconciler(conn, client, product_id=84, ingest_fills=False).reconcile()
+        assert 6001 in client.cancelled, "the reversal source was left resting"
+
+    def test_a_reversal_that_did_occur_is_not_caught_by_the_position_check(self, conn):
+        """Documented limit, pinned so it is not mistaken for coverage.
+
+        If a reversal DID happen, exchange and local would both read -1 and
+        AGREE -- signed comparison catches disagreement, not an unintended but
+        mutually-consistent position. Fix 1 does not close this; Fix 2 does, by
+        removing the order that could cause it. What still fires is the
+        protection invariant: a naked short with no stop is not safe.
+        """
+        fills.ingest_fills(conn, [_fill("rev-1", "sell")], instrument_id=84)
+        client = _FakeReconcileClient(
+            positions={"success": True, "result": [{"size": -1}]},
+            orders={"success": True, "result": []})
+        r = Reconciler(conn, client, product_id=84, ingest_fills=False)
+        result = r.reconcile()
+        assert Divergence.POSITION_MISMATCH in result.divergences
+        assert r.halted, "an unprotected reversed position must not pass"
+        assert "unprotected" in r.halt_reason or "position" in r.halt_reason
