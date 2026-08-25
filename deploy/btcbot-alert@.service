@@ -22,6 +22,13 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=btcbot-alert
 NoNewPrivileges=yes
+# Read-only journal access. Without it journalctl returns "No journal files
+# were opened due to insufficient permissions" (observed at Gate 5C.28
+# deployment) and the alert can say THAT a unit failed but not WHY -- for
+# the Gate 5C.26 outage it would have omitted the IndexError entirely.
+# Reading the journal modifies nothing; ProtectSystem=strict and the
+# absence of ReadWritePaths still stand.
+SupplementaryGroups=systemd-journal
 PrivateTmp=yes
 ProtectSystem=strict
 # Read-only by design: a notifier must never be able to modify state. It needs

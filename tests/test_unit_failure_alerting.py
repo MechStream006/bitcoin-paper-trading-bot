@@ -89,6 +89,23 @@ class TestOnFailureWiring:
         assert "ProtectSystem=strict" in d
         assert "NoNewPrivileges=yes" in d
 
+    def test_notifier_can_read_the_journal(self):
+        """Without this the alert says THAT, not WHY.
+
+        Observed at Gate 5C.28 deployment: the btcbot user is not in
+        systemd-journal, so journalctl returned "No journal files were opened
+        due to insufficient permissions" and the tail came back empty.
+        """
+        d = _directives(ALERT_UNIT)
+        assert "SupplementaryGroups=systemd-journal" in d,             "notifier cannot read the journal; alerts would omit the cause"
+
+    def test_journal_access_does_not_weaken_the_sandbox(self):
+        """Reading the journal modifies nothing; the write ban must still hold."""
+        d = _directives(ALERT_UNIT)
+        assert not any(x.startswith("ReadWritePaths=") for x in d)
+        assert "ProtectSystem=strict" in d
+        assert "NoNewPrivileges=yes" in d
+
     def test_no_retry_semantics_introduced(self):
         """run_daily aborts fail-closed; re-running it is not the fix."""
         d = _directives(FWD_UNIT)
