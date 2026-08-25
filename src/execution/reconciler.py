@@ -482,6 +482,20 @@ class Reconciler:
 
     # -- operator halt resolution -------------------------------------------
 
+    def halt(self, reason: str) -> None:
+        """Latch a halt from OUTSIDE a reconciliation pass.
+
+        Every _halt() call site is a decision reconcile() reached itself. An
+        exception that ESCAPES reconcile() reaches none of them, so the pass
+        aborts with the halt latch untouched and trading_permitted still True.
+        The scheduled job needs a way to say "these passes are not completing"
+        without pretending to know which specific invariant was violated.
+
+        Deliberately just a latch: it does not clear, and clearing stays with
+        clear_halt_if_clean(), which is operator-initiated.
+        """
+        self._halt(reason)
+
     def clear_halt_if_clean(self) -> bool:
         """Explicit, operator-initiated halt resolution.
 

@@ -28,9 +28,10 @@ from src.execution.order_state import (
 )
 from src.execution import fills
 from src.execution import protection
-from src.execution.reconciler import Divergence, Reconciler
+from src.execution.reconciler import Divergence, ReconcileResult, Reconciler
 from src.execution.reconciliation_jobs import (
-    RECONCILE_JOB_ID, _make_periodic_reconcile, register_reconciliation_jobs,
+    MAX_CONSECUTIVE_RECONCILE_FAILURES, RECONCILE_JOB_ID,
+    _make_periodic_reconcile, register_reconciliation_jobs,
 )
 from src.execution.testnet_executor import (
     ExecutionBlocked, InstrumentMissing, TestnetExecutor,
@@ -5437,3 +5438,262 @@ class TestExecutorOutcomeSemanticsUnchanged:
             self._ex(conn, place).submit(
                 _intent(client_order_id=coid), _account(), now=NOON)
             assert storage.get_order(conn, coid)["status"] != "submitted", place
+
+
+class _ExplodingReconciler:
+    """A reconciler whose reconcile() can be made to raise or succeed on demand.
+
+    Models the residual class the policy exists for: an exception that ESCAPES
+    reconcile(), reaching none of its seven _halt() call sites, so the pass
+    aborts with the halt latch untouched.
+    """
+
+    def __init__(self, *, fail=True, clean=True):
+        self.fail = fail
+        self.clean = clean
+        self.calls = 0
+        self._halted = False
+        self.halt_reason = ""
+        self._running = True
+        self._booted = True
+
+    @property
+    def halted(self):
+        return self._halted
+
+    @property
+    def trading_permitted(self):
+        return self._running and self._booted and not self._halted
+
+    def gate_state(self):
+        if self._halted:
+            return True, "reconciler halted: " + (self.halt_reason or "unspecified")
+        return False, ""
+
+    def halt(self, reason):
+        self._halted = True
+        self.halt_reason = reason
+
+    def reconcile(self):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("boom")
+        return ReconcileResult(self.clean, "", ())
+
+
+class TestPeriodicReconcileFailurePolicy:
+    """Gate 5C.19: persistent reconciliation failure must fail closed.
+
+    _job() catches every exception, logs, and returns. That is correct for a
+    single transient. It was NOT correct without a bound: an exception escaping
+    reconcile() reaches no _halt() call site, so the pass aborts -- before fill
+    ingestion, the position comparison and the protection invariant -- while
+    _halted stays False and trading_permitted stays True. RiskManager consults
+    gate_state(), so it would keep approving orders against a reconciler that
+    has not verified anything.
+
+    Observed in production at Gate 5C.17: 4 consecutive failed passes, halted=0
+    throughout. The threshold is 3, matching every other scheduled component in
+    this runtime.
+    """
+
+    # --- 1: a single transient failure must NOT halt ---------------------
+    def test_single_transient_failure_does_not_halt(self):
+        r = _ExplodingReconciler(fail=True)
+        _make_periodic_reconcile(r)()
+        assert not r.halted
+        assert r.trading_permitted, "one transient failure closed the gate"
+
+    def test_two_failures_still_below_threshold(self):
+        r = _ExplodingReconciler(fail=True)
+        job = _make_periodic_reconcile(r)
+        job(); job()
+        assert not r.halted and r.trading_permitted
+
+    # --- 2 & 3: repeated failures cross the threshold --------------------
+    def test_threshold_consecutive_failures_halts(self):
+        r = _ExplodingReconciler(fail=True)
+        job = _make_periodic_reconcile(r)
+        for _ in range(MAX_CONSECUTIVE_RECONCILE_FAILURES):
+            job()
+        assert r.halted, "persistent failure did not fail closed"
+        assert "3 consecutive" in r.halt_reason
+        assert "RuntimeError" in r.halt_reason, r.halt_reason
+
+    def test_threshold_is_the_runtime_wide_value(self):
+        """Derived, not invented: every other scheduled component uses 3."""
+        assert MAX_CONSECUTIVE_RECONCILE_FAILURES == 3
+
+    def test_threshold_is_configurable_for_callers(self):
+        r = _ExplodingReconciler(fail=True)
+        job = _make_periodic_reconcile(r, failure_threshold=2)
+        job()
+        assert not r.halted
+        job()
+        assert r.halted
+
+    # --- 4: trading permission becomes fail-closed -----------------------
+    def test_trading_permission_closes_at_the_threshold(self):
+        r = _ExplodingReconciler(fail=True)
+        job = _make_periodic_reconcile(r)
+        for _ in range(MAX_CONSECUTIVE_RECONCILE_FAILURES):
+            assert r.trading_permitted
+            job()
+        assert not r.trading_permitted
+        blocked, reason = r.gate_state()
+        assert blocked and "halted" in reason
+
+    def test_risk_manager_actually_rejects_once_it_latches(self, conn):
+        """The gate is only real if RiskManager honours it end to end."""
+        r = _ExplodingReconciler(fail=True)
+        job = _make_periodic_reconcile(r)
+        rm = RiskManager(kill_switch_engaged=False, platform="testnet",
+                         base_url=TESTNET_URL, halt_provider=r.gate_state)
+        assert rm.validate(_intent(), _account(), now=NOON).approved
+        for _ in range(MAX_CONSECUTIVE_RECONCILE_FAILURES):
+            job()
+        d = rm.validate(_intent(), _account(), now=NOON)
+        assert not d.approved and "trading halted" in d.reason
+
+    # --- 5: kill-switch semantics untouched ------------------------------
+    def test_kill_switch_still_blocks_independently(self, conn):
+        r = _ExplodingReconciler(fail=False, clean=True)
+        rm = RiskManager(kill_switch_engaged=True, platform="testnet",
+                         base_url=TESTNET_URL, halt_provider=r.gate_state)
+        d = rm.validate(_intent(), _account(), now=NOON)
+        assert not d.approved and "kill switch" in d.reason
+
+    def test_protective_exemption_unaffected_by_a_healthy_gate(self, conn):
+        r = _ExplodingReconciler(fail=False, clean=True)
+        rm = RiskManager(kill_switch_engaged=True, platform="testnet",
+                         base_url=TESTNET_URL, halt_provider=r.gate_state)
+        d = rm.validate(_intent(client_order_id="stop-p1-q1", side="sell",
+                                intent_kind="protective", limit_price=63100.0,
+                                stop_price=63163.0),
+                        _account(position_size=1), now=NOON)
+        assert d.approved, d.reason
+
+    # --- 6: a clean pass resets the counter ------------------------------
+    def test_clean_pass_resets_the_counter(self):
+        r = _ExplodingReconciler(fail=True)
+        job = _make_periodic_reconcile(r)
+        job(); job()                       # 2 failures, below threshold
+        r.fail = False
+        job()                              # success -> reset
+        r.fail = True
+        job(); job()                       # only 2 again
+        assert not r.halted, "the counter did not reset on a clean pass"
+        job()
+        assert r.halted, "the counter did not resume counting after the reset"
+
+    def test_alternating_failures_never_halt(self):
+        """Intermittent is not persistent."""
+        r = _ExplodingReconciler(fail=True)
+        job = _make_periodic_reconcile(r)
+        for _ in range(10):
+            r.fail = True;  job()
+            r.fail = False; job()
+        assert not r.halted and r.trading_permitted
+
+    # --- 7: recovery is operator-initiated, never automatic --------------
+    def test_halt_does_not_self_heal_on_a_later_clean_pass(self):
+        r = _ExplodingReconciler(fail=True)
+        job = _make_periodic_reconcile(r)
+        for _ in range(MAX_CONSECUTIVE_RECONCILE_FAILURES):
+            job()
+        assert r.halted
+        r.fail = False
+        calls = r.calls
+        job(); job()
+        assert r.halted, "a timer cleared a halt; this must never self-heal"
+        assert r.calls == calls, "a halted reconciler must not be re-run by the timer"
+
+    def test_recovery_path_is_clear_halt_if_clean(self, conn):
+        """The real Reconciler: an operator clean pass clears the latch."""
+        client = _FakeReconcileClient(orders={"success": True, "result": []},
+                                      fills={"success": True, "result": []},
+                                      positions={"success": True, "result": []})
+        rec = Reconciler(conn, client, product_id=84)
+        rec.halt("reconciliation failed 3 consecutive times; last: RuntimeError: boom")
+        assert rec.halted and not rec.trading_permitted
+        assert rec.clear_halt_if_clean() is True
+        assert not rec.halted
+
+    # --- 8: no false halt from ordinary operation ------------------------
+    def test_many_clean_cycles_never_halt(self):
+        r = _ExplodingReconciler(fail=False, clean=True)
+        job = _make_periodic_reconcile(r)
+        for _ in range(50):
+            job()
+        assert not r.halted and r.trading_permitted
+        assert r.calls == 50
+
+    def test_a_not_clean_pass_does_not_trip_the_counter(self):
+        """Those already halt themselves inside reconcile(); do not double-count."""
+        r = _ExplodingReconciler(fail=False, clean=False)
+        job = _make_periodic_reconcile(r)
+        for _ in range(10):
+            job()
+        assert not r.halted, "a completed-but-unclean pass was counted as a failure"
+
+    def test_real_reconciler_clean_cycles_never_halt(self, conn):
+        client = _FakeReconcileClient(orders={"success": True, "result": []},
+                                      fills={"success": True, "result": []},
+                                      positions={"success": True, "result": []})
+        rec = Reconciler(conn, client, product_id=84)
+        job = _make_periodic_reconcile(rec)
+        for _ in range(10):
+            job()
+        assert not rec.halted, rec.halt_reason
+        # trading_permitted additionally requires started+booted -- the
+        # deliberate default-deny -- so the property under test here is that
+        # ten clean cycles never LATCH a halt.
+        assert rec.gate_state()[1] != "reconciler halted: "
+
+    # --- 9: adversarial ---------------------------------------------------
+    def test_the_halt_action_is_actually_invoked(self):
+        """Guards against the action being removed while the counter remains."""
+        seen = []
+        r = _ExplodingReconciler(fail=True)
+        r.halt = lambda reason: seen.append(reason)
+        job = _make_periodic_reconcile(r)
+        for _ in range(MAX_CONSECUTIVE_RECONCILE_FAILURES):
+            job()
+        assert len(seen) == 1, seen
+        assert "consecutive" in seen[0]
+
+    def test_job_still_never_raises_into_the_scheduler(self):
+        """Property 2 must survive: the scheduler's counter stays independent."""
+        r = _ExplodingReconciler(fail=True)
+        job = _make_periodic_reconcile(r)
+        for _ in range(MAX_CONSECUTIVE_RECONCILE_FAILURES + 2):
+            job()                          # must not raise
+        assert r.halted
+
+    # --- 10: existing behaviour unchanged --------------------------------
+    def test_halted_reconciler_is_still_skipped(self):
+        r = _ExplodingReconciler(fail=False)
+        r.halt("pre-existing")
+        job = _make_periodic_reconcile(r)
+        job()
+        assert r.calls == 0, "a halted reconciler was re-run"
+
+    def test_registration_is_still_idempotent(self, conn):
+        class FakeSched:
+            def __init__(self): self.jobs = {}
+            def has_job(self, jid): return jid in self.jobs
+            def register(self, name, fn, **kw): self.jobs[kw["job_id"]] = fn
+        client = _FakeReconcileClient()
+        rec = Reconciler(conn, client, product_id=84)
+        s = FakeSched()
+        assert register_reconciliation_jobs(s, rec) is True
+        assert register_reconciliation_jobs(s, rec) is False
+
+    def test_public_halt_latches_like_an_internal_one(self, conn):
+        client = _FakeReconcileClient()
+        rec = Reconciler(conn, client, product_id=84)
+        assert not rec.halted
+        rec.halt("persistent failure")
+        assert rec.halted and rec.halt_reason == "persistent failure"
+        blocked, reason = rec.gate_state()
+        assert blocked and "persistent failure" in reason

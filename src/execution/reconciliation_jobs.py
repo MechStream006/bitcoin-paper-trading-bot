@@ -27,6 +27,20 @@ RECONCILE_JOB_ID = "execution_reconcile"
 #: per minute against Delta.
 DEFAULT_RECONCILE_INTERVAL_SEC = 60
 
+#: Consecutive reconciliation EXCEPTIONS before trading fails closed.
+#:
+#: 3 is not chosen here -- it is the threshold every other scheduled component
+#: in this runtime already uses (chain_refresher, snapshot_writer,
+#: scheduler.runner, and ws_manager's stuck-state test), so the runtime has one
+#: number to reason about rather than five. At the 60s cadence above it bounds
+#: blind operation at ~3 minutes.
+#:
+#: Only exceptions are counted. A pass that COMPLETES and finds something wrong
+#: has already halted itself inside reconcile() -- an unreadable exchange, a
+#: position mismatch, an unprotected position all halt on the first pass. What
+#: this counts is the residual class: a pass that never reached those checks.
+MAX_CONSECUTIVE_RECONCILE_FAILURES = 3
+
 
 def register_reconciliation_jobs(
     scheduler,
@@ -55,19 +69,37 @@ def register_reconciliation_jobs(
     return True
 
 
-def _make_periodic_reconcile(reconciler):
+def _make_periodic_reconcile(reconciler, *,
+                             failure_threshold: int = MAX_CONSECUTIVE_RECONCILE_FAILURES):
     """Wrap `reconcile()` for scheduled execution.
 
-    Two deliberate properties:
+    Three deliberate properties:
 
     1. **It never clears a halt.** Only `clear_halt_if_clean()` does, and that is
        operator-initiated. A halted stack does not recover because a timer fired.
     2. **It never raises into the scheduler.** A reconciliation that cannot query
        the exchange has already halted itself; re-raising would additionally trip
        the scheduler's failure counter and confuse two independent signals.
+    3. **It fails closed on PERSISTENT failure.** Property 2 was load-bearing for
+       a claim that turned out to be incomplete: it holds for failures reconcile()
+       DETECTS, but not for exceptions that escape it. Those reach no _halt() call
+       site, so the pass aborts -- before fill ingestion, the position comparison
+       and the protection invariant -- while trading_permitted stays True. Seen in
+       production at Gate 5C.17: 4 consecutive failed passes, halted=0 throughout,
+       reconciliation blind and trading still permitted.
+
+       One failure is tolerated as transient. `failure_threshold` consecutive
+       failures are not: the counter latches a halt, which closes the trading
+       gate through the path RiskManager already consults.
+
+    The counter resets on any completed pass. Once the halt latches, recovery is
+    operator-initiated via clear_halt_if_clean() -- this does NOT self-heal, for
+    the reason that function's own docstring gives.
     """
+    consecutive_failures = 0
 
     def _job() -> None:
+        nonlocal consecutive_failures
         if reconciler.halted:
             log.warning("[reconcile] periodic pass skipped: halted (%s)",
                         reconciler.halt_reason)
@@ -75,9 +107,16 @@ def _make_periodic_reconcile(reconciler):
         try:
             result = reconciler.reconcile()
         except Exception as exc:
-            log.error("[reconcile] periodic pass failed: %s: %s",
+            consecutive_failures += 1
+            log.error("[reconcile] periodic pass failed (consecutive=%d/%d): %s: %s",
+                      consecutive_failures, failure_threshold,
                       type(exc).__name__, exc)
+            if consecutive_failures >= failure_threshold:
+                reconciler.halt(
+                    f"reconciliation failed {consecutive_failures} consecutive "
+                    f"times; last: {type(exc).__name__}: {exc}")
             return
+        consecutive_failures = 0
         if not result.clean:
             log.critical("[reconcile] periodic pass NOT clean: %s",
                          result.halt_reason or "see findings")
