@@ -11,6 +11,7 @@ Run:
 from __future__ import annotations
 
 import ast
+import logging
 import pathlib
 import sqlite3
 import textwrap
@@ -22,8 +23,8 @@ import requests
 
 from src.data import storage
 from src.execution.order_state import (
-    ALLOWED_TRANSITIONS, IllegalTransition, OrderState, can_transition,
-    is_open, is_terminal, transition,
+    ALLOWED_TRANSITIONS, OPEN_STATES, IllegalTransition, OrderState,
+    can_transition, is_open, is_terminal, transition,
 )
 from src.execution import fills
 from src.execution import protection
@@ -5214,3 +5215,225 @@ class TestReversalPathAfterBothFixes:
         assert Divergence.POSITION_MISMATCH in result.divergences
         assert r.halted, "an unprotected reversed position must not pass"
         assert "unprotected" in r.halt_reason or "position" in r.halt_reason
+
+
+class TestSubmittedCrashRecovery:
+    """Gate 5C.18-F: a SUBMITTED row must not abort the reconciliation pass.
+
+    SUBMITTED is the durable write-ahead state. Every API outcome moves the row
+    off it (4xx -> REJECTED, timeout/5xx/reset/malformed -> UNKNOWN, ok ->
+    ACKED), so a row still SUBMITTED at reconciliation means the process died
+    between the write-ahead persist and the outcome persist.
+
+    The fallback sent it to CANCELLED, for which SUBMITTED has no arc, so
+    transition() raised IllegalTransition and the WHOLE pass aborted -- before
+    fill ingestion, the position comparison and the protection invariant. The
+    row never converged, so it failed again every 60s indefinitely, while
+    _job() logs and returns without halting, leaving trading_permitted True.
+    Observed in production at Gate 5C.17: 4 failed passes over ~3 minutes.
+    """
+
+    @staticmethod
+    def _flat_client():
+        return _FakeReconcileClient(
+            orders={"success": True, "result": []},
+            fills={"success": True, "result": []},
+            positions={"success": True, "result": []})
+
+    # --- 1: SUBMITTED with no exchange trace -> UNKNOWN, no exception -----
+    def test_submitted_with_no_trace_becomes_unknown(self, conn):
+        _seed_order(conn, "crashed", "submitted")
+        r = Reconciler(conn, self._flat_client(), product_id=84)
+        result = r.reconcile()          # must not raise
+        assert storage.get_order(conn, "crashed")["status"] == "unknown"
+        assert Divergence.ORPHAN_LOCAL in result.divergences
+        assert any("submitted with no exchange trace -> unknown" in why
+                   for _, _, why in result.findings), result.findings
+
+    def test_submitted_pass_does_not_raise_illegal_transition(self, conn):
+        _seed_order(conn, "crashed", "submitted")
+        r = Reconciler(conn, self._flat_client(), product_id=84)
+        try:
+            r.reconcile()
+        except IllegalTransition as exc:                    # the exact defect
+            pytest.fail(f"reconciliation aborted on a write-ahead row: {exc}")
+
+    def test_the_pass_still_completes_its_later_checks(self, conn):
+        """The abort's real cost: fills/positions/protection never ran."""
+        _seed_order(conn, "crashed", "submitted")
+        client = _FakeReconcileClient(
+            orders={"success": True, "result": []},
+            fills={"success": True, "result": [_prod_fill("f1", "buy", oid="900"),
+                                               _prod_fill("f2", "sell", oid="901",
+                                                          price=64100.0)]},
+            positions={"success": True, "result": []})
+        result = Reconciler(conn, client, product_id=84).reconcile()
+        assert fills.position_size(conn) == 0
+        assert any(who == "<fills>" for who, _, _ in result.findings), \
+            "fill ingestion did not run: the pass aborted early"
+
+    # --- 2: ACKED / PARTIAL fallback unchanged ---------------------------
+    @pytest.mark.parametrize("state", ["acked", "partial"])
+    def test_acked_and_partial_still_become_cancelled(self, conn, state):
+        _seed_order(conn, "gone", state, "900")
+        r = Reconciler(conn, self._flat_client(), product_id=84)
+        result = r.reconcile()
+        assert storage.get_order(conn, "gone")["status"] == "cancelled"
+        assert any("absent from exchange -> cancelled" in why
+                   for _, _, why in result.findings), result.findings
+
+    def test_unknown_fallback_still_becomes_rejected(self, conn):
+        _seed_order(conn, "amb", "unknown")
+        Reconciler(conn, self._flat_client(), product_id=84).reconcile()
+        assert storage.get_order(conn, "amb")["status"] == "rejected"
+
+    # --- 3: the periodic job stops failing -------------------------------
+    def test_periodic_job_does_not_fail_repeatedly(self, conn, caplog):
+        _seed_order(conn, "crashed", "submitted")
+        r = Reconciler(conn, self._flat_client(), product_id=84)
+        job = _make_periodic_reconcile(r)
+        with caplog.at_level(logging.ERROR):
+            for _ in range(3):
+                job()
+        failures = [rec for rec in caplog.records
+                    if "periodic pass failed" in rec.getMessage()]
+        assert failures == [], [f.getMessage() for f in failures]
+
+    def test_repeated_passes_do_not_reopen_a_settled_row(self, conn):
+        _seed_order(conn, "crashed", "submitted")
+        r = Reconciler(conn, self._flat_client(), product_id=84)
+        for _ in range(5):
+            r.reconcile()
+        assert storage.get_order(conn, "crashed")["status"] == "rejected"
+        assert not r.halted
+
+    # --- 4: convergence across two passes --------------------------------
+    def test_converges_submitted_then_unknown_then_rejected(self, conn):
+        _seed_order(conn, "crashed", "submitted")
+        r = Reconciler(conn, self._flat_client(), product_id=84)
+        assert storage.get_order(conn, "crashed")["status"] == "submitted"
+        r.reconcile()
+        assert storage.get_order(conn, "crashed")["status"] == "unknown"
+        r.reconcile()
+        assert storage.get_order(conn, "crashed")["status"] == "rejected"
+        r.reconcile()
+        assert storage.get_order(conn, "crashed")["status"] == "rejected", \
+            "a terminal row must stay terminal"
+
+    def test_convergence_reaches_a_terminal_state(self, conn):
+        _seed_order(conn, "crashed", "submitted")
+        r = Reconciler(conn, self._flat_client(), product_id=84)
+        r.reconcile(); r.reconcile()
+        assert is_terminal(OrderState(storage.get_order(conn, "crashed")["status"]))
+        assert storage.get_open_orders(
+            conn, tuple(s.value for s in OPEN_STATES)) == []
+
+    # --- 5: crash-recovery fixture ---------------------------------------
+    def test_boot_reconcile_recovers_a_write_ahead_row(self, conn):
+        """Mirror of the existing UNKNOWN boot-recovery test, for SUBMITTED.
+
+        Simulates process death between the write-ahead persist and the
+        outcome persist: the row exists, nothing else does.
+        """
+        _seed_order(conn, "crashed", "submitted")
+        r = Reconciler(conn, self._flat_client(), product_id=84)
+        assert r.boot_reconcile().clean
+        assert not r.halted
+        assert storage.get_order(conn, "crashed")["status"] == "unknown"
+
+    def test_write_ahead_row_never_links_a_fill(self, conn):
+        """It has no delta_order_id, so a fill cannot be attributed to it.
+
+        That is why UNKNOWN -- not CANCELLED -- is the honest state: we cannot
+        assert the order reached the exchange, and an unattributable fill still
+        surfaces as a position divergence rather than being silently absorbed.
+        """
+        _seed_order(conn, "crashed", "submitted")
+        client = _FakeReconcileClient(
+            orders={"success": True, "result": []},
+            fills={"success": True, "result": [_prod_fill("f1", "buy", oid="900")]},
+            positions={"success": True, "result": [{"size": 1}]})
+        r = Reconciler(conn, client, product_id=84)
+        r.reconcile()
+        assert storage.get_order(conn, "crashed")["status"] == "unknown"
+        assert storage.get_order(conn, "crashed")["filled_ts"] is None
+
+    # --- 6: adversarial ---------------------------------------------------
+    def test_submitted_is_never_sent_to_cancelled(self, conn):
+        """Direct guard on the arc the defect used."""
+        with pytest.raises(IllegalTransition):
+            transition(OrderState.SUBMITTED, OrderState.CANCELLED,
+                       reconcile_only=True)
+
+    @pytest.mark.parametrize("state", [s.value for s in OPEN_STATES])
+    def test_no_open_state_ever_raises_on_a_flat_exchange(self, conn, state):
+        """Generalises past the one state that happened to bite."""
+        _seed_order(conn, f"o-{state}", state, "900")
+        r = Reconciler(conn, self._flat_client(), product_id=84)
+        try:
+            r.reconcile()
+        except IllegalTransition as exc:
+            pytest.fail(f"{state} raised: {exc}")
+        assert is_terminal(OrderState(storage.get_order(conn, f"o-{state}")["status"])) \
+            or storage.get_order(conn, f"o-{state}")["status"] == "unknown"
+
+
+class TestExecutorOutcomeSemanticsUnchanged:
+    """Gate 5C.18-F guard: the submission layer was correct and must stay so.
+
+    The audit established that every API outcome already moves the row off
+    SUBMITTED. The fix is confined to the reconciler; if any of these change,
+    the crash window has been widened rather than the recovery path repaired.
+    """
+
+    @staticmethod
+    def _http(status, body=b""):
+        """Returns the HTTPError itself -- never wrap this again."""
+        resp = requests.Response()
+        resp.status_code = status
+        resp._content = body
+        return requests.exceptions.HTTPError(response=resp)
+
+    def _ex(self, conn, place):
+        return TestnetExecutor(conn, _FakeClient(place=place), _risk())
+
+    def test_4xx_still_rejected(self, conn):
+        err = self._http(400, b'{"error":{"code":"x"}}')
+        state, _ = self._ex(conn, err).submit(_intent(), _account(), now=NOON)
+        assert state is OrderState.REJECTED
+
+    def test_5xx_still_unknown(self, conn):
+        err = self._http(503)
+        state, _ = self._ex(conn, err).submit(_intent(), _account(), now=NOON)
+        assert state is OrderState.UNKNOWN
+
+    def test_timeout_still_unknown(self, conn):
+        state, _ = self._ex(conn, requests.exceptions.Timeout("t")).submit(
+            _intent(), _account(), now=NOON)
+        assert state is OrderState.UNKNOWN
+
+    def test_connection_reset_still_unknown(self, conn):
+        state, _ = self._ex(conn, requests.exceptions.ConnectionError("reset")).submit(
+            _intent(), _account(), now=NOON)
+        assert state is OrderState.UNKNOWN
+
+    def test_success_still_acked(self, conn):
+        state, _ = self._ex(conn, {"success": True, "result": {"id": 4242}}).submit(
+            _intent(), _account(), now=NOON)
+        assert state is OrderState.ACKED
+
+    def test_no_outcome_leaves_the_row_submitted(self, conn):
+        """The property the whole audit rests on."""
+        cases = [
+            requests.exceptions.Timeout("t"),
+            requests.exceptions.ConnectionError("reset"),
+            self._http(400, b'{"error":{"code":"x"}}'),
+            self._http(503),
+            {"success": False},
+            {"success": True, "result": {"id": 1}},
+        ]
+        for i, place in enumerate(cases):
+            coid = f"outcome-{i}"
+            self._ex(conn, place).submit(
+                _intent(client_order_id=coid), _account(), now=NOON)
+            assert storage.get_order(conn, coid)["status"] != "submitted", place

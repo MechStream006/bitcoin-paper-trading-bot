@@ -251,6 +251,25 @@ class Reconciler:
                 self._adopt(row, OrderState.REJECTED, None)
                 findings.append((coid, Divergence.ORPHAN_LOCAL,
                                  "unknown with no exchange trace -> rejected"))
+            elif current is OrderState.SUBMITTED:
+                # The write-ahead state, still durable: the process died between
+                # persisting SUBMITTED and persisting the outcome. Every API
+                # outcome moves the row off SUBMITTED itself, so reaching here
+                # means we never learned what happened.
+                #
+                # CANCELLED is not merely illegal from SUBMITTED (the state
+                # machine has no such arc, which is what made this abort the
+                # whole pass) -- it would also ASSERT the order reached the
+                # exchange and was cancelled. We cannot know that: the row has
+                # no delta_order_id, so a fill for it could not be linked
+                # either. UNKNOWN is the project's existing, tested meaning for
+                # "may or may not exist", and is what a timeout already writes.
+                #
+                # The next pass resolves it through the UNKNOWN branch above,
+                # so this converges in two passes with no new terminal logic.
+                self._adopt(row, OrderState.UNKNOWN, None)
+                findings.append((coid, Divergence.ORPHAN_LOCAL,
+                                 "submitted with no exchange trace -> unknown"))
             else:
                 self._adopt(row, OrderState.CANCELLED, None)
                 findings.append((coid, Divergence.ORPHAN_LOCAL,
