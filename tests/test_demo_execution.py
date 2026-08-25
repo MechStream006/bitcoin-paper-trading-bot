@@ -11,6 +11,7 @@ Run:
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import pathlib
 import sqlite3
@@ -5697,3 +5698,285 @@ class TestPeriodicReconcileFailurePolicy:
         assert rec.halted and rec.halt_reason == "persistent failure"
         blocked, reason = rec.gate_state()
         assert blocked and "persistent failure" in reason
+
+
+class TestProtectiveStopProvenance:
+    """Gate 5C.23 item 1: what protection was active must be reconstructable.
+
+    The trigger is the number that bounds a trade's risk and it existed nowhere
+    locally: orders.price holds the stop's LIMIT (79495.7 on the 08-25
+    lifecycle), while the trigger (79615.1) survived only in Delta's own order
+    history, which is not durable for research.
+    """
+
+    def test_placement_records_trigger_and_limit(self, conn):
+        # No pre-existing local stop row: already_placed() would short-circuit
+        # ensure() before it ever places, which is the behaviour under test.
+        fills.ingest_fills(conn, [_fill("e1", "buy")], instrument_id=84)
+        client = _StopCapturingClient(
+            orders={"success": True, "result": []},
+            positions={"success": True, "result": [{"size": 1}]})
+        ex = TestnetExecutor(conn, client, _risk())
+        status = protection.evaluate(conn, [])
+        protection.ensure(conn, ex, client, status, mark_price=64000.0)
+        row = storage.get_protective_stop(conn, "stop-p1-q1")
+        assert row is not None, "no provenance recorded"
+        assert row["trigger_price"] > 0 and row["limit_price"] > 0
+        assert row["side"] == "sell" and row["size"] == 1
+        assert row["reduce_only"] == 1
+        assert row["placed_ts"]
+
+    def test_trigger_matches_the_deployed_budget_bound_calculation(self, conn):
+        fills.ingest_fills(conn, [_fill("e1", "buy", price=64000.0)], instrument_id=84)
+        client = _StopCapturingClient(
+            orders={"success": True, "result": []},
+            positions={"success": True, "result": [{"size": 1}]})
+        ex = TestnetExecutor(conn, client, _risk())
+        protection.ensure(conn, ex, client, protection.evaluate(conn, []),
+                          mark_price=64000.0)
+        pos = fills.open_position(conn)
+        expected_trig, expected_lim = protection.stop_prices(
+            float(pos["entry_price"]), 1)
+        row = storage.get_protective_stop(conn, "stop-p1-q1")
+        assert row["trigger_price"] == pytest.approx(expected_trig, abs=1e-9)
+        assert row["limit_price"] == pytest.approx(expected_lim, abs=1e-9)
+        assert row["entry_price"] == pytest.approx(float(pos["entry_price"]), abs=1e-9)
+
+    def test_risk_is_reconstructable_from_the_record_alone(self, conn):
+        """The whole point: prove after the fact that the budget was honoured."""
+        fills.ingest_fills(conn, [_fill("e1", "buy", price=64000.0)], instrument_id=84)
+        client = _StopCapturingClient(
+            orders={"success": True, "result": []},
+            positions={"success": True, "result": [{"size": 1}]})
+        protection.ensure(conn, TestnetExecutor(conn, client, _risk()), client,
+                          protection.evaluate(conn, []), mark_price=64000.0)
+        r = storage.get_protective_stop(conn, "stop-p1-q1")
+        risk = (abs(r["entry_price"] - r["trigger_price"])
+                * limits.BTCUSD_CONTRACT_VALUE * r["size"]
+                + round_trip_fees_usd(r["entry_price"], r["size"]))
+        assert risk <= limits.MAX_TRADE_RISK_USD + 1e-9
+
+    def test_provenance_written_even_when_placement_is_refused(self, conn):
+        """A refused placement is exactly what an audit most needs to see."""
+        fills.ingest_fills(conn, [_fill("e1", "buy")], instrument_id=84)
+        client = _StopCapturingClient(
+            orders={"success": True, "result": []},
+            positions={"success": True, "result": [{"size": 1}]},
+            place_result={"success": False})
+        protection.ensure(conn, TestnetExecutor(conn, client, _risk()), client,
+                          protection.evaluate(conn, []), mark_price=64000.0)
+        assert storage.get_protective_stop(conn, "stop-p1-q1") is not None
+
+    def test_recording_failure_never_breaks_protection(self, conn, monkeypatch):
+        monkeypatch.setattr(storage, "write_protective_stop",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk")))
+        fills.ingest_fills(conn, [_fill("e1", "buy")], instrument_id=84)
+        client = _StopCapturingClient(
+            orders={"success": True, "result": []},
+            positions={"success": True, "result": [{"size": 1}]})
+        protection.ensure(conn, TestnetExecutor(conn, client, _risk()), client,
+                          protection.evaluate(conn, []), mark_price=64000.0)
+        assert client.placed, "protection did not place because a research write failed"
+
+    def test_upsert_does_not_duplicate_on_replacement(self, conn):
+        for px in (64000.0, 64000.0):
+            storage.write_protective_stop(
+                conn, client_order_id="stop-p1-q1", delta_order_id="5001",
+                position_id=1, side="sell", size=1, entry_price=px,
+                trigger_price=px * 0.99, limit_price=px * 0.985,
+                reduce_only=True, placed_ts="2026-08-19T04:00:00+00:00")
+        n = conn.execute("SELECT COUNT(*) FROM protective_stops").fetchone()[0]
+        assert n == 1
+
+
+class TestPositionProjectionCorrectness:
+    """Gate 5C.23 item 2: a closed trade must retain what was traded."""
+
+    def test_closed_position_keeps_its_quantity(self, conn):
+        fills.ingest_fills(conn, [_fill("e1", "buy")], instrument_id=84)
+        assert fills.open_position(conn)["quantity"] == 1
+        fills.ingest_fills(conn, [_fill("x1", "sell", price=64100.0)],
+                           instrument_id=84)
+        row = conn.execute(
+            "SELECT quantity, status FROM positions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row[1] == "closed"
+        assert row[0] == 1, "the traded quantity was zeroed on close"
+
+    def test_openness_is_still_decided_by_status_not_quantity(self, conn):
+        fills.ingest_fills(conn, [_fill("e1", "buy"),
+                                  _fill("x1", "sell", price=64100.0)],
+                           instrument_id=84)
+        assert fills.open_position(conn) is None
+        assert fills.position_size(conn) == 0
+
+    def test_order_fills_remains_authoritative_and_unchanged(self, conn):
+        fills.ingest_fills(conn, [_fill("e1", "buy"),
+                                  _fill("x1", "sell", price=64100.0)],
+                           instrument_id=84)
+        n, tot = conn.execute(
+            "SELECT COUNT(*), ROUND(SUM(size),8) FROM order_fills").fetchone()
+        assert n == 2 and tot == 2.0
+        assert fills.position_size(conn) == 0
+
+    def test_multi_contract_quantity_preserved(self, conn):
+        fills.ingest_fills(conn, [_fill("e1", "buy", size=2)], instrument_id=84)
+        fills.ingest_fills(conn, [_fill("x1", "sell", size=2, price=64100.0)],
+                           instrument_id=84)
+        assert conn.execute(
+            "SELECT quantity FROM positions ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0] == 2
+
+
+class TestStrategyAttribution:
+    """Gate 5C.23 item 3: a strategy trade must not be recorded as manual."""
+
+    @staticmethod
+    def _order(conn, coid, oid, strategy):
+        storage.write_order(conn, client_order_id=coid, instrument_id=84,
+                            side="buy", order_type="limit_order", quantity=1.0,
+                            price=64000.0, status="filled", strategy=strategy,
+                            placed_ts="2026-08-19T03:59:00+00:00",
+                            delta_order_id=oid)
+        conn.commit()
+
+    def test_strategy_comes_from_the_entry_order(self, conn):
+        self._order(conn, "entry-A", "900", "g3_momentum_tsmom")
+        fills.ingest_fills(conn, [_fill("e1", "buy", oid="900")], instrument_id=84)
+        assert fills.open_position(conn)["strategy"] == "g3_momentum_tsmom"
+
+    def test_reconciler_path_no_longer_labels_everything_manual(self, conn):
+        """The reconciler never passes strategy=; that was the whole defect."""
+        self._order(conn, "entry-A", "900", "g3_momentum_tsmom")
+        client = _FakeReconcileClient(
+            fills={"success": True, "result": [_prod_fill("e1", "buy", oid="900")]},
+            orders={"success": True, "result": [_stop_order()]},
+            positions={"success": True, "result": [{"size": 1}]})
+        _local_stop_row(conn)
+        Reconciler(conn, client, product_id=84).reconcile()
+        assert fills.open_position(conn)["strategy"] == "g3_momentum_tsmom"
+
+    def test_genuine_manual_trade_stays_manual(self, conn):
+        """No order, or an order with no strategy: do not relabel."""
+        fills.ingest_fills(conn, [_fill("e1", "buy", oid="999")], instrument_id=84)
+        assert fills.open_position(conn)["strategy"] == "manual"
+
+    def test_order_without_strategy_falls_back(self, conn):
+        storage.write_order(conn, client_order_id="entry-B", instrument_id=84,
+                            side="buy", order_type="limit_order", quantity=1.0,
+                            price=64000.0, status="filled", strategy=None,
+                            placed_ts="2026-08-19T03:59:00+00:00",
+                            delta_order_id="901")
+        conn.commit()
+        fills.ingest_fills(conn, [_fill("e1", "buy", oid="901")], instrument_id=84)
+        assert fills.open_position(conn)["strategy"] == "manual"
+
+    def test_attribution_uses_the_entry_not_the_exit(self, conn):
+        self._order(conn, "entry-A", "900", "g3_momentum_tsmom")
+        self._order(conn, "exit-A", "901", "some_other_label")
+        fills.ingest_fills(conn, [_fill("e1", "buy", oid="900")], instrument_id=84)
+        assert fills.open_position(conn)["strategy"] == "g3_momentum_tsmom"
+
+
+class TestTradeSignalContext:
+    """Gate 5C.23 item 4: a live trade must join to the signal that motivated it."""
+
+    @staticmethod
+    def _forward_db(tmp_path):
+        p = tmp_path / "fwd.db"
+        f = sqlite3.connect(p)
+        f.executescript("""
+            CREATE TABLE trade_entries (id INTEGER PRIMARY KEY, signal_id TEXT,
+                entry_date TEXT, direction INTEGER, entry_close_price REAL,
+                planned_exit_date TEXT, open INTEGER);
+            CREATE TABLE signal_log (id INTEGER PRIMARY KEY, signal_id TEXT,
+                day TEXT, position REAL, raw_value REAL);
+        """)
+        f.execute("INSERT INTO trade_entries VALUES (1,'g3_momentum_tsmom',"
+                  "'2026-08-20',-1,73025.15,'2026-08-27',1)")
+        f.executemany("INSERT INTO signal_log (signal_id,day,position,raw_value) "
+                      "VALUES (?,?,?,?)", [
+                          ("g3_momentum_tsmom", "2026-08-24", -1.0, 0.2270),
+                          ("g1_market_regime_sma200", "2026-08-24", 0.0, -1964.5),
+                          ("h5_vol_regime", "2026-08-24", 0.0, 1.1)])
+        f.commit(); f.close()
+        return str(p)
+
+    def test_captures_direction_raw_value_and_regime(self, conn, tmp_path):
+        ok = bridge.capture_signal_context(conn, "entry-A", self._forward_db(tmp_path))
+        assert ok
+        row = storage.get_trade_signal_context(conn, "entry-A")
+        assert row["signal_id"] == "g3_momentum_tsmom"
+        assert row["direction"] == -1
+        assert row["raw_value"] == pytest.approx(0.2270)
+        assert row["signal_day"] == "2026-08-24"
+        ctx = json.loads(row["context_json"])
+        assert ctx["g1_market_regime_sma200"] == 0.0
+        assert ctx["h5_vol_regime"] == 0.0
+        assert row["captured_ts"]
+
+    def test_missing_forward_db_is_survivable(self, conn, tmp_path):
+        assert bridge.capture_signal_context(
+            conn, "entry-A", str(tmp_path / "nope.db")) is False
+        assert storage.get_trade_signal_context(conn, "entry-A") is None
+
+    def test_capture_never_raises(self, conn, tmp_path):
+        bad = tmp_path / "bad.db"
+        bad.write_bytes(b"not a database")
+        assert bridge.capture_signal_context(conn, "entry-A", str(bad)) is False
+
+    def test_context_is_upserted_not_duplicated(self, conn, tmp_path):
+        db = self._forward_db(tmp_path)
+        bridge.capture_signal_context(conn, "entry-A", db)
+        bridge.capture_signal_context(conn, "entry-A", db)
+        n = conn.execute("SELECT COUNT(*) FROM trade_signal_context").fetchone()[0]
+        assert n == 1
+
+    def test_execution_core_does_not_depend_on_the_forward_db(self):
+        """Capture is opt-in: an order must never need the research database."""
+        import ast
+        import inspect
+        for mod in (__import__("src.execution.testnet_executor", fromlist=["x"]),
+                    __import__("src.execution.reconciler", fromlist=["x"]),
+                    __import__("src.execution.protection", fromlist=["x"])):
+            tree = ast.parse(inspect.getsource(mod))
+            imported = set()
+            for n in ast.walk(tree):
+                if isinstance(n, ast.ImportFrom) and n.module:
+                    imported.add(n.module)
+                elif isinstance(n, ast.Import):
+                    imported |= {a.name for a in n.names}
+            assert not any(m.startswith("src.strategies") for m in imported), \
+                f"{mod.__name__} imports a strategy module"
+
+
+class TestGovernanceBoundariesUnchanged:
+    """Gate 5C.23 guard: this gate must not have moved strategy or risk."""
+
+    def test_risk_limits_unchanged(self):
+        assert limits.MAX_TRADE_RISK_USD == 1.00
+        assert limits.HARD_RISK_CEILING_USD == 2.00
+        assert limits.MAX_DAILY_LOSS_USD == 4.00
+        assert limits.MAX_CONTRACTS_PER_ORDER == 1
+        assert limits.MAX_OPEN_POSITIONS == 1
+        assert limits.MAX_ORDERS_PER_DAY == 2
+        assert limits.PROTECTIVE_STOP_DISTANCE_PCT == 1.4
+
+    def test_g3_identity_and_stop_policy_unchanged(self):
+        assert bridge.SIGNAL_ID == "g3_momentum_tsmom"
+        assert bridge.STOP_DISTANCE_PCT == 1.4
+
+    def test_no_automated_entry_scheduler_exists(self):
+        """latest_direction must remain unwired from execution."""
+        import ast
+        import inspect
+        import src.runtime.lifecycle as lc
+        src = inspect.getsource(lc)
+        assert "latest_direction" not in src
+        assert "build_intent" not in src
+        tree = ast.parse(src)
+        imported = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.module:
+                imported.add(n.module)
+        assert not any(m.startswith("src.strategies") for m in imported)

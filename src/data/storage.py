@@ -484,6 +484,29 @@ CREATE TABLE IF NOT EXISTS order_rejections (
     body            TEXT
 );
 
+CREATE TABLE IF NOT EXISTS protective_stops (
+    client_order_id TEXT    PRIMARY KEY,
+    delta_order_id  TEXT,
+    position_id     INTEGER,
+    side            TEXT    NOT NULL,
+    size            INTEGER NOT NULL,
+    entry_price     REAL    NOT NULL,
+    trigger_price   REAL    NOT NULL,
+    limit_price     REAL    NOT NULL,
+    reduce_only     INTEGER NOT NULL DEFAULT 1,
+    placed_ts       TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trade_signal_context (
+    client_order_id TEXT    PRIMARY KEY,
+    signal_id       TEXT    NOT NULL,
+    direction       INTEGER,
+    raw_value       REAL,
+    signal_day      TEXT,
+    context_json    TEXT,
+    captured_ts     TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS risk_day_events (
     utc_day  TEXT NOT NULL,
     kind     TEXT NOT NULL CHECK (kind IN ('order', 'pnl')),
@@ -493,6 +516,104 @@ CREATE TABLE IF NOT EXISTS risk_day_events (
     PRIMARY KEY (utc_day, kind, ref)
 );
 """
+
+
+def write_protective_stop(conn: sqlite3.Connection, *, client_order_id: str,
+                          delta_order_id: str | None, position_id: int | None,
+                          side: str, size: int, entry_price: float,
+                          trigger_price: float, limit_price: float,
+                          reduce_only: bool, placed_ts: str) -> None:
+    """Record what protection was actually placed, at placement time.
+
+    The trigger is the number that bounds the trade's risk, and it exists
+    nowhere else locally: `orders.price` holds the stop's LIMIT, and the
+    trigger survives only in Delta's own order history, which is not durable
+    for research. Without this row a completed lifecycle cannot be shown to
+    have been protected at the distance the risk budget authorised.
+
+    Upsert on client_order_id: the protective coid is deterministic
+    (stop-p{id}-q{size}), so a re-placement after a cancel-and-replace updates
+    the record rather than duplicating it.
+    """
+    conn.execute(
+        """
+        INSERT INTO protective_stops
+            (client_order_id, delta_order_id, position_id, side, size,
+             entry_price, trigger_price, limit_price, reduce_only, placed_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(client_order_id) DO UPDATE SET
+            delta_order_id = COALESCE(excluded.delta_order_id,
+                                      protective_stops.delta_order_id),
+            position_id    = COALESCE(excluded.position_id,
+                                      protective_stops.position_id),
+            side           = excluded.side,
+            size           = excluded.size,
+            entry_price    = excluded.entry_price,
+            trigger_price  = excluded.trigger_price,
+            limit_price    = excluded.limit_price,
+            reduce_only    = excluded.reduce_only,
+            placed_ts      = excluded.placed_ts
+        """,
+        (client_order_id, delta_order_id,
+         int(position_id) if position_id is not None else None,
+         side, int(size), float(entry_price), float(trigger_price),
+         float(limit_price), 1 if reduce_only else 0, placed_ts),
+    )
+    conn.commit()
+
+
+def get_protective_stop(conn: sqlite3.Connection, client_order_id: str) -> dict | None:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM protective_stops WHERE client_order_id = ?",
+        (client_order_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def write_trade_signal_context(conn: sqlite3.Connection, *, client_order_id: str,
+                               signal_id: str, direction: int | None,
+                               raw_value: float | None, signal_day: str | None,
+                               context_json: str | None, captured_ts: str) -> None:
+    """Associate one live entry order with the signal state that motivated it.
+
+    Recorded at submission, because the forward-evidence database moves on: a
+    later reader cannot recover what the signal said at the moment the order
+    was sent, only what it says now. Keyed on the entry's client_order_id so a
+    lifecycle joins to its context without inference.
+
+    Additive and independent: nothing in the execution path reads this, so a
+    failure to capture context can never affect an order.
+    """
+    conn.execute(
+        """
+        INSERT INTO trade_signal_context
+            (client_order_id, signal_id, direction, raw_value, signal_day,
+             context_json, captured_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(client_order_id) DO UPDATE SET
+            signal_id    = excluded.signal_id,
+            direction    = excluded.direction,
+            raw_value    = excluded.raw_value,
+            signal_day   = excluded.signal_day,
+            context_json = excluded.context_json,
+            captured_ts  = excluded.captured_ts
+        """,
+        (client_order_id, signal_id,
+         int(direction) if direction is not None else None,
+         float(raw_value) if raw_value is not None else None,
+         signal_day, context_json, captured_ts),
+    )
+    conn.commit()
+
+
+def get_trade_signal_context(conn: sqlite3.Connection, client_order_id: str) -> dict | None:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM trade_signal_context WHERE client_order_id = ?",
+        (client_order_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def init_execution_schema(conn: sqlite3.Connection) -> None:

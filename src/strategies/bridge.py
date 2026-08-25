@@ -16,6 +16,7 @@ Deliberately does NOT: recompute signals, touch the research pipeline, write to
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import pathlib
@@ -112,6 +113,65 @@ def latest_direction(forward_db_path: str, signal_id: str = SIGNAL_ID) -> int | 
         if conn is not None:
             try:
                 conn.close()
+            except Exception:
+                pass
+
+
+def capture_signal_context(conn, client_order_id: str, forward_db_path: str,
+                           signal_id: str = SIGNAL_ID) -> bool:
+    """Record the signal state that motivated one live entry, at submit time.
+
+    The forward-evidence database moves on: a reader months later cannot
+    recover what the signal said when the order was sent, only what it says
+    now. This pins signal_id, direction, the raw signal value and the day it
+    was computed to the entry's client_order_id, plus every other signal's
+    latest position as regime/context.
+
+    Read-only against the forward database and best-effort by construction:
+    returns False and logs rather than raising, because a research record must
+    never be able to interfere with an order. NOT called from the execution
+    path -- there is no automated strategy path to call it (Gate 5C.22), so the
+    caller that submits an entry is responsible for invoking it.
+    """
+    p = pathlib.Path(forward_db_path)
+    if not p.exists():
+        log.warning("[bridge] forward db absent; no signal context for %s",
+                    client_order_id)
+        return False
+    fwd = None
+    try:
+        fwd = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
+        row = fwd.execute(
+            "SELECT direction FROM trade_entries WHERE signal_id = ? AND open = 1 "
+            "ORDER BY entry_date DESC LIMIT 1", (signal_id,)).fetchone()
+        direction = int(row[0]) if row else None
+        sig = fwd.execute(
+            "SELECT day, position, raw_value FROM signal_log WHERE signal_id = ? "
+            "ORDER BY id DESC LIMIT 1", (signal_id,)).fetchone()
+        signal_day = sig[0] if sig else None
+        raw_value = float(sig[2]) if sig and sig[2] is not None else None
+        latest_day = fwd.execute("SELECT MAX(day) FROM signal_log").fetchone()
+        context = {}
+        if latest_day and latest_day[0]:
+            for sid, pos in fwd.execute(
+                    "SELECT signal_id, position FROM signal_log WHERE day = ?",
+                    (latest_day[0],)):
+                context[sid] = pos
+        from src.data import storage as _storage
+        _storage.write_trade_signal_context(
+            conn, client_order_id=client_order_id, signal_id=signal_id,
+            direction=direction, raw_value=raw_value, signal_day=signal_day,
+            context_json=json.dumps(context, sort_keys=True),
+            captured_ts=datetime.now(timezone.utc).isoformat())
+        return True
+    except Exception as exc:
+        log.warning("[bridge] could not capture signal context for %s: %s",
+                    client_order_id, exc)
+        return False
+    finally:
+        if fwd is not None:
+            try:
+                fwd.close()
             except Exception:
                 pass
 

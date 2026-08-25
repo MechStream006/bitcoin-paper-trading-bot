@@ -33,6 +33,7 @@ import dataclasses
 import enum
 import logging
 import math
+from datetime import datetime, timezone
 
 from src.data import storage
 from src.execution import fills as fills_mod
@@ -45,6 +46,10 @@ from src.risk.manager import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 #: Exchange order states in which a stop is genuinely standing guard.
 #: "pending" is the resting state of an UNTRIGGERED stop -- verified on the
@@ -375,6 +380,30 @@ def ensure(conn, executor, client, status: ProtectionStatus, *,
     except Exception as exc:
         log.error("[protection] stop submission raised %s: %s", type(exc).__name__, exc)
         return status
+
+    # Provenance, recorded whatever the outcome: the trigger that bounded this
+    # trade's risk lives nowhere else locally (orders.price holds the stop's
+    # LIMIT), and a refused or ambiguous placement is exactly the case a later
+    # audit most needs to see. Best-effort -- protection must never fail
+    # because a research record could not be written.
+    try:
+        placed = storage.get_order(conn, intent.client_order_id)
+        storage.write_protective_stop(
+            conn,
+            client_order_id=intent.client_order_id,
+            delta_order_id=(placed or {}).get("delta_order_id"),
+            position_id=int(position["id"]),
+            side=intent.side,
+            size=intent.size,
+            entry_price=float(position["entry_price"]),
+            trigger_price=float(intent.stop_price),
+            limit_price=float(intent.limit_price),
+            reduce_only=True,
+            placed_ts=_now_iso(),
+        )
+    except Exception as exc:
+        log.error("[protection] could not record stop provenance for %s: %s",
+                  intent.client_order_id, exc)
 
     if state is not OrderState.ACKED:
         log.critical("[protection] stop %s did not ACK (state=%s, reason=%s); "

@@ -391,6 +391,36 @@ def _resolve_order(conn: sqlite3.Connection, f: Fill) -> tuple[int | None, str]:
     return None, "fill carries neither delta_order_id nor client_order_id"
 
 
+def _cycle_strategy(conn: sqlite3.Connection, *, default: str) -> str:
+    """The strategy that actually opened this cycle, from its entry order.
+
+    ingest_fills() defaults to "manual" and the reconciler -- the only caller in
+    the runtime -- does not override it, so every reconciled position was
+    projected as manual regardless of what placed it. The fill knows its
+    delta_order_id and the order knows its strategy, so the attribution is a
+    lookup, not a guess.
+
+    Falls back to `default` when there is no entry fill, no linked order, or the
+    order carries no strategy: a genuinely operator-placed trade stays manual
+    rather than being relabelled.
+    """
+    entry_ids = [r["fill_id"] for r in _cycle_fills(conn) if r["role"] == "entry"]
+    if not entry_ids:
+        return default
+    # Scoped to THIS cycle's entry fills. _cycle_fills does not select
+    # delta_order_id (it exists for P&L), so the join is done here rather than
+    # by widening a query the realised-P&L path depends on.
+    marks = ",".join("?" for _ in entry_ids)
+    row = conn.execute(
+        f"SELECT o.strategy FROM order_fills f "
+        f"JOIN orders o ON o.delta_order_id = f.delta_order_id "
+        f"WHERE f.fill_id IN ({marks}) AND o.strategy IS NOT NULL "
+        f"ORDER BY f.processed_ts LIMIT 1",
+        entry_ids,
+    ).fetchone()
+    return str(row[0]) if row and row[0] else default
+
+
 def _project_positions(conn: sqlite3.Connection, *, strategy: str, ts: str) -> None:
     """Rewrite the positions projection from the fill ledger.
 
@@ -413,9 +443,14 @@ def _project_positions(conn: sqlite3.Connection, *, strategy: str, ts: str) -> N
             exits = [r for r in cycle if r["role"] == "exit"]
             realised = sum(float(r["realised_pnl"] or 0.0) for r in exits)
             last_exit = exits[-1]["price"] if exits else None
+            # quantity is NOT zeroed. Openness is decided by status alone --
+            # nothing filters on quantity -- so zeroing it only destroyed the
+            # one number a closed row exists to record: how much was traded.
+            # order_fills remains authoritative; this keeps the projection
+            # from contradicting it.
             conn.execute(
                 "UPDATE positions SET status = 'closed', exit_price = ?, "
-                "exit_ts = ?, pnl = ?, quantity = 0 WHERE id = ?",
+                "exit_ts = ?, pnl = ? WHERE id = ?",
                 (float(last_exit) if last_exit is not None else None, ts,
                  float(realised), row[0]),
             )
@@ -423,6 +458,7 @@ def _project_positions(conn: sqlite3.Connection, *, strategy: str, ts: str) -> N
 
     entry_price = _weighted_entry_price(conn)
     side = "buy" if size > 0 else "sell"
+    strategy = _cycle_strategy(conn, default=strategy)
     if row is None:
         conn.execute(
             "INSERT INTO positions (instrument_id, side, quantity, entry_price, "
