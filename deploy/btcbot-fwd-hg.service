@@ -3,6 +3,12 @@ Description=BTC Forward Evidence — H5, G1, G3 daily collection (one-shot)
 Documentation=file:/opt/btcbot/deploy/install.md
 After=network-online.target time-sync.target
 Wants=network-online.target
+# Escalate a non-zero exit immediately. The Gate 5C.26 outage was 19 daily
+# status=1/FAILURE exits with a healthy timer -- systemd knew every time, and
+# nothing asked it. Deliberately NOT Restart=: run_daily aborts fail-closed on
+# a governance pre-check failure and re-running would either fail identically
+# or write evidence against a registry already judged invalid.
+OnFailure=btcbot-alert@%n.service
 
 [Service]
 Type=oneshot

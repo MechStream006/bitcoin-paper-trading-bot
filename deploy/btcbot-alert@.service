@@ -1,0 +1,28 @@
+[Unit]
+# Templated failure notifier. %i is the failed unit name, passed by the
+# failing unit as OnFailure=btcbot-alert@%n.service.
+#
+# Gate 5C.26: btcbot-fwd-hg.service exited 1/FAILURE on 19 consecutive days
+# while its timer stayed healthy. No unit in this project carried OnFailure=
+# and no notifier existed, so the failure was journalled loudly and heard by
+# nobody. This is the missing listener.
+Description=BTC Bot — failure alert for %i
+Documentation=file:/opt/btcbot/deploy/install.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcbot
+ExecStart=/opt/btcbot/venv/bin/python scripts/alert_unit_failure.py %i
+Environment=PYTHONDONTWRITEBYTECODE=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-alert
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# Read-only by design: a notifier must never be able to modify state. It needs
+# no ReadWritePaths at all -- it only reads .env and writes to the journal.
