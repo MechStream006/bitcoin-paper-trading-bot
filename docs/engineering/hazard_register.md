@@ -6,9 +6,9 @@
 | **Status** | **Active** |
 | **Version** | 1.0.0 |
 | **Document Type** | Engineering Process Register (not an ADR, not an architecture document) |
-| **Companion** | [Engineering Verification Standard](verification/engineering_verification_standard.md); [INC-0001](incidents/INC-0001-init-db-side-effect.md), [INC-0003](incidents/INC-0003-engine-module-name-collision.md) (origin incidents) |
+| **Companion** | [Engineering Verification Standard](verification/engineering_verification_standard.md); [INC-0001](incidents/INC-0001-init-db-side-effect.md), [INC-0003](incidents/INC-0003-engine-module-name-collision.md) (origin incidents); [unit-drift record](../ops/unit-drift-and-failure-alerting-2026-08-26.md) (origin of `EH-003`, which has no `INC-` record — caught before impact) |
 | **Authors** | Rohith Suresh — Owner / Architect · Drafted with Claude Sonnet 5 |
-| **Last Updated** | 2026-08-05 |
+| **Last Updated** | 2026-08-26 (`EH-003` registered) |
 
 ---
 
@@ -30,6 +30,7 @@ A hazard is registered when:
 |---|---|---|---|---|
 | [`EH-001`](#eh-001--alter-statements-inside-init_db-reachable-from-verification-paths) | ALTER statements inside `init_db()` reachable from verification paths | Low (no known exploit/incident beyond `INC-0001`) — structurally significant | **Open — not remediated** | 2026-08-05 |
 | [`EH-002`](#eh-002--bare-import-engine-is-not-collision-safe-across-subsystems) | Bare `import engine` is not collision-safe across subsystems (`sys.modules` is process-global) | Low today (one known unfixed instance remains, not currently imported by any test; 3 other known instances fixed as of WBS 2.5) — structurally significant, deterministic once triggered (not intermittent) | **Open — 1 of 4 known instances not remediated** | 2026-08-05 |
+| [`EH-003`](#eh-003--deployed-systemd-units-can-diverge-from-deploy-with-no-detection-mechanism) | Deployed systemd units can diverge from `deploy/` with no detection mechanism | Medium (**zero drifted instances today** — all 23 units verified byte-identical; the hazard is the *absence of detection*, not a live divergence. The one realised instance went undetected for ~59 days and was found by chance) | **Open — detection gap not remediated (zero current instances)** | 2026-08-26 |
 
 ---
 
@@ -115,6 +116,63 @@ The only remaining unfixed instance (`compute_dsr_for_registration.py`) is a fil
 ### Rollback / mitigation available today, without a full remediation sprint
 
 None needed for the fixed instances (`INC-0003`'s four files are immune to import order now). The one remaining unfixed instance poses no live risk today because it is never imported by any test and is only ever run as an isolated `python <script>.py` invocation, which starts a fresh process each time — the collision requires two colliding imports to share one process, which does not currently happen for this file. This could change the day someone writes a test that imports `compute_dsr_for_registration.py`, which is exactly why this is registered now rather than left to a second incident.
+
+---
+
+## `EH-003` — Deployed systemd units can diverge from `deploy/` with no detection mechanism
+
+| Field | Value |
+|---|---|
+| **Severity** | Medium. **Zero drifted instances exist today** (all 23 units verified byte-identical, 2026-08-26). The hazard is the *absence of any detection mechanism*, not a live divergence. Rated above `EH-001`/`EH-002` because the failure surface is production runtime behaviour — sandboxing, schedules, `ExecStart` — rather than developer-environment import order |
+| **Status** | Open — detection gap not remediated (zero current instances) |
+| **Registered** | 2026-08-26 |
+| **Originating record** | [`docs/ops/unit-drift-and-failure-alerting-2026-08-26.md`](../ops/unit-drift-and-failure-alerting-2026-08-26.md) §1 (Gate 5C.28). **No `INC-` record exists**, because the drift was caught during pre-deployment comparison and never caused a production incident |
+| **Scope note** | This register is titled *Research Platform* and its two existing hazards are research-code defects. `EH-003` is the first **operational/deployment** hazard recorded here. Flagged explicitly rather than filed silently — relocating it to an ops-specific register is Rohith's call |
+
+### Description
+
+`deploy/*.service` and `deploy/*.timer` are the repository's copy of the systemd units. They are installed by manual `sudo cp` into `/etc/systemd/system/` ([`deploy/install.md`](../../deploy/install.md) §7), one file per line, with no atomic "install all units" step.
+
+Once copied, **systemd reads only `/etc/systemd/system/`**. The repository copy has no further causal role. Consequently:
+
+- An in-place edit on the host is invisible to the repository, to code review, and to CI.
+- A change to `deploy/` is invisible to the running system until someone remembers to re-copy it.
+- Installing a repo unit over a hand-edited host unit **silently discards** the host-side change.
+
+**Nothing detects any of these.** A repository-wide search for `etc/systemd` across every `.py`, `.yml` and `.yaml` (excluding `docs/`) returns **zero** hits; `scripts/healthcheck.py` contains **zero** references to `deploy/` or to unit comparison; CI (`.github/workflows/ci.yml`) runs pytest and a Docker build and never contacts a host. The gap is closed today only by a human choosing to diff before installing.
+
+### Known instances, and how exhaustively this list was compiled
+
+**Exhaustiveness statement.** On 2026-08-26, **all 23 units** in `deploy/` were compared against their installed counterparts in `/etc/systemd/system/` on the production host by two independent methods: (1) equality of *active directives* with comments, `;`-comments, and blank lines stripped, and (2) SHA-256 over the full file bytes. Both methods agree: **23/23 identical, 0 drifted**. The unit-name sets on both sides are also identical (23 each, no unit present on one side only). This is a complete census of `deploy/`, not a sample — it is *not* limited to the one unit Gate 5C.28 touched.
+
+| # | Instance | Status |
+|---|---|---|
+| 1 | `btcbot-fwd-hg.service` — host carried `ReadWritePaths=… /opt/btcbot/research/evidence_library`; the repository copy did not | **Fixed** 2026-08-25 (commit `d2b0193`): the deployed grant was preserved and the repository reconciled to it |
+
+**Currently unfixed instances: none.**
+
+**Corroborating evidence that the in-place-edit workflow is real, not hypothetical:**
+
+- `/etc/systemd/system/btcbot-fwd-hg.service.bak.20260628` exists on the host, mtime **2026-06-27 21:53:29** — ten seconds before that unit's own pre-fix mtime of 21:53:39. A backup written immediately before an edit is the signature of editing the installed unit in place. It is the **only** such artifact on the host (no other `.bak`, `.orig`, or `~` file in `/etc/systemd/system/`).
+- **Time-to-detection for the one realised instance: ~59 days** (2026-06-27 → 2026-08-25), and it was found only because an unrelated change happened to require touching that same unit. Nothing was searching for it.
+- Host unit mtimes span **2026-06-11 → 2026-08-25** across at least twelve distinct installation events, confirming units are installed piecemeal over months rather than in one reproducible step.
+
+### Why not fixed now
+
+Registering a hazard does not remediate it (§2.5). Beyond that rule, remediation genuinely exceeds this gate's scope: a real fix requires either a host-side verification job (a new systemd unit and a new healthcheck code path) or a deployment-procedure change, both of which alter production runtime surface — explicitly out of bounds for a gate whose mandate was documentation deployment with no runtime behaviour change.
+
+There is also a design question that should not be decided unilaterally: whether the correct invariant is *"host must equal repo"* (making every legitimate host-side hotfix a violation until back-ported) or *"host may differ, but differences must be declared and reviewed"*. Gate 5C.28's own resolution — preserve the host grant, reconcile the repo — is evidence that the second model is sometimes correct, so a naive equality check would have flagged a state that was, at that moment, the *right* one.
+
+### What remediation would look like (recorded for the future sprint, not authorised now)
+
+1. A read-only comparison of every file in `deploy/` against `/etc/systemd/system/`, reporting drift by unit and by directive — the same two-method comparison used for this entry's exhaustiveness statement, run on a schedule instead of by hand.
+2. Surface the result through the existing `scripts/healthcheck.py` severity model (a new check alongside `check_backup_freshness`/`check_offhost_freshness`), so drift reaches the operator through the channel already trusted for operational signals, rather than adding a parallel alerting path.
+3. Decide and document the intended invariant (strict equality vs. declared-exception), because step 2's severity mapping depends on which one is chosen.
+4. Optionally, replace `install.md` §7's per-file `cp` list with a single idempotent install step, removing the class of error where one unit in a multi-unit change is forgotten.
+
+### Rollback / mitigation available today, without a full remediation sprint
+
+No rollback is needed: there is no drift to roll back, and this entry changes no behaviour. The mitigation available today is procedural and already recorded in the originating document's own Lesson section — **compare the deployed unit against the repository copy before installing any unit file, and treat an unexplained host-side directive as load-bearing until proven otherwise.** That procedure caught instance #1. It depends entirely on the operator remembering to apply it, which is precisely why the hazard is registered rather than considered closed.
 
 ---
 
