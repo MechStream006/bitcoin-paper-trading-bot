@@ -71,3 +71,23 @@ dvol:
   # Refreshed daily at 00:05 UTC by forward_evidence/daily_ingest.py (non-critical).
   parquet_dir: data/raw/dvol/BTC
   symbol: BTC
+
+funding:
+  # Binance USDT-perp (binanceusdm BTC/USDT:USDT) funding, 8-hourly at
+  # 00:00/08:00/16:00 UTC. Relative to research/ root.
+  # Layout: {parquet_dir}/year=YYYY/month=MM/data.parquet
+  # Columns: timestamp_ms (int64 ms UTC), funding_rate (float64, raw rate not bps)
+  # Refreshed daily by forward_evidence/daily_ingest.py step 3 (CRITICAL there).
+  # Consumed via runner_base.load_daily_funding(), which converts to daily mean
+  # bps (x 10000) and drops days with < 2 observations.
+  #
+  # NO SIGNAL CONSUMES THIS YET (Gate 6A.6). The directory is declared so the
+  # loader and its tests share one source of truth for the corpus location.
+  # h6_funding_vol_regime and g2_funding_level are deliberately NOT registered
+  # under signals: above. Both are blocked on frozen artifacts, not on wiring:
+  # h6's pre-registered decision_function.py exposes compute_h6_decision(df)
+  # returning a single-row dict, not the position Series run_signal() requires;
+  # g2 has neither a pre-registration nor a decision function file. Wiring
+  # either would mean authoring frozen signal logic no pre-registration covers.
+  parquet_dir: data/raw/funding/BTCUSDT
+  symbol: BTCUSDT

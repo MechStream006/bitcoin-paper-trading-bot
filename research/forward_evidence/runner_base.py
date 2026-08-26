@@ -8,6 +8,7 @@ Public interface:
     run_ohlcv_signal(...) -> Literal['ok', 'skipped']  (OHLCV-based signals, e.g. G3 ATR)
     load_daily_closes(...) -> pd.Series
     load_daily_dvol(...) -> pd.Series
+    load_daily_funding(...) -> pd.Series
     load_daily_ohlcv(...) -> pd.DataFrame
     DataUnavailableError
 
@@ -208,6 +209,107 @@ def load_daily_dvol(
         raise DataUnavailableError(
             f"Insufficient DVOL history: need {min_rows} rows, have {len(daily)}. "
             "Run ingest/dvol.py to extend the Parquet store."
+        )
+    return daily
+
+
+#: Minimum funding observations required before a UTC day yields a daily mean.
+#: Binance USDT-perp funding settles 8-hourly (00:00/08:00/16:00 UTC), so a
+#: complete day has exactly 3. The value MUST stay equal to
+#: research/evidence/engine.py MIN_DAILY_FUND -- that module computed the
+#: funding history every registered funding hypothesis was evaluated against, so
+#: a divergence here would silently change what "daily mean funding" means
+#: between research and forward collection. engine.py is not imported (it pulls
+#: duckdb into the forward runtime); equality is asserted by test instead.
+MIN_DAILY_FUND = 2
+
+
+def load_daily_funding(
+    parquet_dir: pathlib.Path,
+    through_date: str,
+    min_rows: int,
+) -> pd.Series:
+    """
+    Load daily mean Binance USDT-perp funding, in basis points, from Parquet.
+
+    Semantics are those of research/evidence/engine.py load_master(), reproduced
+    exactly rather than reinterpreted:
+
+        AVG(funding_rate) * 10000.0  grouped by UTC day,
+        HAVING COUNT(*) >= MIN_DAILY_FUND
+
+    A day with fewer than MIN_DAILY_FUND observations is DROPPED, not averaged
+    over what happens to be present -- a single 8-hour print is not a daily mean,
+    and admitting one would bias the trailing-tercile regime boundaries that
+    funding hypotheses are defined on.
+
+    Mirrors load_daily_dvol (same partition selection, timestamp normalisation
+    and DataUnavailableError semantics) so the funding path behaves identically
+    to the spot and DVOL paths.
+
+    Parameters
+    ----------
+    parquet_dir : e.g. research/data/raw/funding/BTCUSDT
+    through_date : 'YYYY-MM-DD' inclusive upper bound
+    min_rows : minimum daily rows required (= signal MIN_HISTORY)
+
+    Returns
+    -------
+    pd.Series indexed by 'YYYY-MM-DD' strings, chronological, ending at
+    through_date. Values are daily mean funding in bps (e.g. 1.0827).
+
+    Raises
+    ------
+    DataUnavailableError if through_date is absent or fewer than min_rows days
+    are available. Callers convert this into a per-signal skip, never a failure
+    of the whole daily job.
+    """
+    through_dt = date.fromisoformat(through_date)
+    start_dt   = through_dt - timedelta(days=min_rows + 32)
+
+    partitions = _select_partitions(parquet_dir, start_dt, through_dt)
+    if not partitions:
+        raise DataUnavailableError(
+            f"No funding partitions found in {parquet_dir} for "
+            f"{start_dt}..{through_dt}. Run ingest/funding.py to populate."
+        )
+
+    frames = [
+        pd.read_parquet(p, columns=['timestamp_ms', 'funding_rate'])
+        for p in partitions
+    ]
+    raw = pd.concat(frames, ignore_index=True)
+
+    # Defensive µs guard, mirroring load_daily_closes/load_daily_dvol. Funding
+    # has been 13-digit ms to date; this is a no-op for correct data and stops a
+    # silent unit switch from producing a 1000x-wrong grouping.
+    ts = raw['timestamp_ms'].astype('int64')
+    if ts.max() > 1_500_000_000_000_000:
+        ts = ts // 1000
+    raw['dt'] = pd.to_datetime(ts, unit='ms', utc=True)
+
+    # count() excludes NaN and mean() skips it, so a NaN print is not counted
+    # toward MIN_DAILY_FUND and cannot bias the mean -- no explicit dropna is
+    # needed here, and adding one would be unreachable code.
+    grouped = raw.set_index('dt').sort_index()['funding_rate'].resample('D')
+    daily   = grouped.mean() * 10_000.0
+    counts  = grouped.count()
+    daily   = daily[counts >= MIN_DAILY_FUND].dropna()
+
+    daily.index = daily.index.strftime('%Y-%m-%d')
+    daily = daily[daily.index <= through_date]
+
+    if through_date not in daily.index:
+        latest = daily.index[-1] if len(daily) > 0 else 'none'
+        raise DataUnavailableError(
+            f"Daily mean funding for {through_date} not in store "
+            f"(or fewer than {MIN_DAILY_FUND} observations that day). "
+            f"Latest available: {latest}. Run ingest/funding.py to update."
+        )
+    if len(daily) < min_rows:
+        raise DataUnavailableError(
+            f"Insufficient funding history: need {min_rows} rows, have {len(daily)}. "
+            "Run ingest/funding.py to extend the Parquet store."
         )
     return daily
 
