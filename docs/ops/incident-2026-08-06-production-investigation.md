@@ -6,6 +6,13 @@
 2026-08-07 — see §10.** B1 and B2 RESOLVED; B5 partially; B3/B4/B6 open on a
 credential.
 
+> **B2's permanent data loss is recorded separately** as
+> [`INC-0005`](../engineering/incidents/INC-0005-forward-evidence-collection-outage.md)
+> — the forward-evidence gap (run_dates **2026-07-18 → 2026-08-05**, 19 days)
+> is immutable provenance and must never be backfilled or interpolated. That
+> record also carries the CLAUDE.md §18 Increment 5 date reconciliation this
+> investigation recommended (§ *Which items require repository changes*).
+
 > **Disclosure — one inadvertent change, since cleaned up.** A `sqlite3` probe
 > against a non-existent path created a **0-byte `ledger.db`** at
 > `/home/ubuntu/bitcoin-paper-trading-bot/research/evidence_library/`

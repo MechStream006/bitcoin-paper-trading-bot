@@ -8,8 +8,11 @@ This document states, plainly and per-claim, what Program P1 has and has not
 established. Its purpose is to prevent "seven completed increments" from
 being misread as "the governance store is durable in production." One of
 the program's four durability objectives below remains explicitly **NOT
-ESTABLISHED** (claim 8, off-host durability), and one rests on operator
-attestation rather than committed evidence (claim 4).
+ESTABLISHED** (claim 8, off-host durability), and one rested on operator
+attestation rather than committed evidence (claim 4 — **revised 2026-08-26**:
+the production ledger is now migrated and evidenced, but by a **2026-08-07**
+execution, not by the 2026-07-26 attestation, whose transcript is
+unavailable; see §3).
 
 For history and evidence detail behind every row, see `CLAUDE.md` §18
 (Program P1 — Governance Store Consolidation — Engineering Record) and
@@ -37,7 +40,7 @@ repeat that narrative — it states bounded claims and points at the evidence.
 | 1 | Governance schema drift is asserted, never silently repaired | **DEMONSTRATED** | `governance_verification.check_schema_fingerprint()`; `tests/test_governance_verification.py` (Increment 3, incl. the as-of conditionality regression fix) | Repository + local dev ledger |
 | 2 | Governance entry points (`report.py --check`) fail closed, by name, on a drifted ledger, with zero schema mutation | **DEMONSTRATED** | Increment 3's read-only-contract verification (byte-identical `sqlite_master` before/after a failing check) | Repository + local dev ledger |
 | 3 | The D-0 migration sequence (`migrate_run_kind.py` → `migrate_bootstrap_evidence_admission.py` → `migrate_bootstrap_transition_receipts.py`) closes documented drift cleanly and idempotently | **DEMONSTRATED (LOCAL)** | `tests/test_migration_harness.py` (12 tests); `docs/ops/migration-harness-dry-run-2026-07-26.md` | **Disposable local copy only** |
-| 4 | **The production `ledger.db` has been migrated and is drift-free** | **EXECUTED (ATTESTED)** | Increment 5 executed on the production host, 2026-07-26, per operator attestation at program closure. Procedure: `docs/ops/production-migration-runbook-increment5.md`. **No execution transcript, scenario classification, or post-migration verification output is committed to this repository.** | Production host — attested, not independently re-verified from this repository |
+| 4 | **The production `ledger.db` has been migrated and is drift-free** | **DEMONSTRATED (as of 2026-08-07)** — but **NOT by Increment 5**; see the date-separation note below | The D-0 sequence was executed against the production ledger on **2026-08-07**, with output committed to this repository: `docs/ops/incident-2026-08-06-production-investigation.md` §10 B2 — `report.py --check` OK (35 families, 9/22/4), `verify_chain()` `ok=True, n_receipts=26`, `PRAGMA integrity_check` ok, re-run idempotent (0 pending). The **2026-07-26 Increment 5 attestation is separate and uncorroborated** (below). | Production host, verification output committed |
 | 5 | Ledger backup freshness (local, on-host) is monitored, CLI and API in parity | **DEMONSTRATED** | `scripts/healthcheck.py::check_backup_freshness()`; `tests/test_healthcheck.py` (Increment 1) | Repository |
 | 6 | The restore path (`scripts/restore.py`) is regression-covered against real SQLite artifacts | **DEMONSTRATED** | `tests/test_restore.py`, 21 tests (Increment 2) | Repository |
 | 7 | Off-host transfer failure is no longer silent — a persisted signal exists and is monitored | **DEMONSTRATED** | `scripts/backup.py::_write_offhost_status()`; `scripts/healthcheck.py::check_offhost_freshness()`; `tests/test_offhost_backup.py`, `tests/test_healthcheck.py` (Increment 6) | Repository |
@@ -50,15 +53,24 @@ repeat that narrative — it states bounded claims and points at the evidence.
 
 Stated rather than left to be inferred from what is absent above:
 
-- Increment 5's migration is recorded at **EXECUTED (ATTESTED)**, not
-  DEMONSTRATED, and the distinction is deliberate. This program makes **no
-  claim** that the production `ledger.db`'s post-migration state has been
-  independently verified from this repository. Capturing the execution
-  transcript and post-migration verification output (GV-SCHEMA result,
-  `report.py --check` output, `verify_chain()` result, and the §3 scenario
-  observed) would raise claim 4 to DEMONSTRATED; until then the claim rests
-  on attestation. This is an evidence-archival gap, not a known defect —
-  nothing indicates the migration was unsuccessful.
+- **Date separation on claim 4 (revised 2026-08-26, Gate 5C.29).** The
+  paragraph that stood here recorded Increment 5 at EXECUTED (ATTESTED) and
+  described the missing transcript as "an evidence-archival gap, not a known
+  defect — nothing indicates the migration was unsuccessful." That last
+  clause is **superseded**. Two dates are now held separately, and this
+  program makes **no claim** that they can be reconciled:
+
+  | | Date | Basis |
+  |---|---|---|
+  | **(a) Attested migration date** | **2026-07-26** | Operator attestation at program closure. **The original execution transcript and post-migration verification output are unavailable** — never captured into this repository, and not recoverable from the host afterwards. Procedure: `docs/ops/production-migration-runbook-increment5.md` |
+  | **(b) First directly evidenced effective production state** | **2026-08-07** | The production ledger was directly observed on 2026-08-06 to lack `runs.run_kind`, `governance_receipts` and `pairwise_r`; the D-0 sequence run on 2026-08-07 created them, with verification output committed |
+
+  Production behaviour between 2026-07-18 and 2026-08-05 — 19 consecutive
+  daily `IndexError` failures on `r["run_kind"]` — is **inconsistent with an
+  effective migration having taken place on this host on 2026-07-26**. **No
+  explanation for the discrepancy is offered, because none was established**,
+  and neither date is edited to agree with the other. Incident record:
+  `docs/engineering/incidents/INC-0005-forward-evidence-collection-outage.md`.
 - This program makes **no claim** that any backup — local or off-host — of
   any production database has ever been restored on the production host
   itself. The restore path is regression-tested (claim 6); it has not been
@@ -92,16 +104,26 @@ Stated rather than left to be inferred from what is absent above:
 Program P1 is not "done" in a sense that forecloses revisiting it. The
 following events explicitly reopen it:
 
-1. ~~**Increment 5 executes.**~~ **Fired and closed, 2026-07-26.** Claim 4
-   moved from NOT ESTABLISHED to EXECUTED (ATTESTED). It reopens once more,
-   at DEMONSTRATED, if and when the execution transcript and post-migration
-   verification output are committed to this repository.
+1. ~~**Increment 5 executes.**~~ **Fired 2026-07-26; reopened and re-closed
+   2026-08-07.** Claim 4 moved to EXECUTED (ATTESTED) at Increment 5, then to
+   **DEMONSTRATED** on 2026-08-07 when the D-0 sequence was executed against
+   the production ledger with its verification output committed. The
+   2026-07-26 transcript remains **unavailable** and the two dates are held
+   separately — see §3.
 2. **BK3 host-side activation completes** (target provisioned, key
    generated and dual-custodied, `--encrypt` deployed, decrypt drill passed
    on a real production artifact). Claim 8 updates accordingly.
-3. **Any GV-SCHEMA hard finding appears against the production ledger**,
+3. ~~**Any GV-SCHEMA hard finding appears against the production ledger**,
    whether from routine `report.py --check` or an ad hoc audit. This is a
-   new incident, not a P1 regression, but it directly bears on claim 4.
+   new incident, not a P1 regression, but it directly bears on claim 4.~~
+   **FIRED 2026-08-06, closed 2026-08-07.** The production ledger was found
+   to lack `runs.run_kind`, `governance_receipts` and `pairwise_r` — the
+   drift this class of finding exists to surface. It reached production as an
+   unnamed `IndexError` rather than a GV-SCHEMA diagnostic, because
+   Increment 3's fingerprint code was undeployed on that host at the time.
+   Closed by the 2026-08-07 migration. Consequence for claim 4 recorded in
+   §3; data-loss consequence recorded as `INC-0005`. **This trigger remains
+   armed for any future occurrence.**
 4. **Any receipt-chain verification failure** (`receipt_ledger.verify_chain()`
    returning `ok=False`) on any ledger this program's tooling touches.
 5. ~~**Increments 1–6's uncommitted working-tree state** is committed,
@@ -138,3 +160,14 @@ the same is true of the Parquet corpus and `.env`. Full-service restoration
 (rebuilding the runtime environment and bringing the bot back up) has never
 been attempted. Treat the proven claim as exactly what it is: the single
 irreplaceable asset under BK1 is recoverable, and nothing broader.**
+
+**Updated 2026-08-26 (Gate 5C.29) — claim 4.** The production `ledger.db` **is**
+migrated and drift-free, evidenced by an execution on **2026-08-07** whose
+verification output is committed here. That is **not** the 2026-07-26 Increment 5
+attestation, whose transcript is unavailable and which production behaviour
+between 2026-07-18 and 2026-08-05 does not corroborate. Both dates are retained;
+neither is edited to agree with the other, and **no explanation for the
+difference is offered, because none was established**. The unresolved drift cost
+19 consecutive days of irreplaceable forward evidence, recorded as
+`docs/engineering/incidents/INC-0005-forward-evidence-collection-outage.md` —
+a permanent gap that must never be backfilled or interpolated.

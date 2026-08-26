@@ -1318,6 +1318,33 @@ chartered Program P1.
   migration scripts' own `ledger.pre-*.db` backup files) and append it to
   the runbook's §7 Sign-off. Claim 4 then rises to DEMONSTRATED.
 
+**Reconciliation — recorded 2026-08-26 (Gate 5C.29). The two bullets above
+are preserved verbatim as the original historical record; the final clause of
+the first ("nothing indicates the migration was unsuccessful") and the
+closure path in the second are both SUPERSEDED by what follows.**
+
+Two dates must be held separately. They are not reconciled here, and no
+explanation for the difference is offered, because none was established:
+
+| | Date | Basis |
+|---|---|---|
+| **(a) Attested migration date** | **2026-07-26** | Operator attestation at Program P1 closure. **The original execution transcript and post-migration verification output are unavailable** — never captured into this repository, and not recoverable from the host afterwards |
+| **(b) First directly evidenced effective production state** | **2026-08-07** | The production ledger was directly observed on 2026-08-06 to lack `runs.run_kind`, `governance_receipts` and `pairwise_r`; the columns were created by the D-0 migration run on 2026-08-07, whose full verification output *is* recorded |
+
+Between 2026-07-18 and 2026-08-05 the production `run_daily` job failed on
+every invocation because `lifecycle.py`'s C1 invariant read `r["run_kind"]`
+on a ledger that did not have that column — 19 consecutive days of
+permanently lost forward evidence. That behaviour is direct evidence about
+the ledger's state during the window and is why the archival gap can no
+longer be treated as merely archival.
+
+**Do not edit either date to make them agree.** The attestation stands as
+what was recorded on 2026-07-26; the observation stands as what production
+demonstrated. Full incident record:
+`docs/engineering/incidents/INC-0005-forward-evidence-collection-outage.md`.
+Assurance-level consequence: `docs/governance/p1_assurance_declaration.md`
+claim 4, reopened under its own trigger 3.
+
 ### Program P1 — CLOSED (2026-07-26)
 
 All seven increments are complete. The program's output was committed as
@@ -1408,6 +1435,38 @@ this properly (schema-ensure interaction, `tests/test_restore.py`
 coverage for a live-WAL scenario, `docs/ops/offhost-backup.md`'s decrypt
 path which also produces a plain `.db` file that could exhibit the same
 gap on its own eventual restore) before implementing.
+
+---
+
+## 20. Forward-Evidence Provenance — Permanent Gap (2026-07-18 → 2026-08-05)
+
+**Read this before counting observation days, computing continuity, or
+assessing sample size for any forward signal.**
+
+`btcbot-fwd-hg.service` failed on **19 consecutive days**, writing zero
+observations for all 5 signals (H5, G1, G3, TSMOM, IVRV). Missing `run_date`s
+are **2026-07-18 through 2026-08-05 inclusive**. Last good `run_date` before
+the gap: 2026-07-17. First `run_date` after it: 2026-08-06, collected by the
+first successful resumed run on 2026-08-07.
+
+Root cause: `lifecycle.py`'s C1 invariant read `r["run_kind"]` on a production
+ledger lacking that column, raising `IndexError` inside the `report.py --check`
+pre-condition. The job **failed closed and correctly wrote nothing** — the
+corpus contains a clean absence, never corrupt or partial rows.
+
+**The gap is immutable provenance.** No backfill was performed and none is
+permitted. Never interpolate, impute or forward-fill it; carry it explicitly in
+any analysis. It will appear in every future recount — its *absence* would mean
+something silently closed it.
+
+**G3 cadence discontinuity:** the weekly entry anchor shifted **Monday →
+Thursday** across the gap. Treat the G3 entry series as two segments for any
+weekday-sensitive analysis.
+
+Full record: `docs/engineering/incidents/INC-0005-forward-evidence-collection-outage.md`.
+Detection is now covered by two independent, non-retrying detectors —
+`OnFailure=` on the unit and `btcbot-healthcheck`'s `forward_cycle` freshness
+check (`docs/ops/unit-drift-and-failure-alerting-2026-08-26.md`).
 
 ---
 
