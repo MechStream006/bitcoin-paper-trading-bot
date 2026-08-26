@@ -50,6 +50,19 @@ signals:
   # Phase 5: ACTIVE since 2026-07-19 (ATR_ACTIVATION_RUNBOOK.md). The runbook's
   # required post-activation step is that this repo file match the server, so a
   # redeploy cannot silently revert ATR to disabled.
+  # G2 Funding Level — contrarian positioning, FEATURE role (Gate 6A.8).
+  # Single-input but funding-driven: run_daily passes funding as aux_series and
+  # spot closes still price the trade. Isolated branch — a funding outage marks
+  # g2 'unavailable' and never blocks H5/G1/G3/IVRV.
+  # Declared independence risk at registration: |r| = 0.8187 vs
+  # g6_funding_basis_composite (> max_pairwise_r 0.70); that family is discovery
+  # and not collecting, so the conflict is latent. See the pre-registration.
+  g2_funding_level:
+    cost_bps: 15.0
+    pre_reg_file: forward_evidence/pre_registration_g2_funding_level.json
+    decision_function_file: forward_evidence/decision_function_g2_funding_level.py
+    decision_function_module: forward_evidence.decision_function_g2_funding_level
+
   g3_atr_expansion:
     enabled: true
     cost_bps: 15.0
@@ -81,13 +94,13 @@ funding:
   # Consumed via runner_base.load_daily_funding(), which converts to daily mean
   # bps (x 10000) and drops days with < 2 observations.
   #
-  # NO SIGNAL CONSUMES THIS YET (Gate 6A.6). The directory is declared so the
-  # loader and its tests share one source of truth for the corpus location.
-  # h6_funding_vol_regime and g2_funding_level are deliberately NOT registered
-  # under signals: above. Both are blocked on frozen artifacts, not on wiring:
-  # h6's pre-registered decision_function.py exposes compute_h6_decision(df)
-  # returning a single-row dict, not the position Series run_signal() requires;
-  # g2 has neither a pre-registration nor a decision function file. Wiring
-  # either would mean authoring frozen signal logic no pre-registration covers.
+  # Consumed by g2_funding_level (registered under signals: above, Gate 6A.8).
+  #
+  # h6_funding_vol_regime remains deliberately NOT registered. It is blocked on
+  # SEALED artifacts, not on wiring: its pre-registration (pre_registration.json)
+  # carries no top-level signal_id and stores its hash outside function_spec, so
+  # verify_fn_hash() rejects it; and both that file and its decision_function.py
+  # are in BASELINE_46.json, sealed under DS-DEC-004. Wiring h6 would require
+  # editing a sealed artifact or bypassing the fn_hash guard. See Gate 6A.7.
   parquet_dir: data/raw/funding/BTCUSDT
   symbol: BTCUSDT

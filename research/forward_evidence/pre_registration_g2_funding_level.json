@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "version": "1.0.0",
+  "signal_id": "g2_funding_level",
+  "pre_registration_date": "2026-08-26T00:00:00+00:00",
+  "artifact_hashes": {
+    "signals.py": "85644baf6e737f060016098a8907c0d7a6e49004aaf9afe328a45440a85e87b7",
+    "engine.py": "aa2cb34fc9793b81466f253065b5a0f7791cd096b58d95e9dd991fdb1ce4ffdb",
+    "governance.py": "a3759079fc909f88657b1138004704947befec775dc10090bb09d7a16af15c21",
+    "hash_note": "SHA-256 of LF-normalised bytes (CRLF->LF), captured 2026-08-26. engine.py and governance.py are byte-identical to the 2026-06-14 g3 and 2026-06-19 ivrv registrations. signals.py is NOT: it hashes 85644baf here versus d2f1c9de at those registrations, i.e. the module has changed since. That is recorded rather than reconciled: this registration does not depend on signals.py at runtime (decision_function_g2_funding_level.py is self-contained), and sig_funding_level's own numeric behaviour is pinned independently by the value-identity test against the real corpus."
+  },
+  "hypothesis": {
+    "statement": "Persistently low or negative BTC perpetual funding marks washed-out positioning and precedes upward drift; persistently high funding marks crowded longs and precedes weakness.",
+    "direction": "long_short",
+    "expected_sign": "positive mean return when funding is in its bottom trailing tercile; negative when in the top tercile",
+    "mechanism": "positioning/carry",
+    "mechanism_detail": "Funding is the price longs pay shorts to hold a perpetual. It is a direct, continuously-quoted observable of crowding. Extremes in the trailing distribution mark positioning washouts and crowding respectively; the signal is contrarian on the level, not on its change.",
+    "null_hypothesis": "The trailing tercile rank of daily mean funding has no predictive power for the sign of the next day's BTC return.",
+    "known_caveats_at_registration": "Bull-regime Sharpe -0.36 (mean-reverts poorly in sustained bull); sideways-regime Sharpe 2.21 (concentrated). Full-sample Sharpe 0.2307 and train-slice 0.2230 both sit below the 0.30 candidate.edge floor, which is why the role is feature, not edge. |r| = 0.8187 against g6_funding_basis_composite is a declared independence risk (see evidence_basis).",
+    "role": "feature",
+    "role_note": "Feature role: standalone train Sharpe 0.2230 < 0.30 edge floor. Registered as a conditioning/explanatory input. Gate 6A.8-PRE measured its filter value: gating a collecting signal by agreement with it raised risk-adjusted return on 3 of 5 and reduced max drawdown on 5 of 5, at a large exposure cost. Nothing in this registration is a standalone-edge claim."
+  },
+  "function_spec": {
+    "name": "Funding Level (contrarian)",
+    "version": "1.0.0",
+    "signal_class": "positioning/carry contrarian long/short",
+    "data_source": "Binance USDT-perp (binanceusdm BTC/USDT:USDT) daily mean funding rate x 10000 (bps), 8-hourly prints aggregated per UTC day, days with fewer than 2 prints dropped",
+    "decision_function_file": "forward_evidence/decision_function_g2_funding_level.py",
+    "decision_function_hash": "3a55712b9830924a5a785aa4c21e17a7e754c3e962e0b31b2de88c8af5ff8ea3",
+    "entry_condition_long": "funding_bps < rolling 33rd percentile over RW=252 days (min_periods=126)",
+    "entry_condition_short": "funding_bps > rolling 67th percentile over RW=252 days (min_periods=126)",
+    "flat_condition": "funding between the terciles, OR funding/quantile NaN (insufficient history)",
+    "direction": "long_short",
+    "hold_days": 7,
+    "hold_days_note": "The battery evaluated this signal at hold_days=1 (continuous daily re-evaluation). Forward collection uses hold_days=7 to reduce turnover, matching every other collecting signal. IS and forward Sharpe distributions are not directly comparable across the two conventions.",
+    "exit_rule": "scheduled exit at entry + 7 calendar days; signal re-evaluated at exit for re-entry. No intra-hold exits.",
+    "trade_counting_definition": "each 7-day evaluation window is one trade; trades are sequential and non-overlapping",
+    "parameters": {
+      "PCTILE": 33,
+      "RW": 252,
+      "MINP": 126,
+      "HOLD_DAYS": 7,
+      "MIN_HISTORY": 253
+    },
+    "sensitivity_note": "Battery sens_pass_frac = 0.75 (3 of 4 variants sign-stable), above the 0.60 feature floor. No sweep was run for this registration; the parameter set is the one the battery evaluated.",
+    "cost_assumption_bps": 15,
+    "governance_phase": "Phase F forward evidence collection",
+    "lockbox_status": "not spent by this signal"
+  },
+  "evidence_basis": {
+    "corpus": "Binance BTCUSDT spot 1m resampled to daily + Binance USDT-perp funding, 2021-01-01..2026-05-31",
+    "pinned_run": "cc916a89-ba48-4816-8bbe-73af6f3ae315",
+    "gating_basis": "lockbox-train slice 2021-01-01..2025-05-31 (lockbox 2025-06-01..2026-05-31 SEALED)",
+    "train_slice_sharpe": 0.223,
+    "train_slice_note": "Measured 2026-08-26 at Gate 6A.8-PRE on the train slice only, hold_days=1, cost 15 bps: Sharpe 0.2230, max_dd 66.08%, 209 trades, 902 active days of 1612 (56.0%).",
+    "full_sample_sharpe_note": "The pinned battery run records full-sample Sharpe 0.2307 over 2021-01-01..2026-05-31, a window that SPANS the sealed lockbox. It is recorded for transparency and is NOT the gating number; the train-slice 0.2230 is. Both fail the 0.30 edge floor, so the role classification does not depend on which is used.",
+    "oos_sharpe": 0.1109,
+    "wf_pass": "3/6",
+    "wf_pass_frac": 0.5,
+    "sens_pass_frac": 0.75,
+    "loo_sign_consistency": 1.0,
+    "breakeven_cost_bps": 30,
+    "struct_sign_ok": true,
+    "n_trades_IS": 111,
+    "evidence_score": 56.3,
+    "verdict": "Weak",
+    "n_trials": 34,
+    "dsr_prob": null,
+    "dsr_prob_note": "NOT COMPUTED. No DSR was recorded for this family by the Phase B battery, and none is fabricated here. Under R1 (CLAUDE.md section 16) a NULL governance stat is a hard failure at the Validated gate, which is the correct and intended consequence: g2 cannot reach Validated until DSR is computed via compute_dsr_for_registration.py at the FROZEN n_trials=34. This does not block candidate-state forward collection.",
+    "bh_p": null,
+    "bh_p_note": "NOT COMPUTED, same basis and same consequence as dsr_prob.",
+    "independence_maxcorr_existing": 0.8187,
+    "independence_maxcorr_collecting": 0.3774,
+    "independence_note": "Measured at Gate 6A.8-PRE on the train slice with the analyze_mtf_independence convention (position-series Pearson, _arr alignment, both-std>0 guard). Against the five signals actually collecting the max is 0.3774 (g3_momentum_tsmom), and every correlation is negative - a contrarian positioning signal running against a trend-heavy book; VIF R^2-on-others = 0.225. Against all existing registered families the max is 0.8187 (g6_funding_basis_composite), which EXCEEDS max_pairwise_r = 0.70. See notable_flags.",
+    "candidate_gate_result": "PASS Feature gate: sens_pass_frac 0.75 >= 0.60, OOS Sharpe +0.11 > 0, clone_r 0.8187 < 0.90. FAIL Edge gate (train Sharpe 0.2230 < 0.30). Registered as feature, not edge.",
+    "notable_flags": [
+      "DECLARED INDEPENDENCE RISK, NOT RESOLVED: |r| = 0.8187 against g6_funding_basis_composite exceeds max_pairwise_r = 0.70. That family is currently `discovery` and is not collecting, so the conflict is latent rather than active - but if it is ever promoted, the Validated independence gate will fire on this pair. Recorded at registration so the outcome is foreseeable, not a surprise at promotion.",
+      "This signal is NOT independent of its own funding/positioning family. It IS independent of everything currently collecting (max 0.3774).",
+      "DSR and BH-p are NULL by design, not by omission. Validated is unreachable until both are computed at n_trials=34.",
+      "Feature role only. Standalone Sharpe fails the edge floor on both the train slice and the full sample.",
+      "Funding ingest is CRITICAL in daily_ingest.py (step 3 of 4), unlike DVOL. A funding outage makes g2 'unavailable' (transient skip), never a silent flat, and must never block H5/G1/G3/IVRV."
+    ]
+  },
+  "observation_floors": {
+    "minimum_trades": 30,
+    "minimum_calendar_months_before_assessment": 12,
+    "minimum_both_long_and_short_trades": true,
+    "rationale": "Feature-role, low per-trade Sharpe. Train activity is 56.0% of days and 17.7 trades/yr at hold_days=7, so n=30 is roughly 1.7 years; 12 months minimum before assessment to span vol regimes. Both low-funding (long) and high-funding (short) trades must be observed - train split was 582 long / 320 short days."
+  },
+  "promotion_criteria": {
+    "description": "Criteria to consider g2_funding_level for Validated. All must hold simultaneously, evaluated only after the observation floors are met.",
+    "minimum_trades": 30,
+    "gates": {
+      "G1_direction": "mean forward trade return > 0 net of 15 bps",
+      "G2_governance_stats": "dsr_prob >= 0.50 AND bh_p <= 0.10, computed at the FROZEN n_trials=34 on forward returns",
+      "G3_independence": "max_pairwise_r <= 0.70 against every Validated family at the time of promotion - see the declared 0.8187 risk",
+      "G4_role": "promotion is to feature role; an edge claim would require a separate registration"
+    },
+    "notes": "n=30 is underpowered for a low per-trade Sharpe. Failure to reject H0 must be recorded as 'insufficient evidence', never as 'disproven'."
+  },
+  "collection_spec": {
+    "daily_job": {
+      "trigger": "once per day at 01:00 UTC, after forward_evidence/daily_ingest.py has refreshed the funding partition",
+      "data_inputs": [
+        "Binance USDT-perp daily mean funding bps, via runner_base.load_daily_funding()"
+      ],
+      "steps": [
+        "1. Load funding history through run_date (MIN_HISTORY rows minimum)",
+        "2. verify_fn_hash against this pre-registration",
+        "3. compute_signal(funding) -> position series; take the run_date value",
+        "4. Write signal_log, run_log, and trade rows via runner_base.run_signal()"
+      ],
+      "isolation": "A funding load failure raises DataUnavailableError and marks g2 'unavailable' for that run only. It must never block or alter h5_vol_regime, g1_market_regime_sma200, g3_momentum_tsmom, g3_atr_expansion or ivrv_vrp_spread."
+    }
+  },
+  "lockbox_status": {
+    "window": [
+      "2025-06-01",
+      "2026-05-31"
+    ],
+    "spent": false,
+    "notes": "Not spent by this signal. All gating numbers in evidence_basis are train-slice (2021-01-01..2025-05-31). The pinned battery run's full-sample Sharpe spans the lockbox and is recorded for transparency only, never used for gating. The lockbox remains the final pre-promotion OOS test."
+  },
+  "notes": [
+    "Do not modify decision_function_g2_funding_level.py after this registration.",
+    "Any parameter change requires a VERSION bump and a new pre-registration.",
+    "fn_hash in run_log must match function_spec.decision_function_hash every run.",
+    "The decision function is a faithful port of evidence/signals.py sig_funding_level(pctile=33, rw=252), proven value-identical on the real corpus (2038/2038 rows, elementwise equal, max abs difference 0.0). The battery function is NOT imported at runtime, per the g3_tsmom and ivrv precedent.",
+    "This registration does not change g2's registry state (candidate) or role (feature), and grants no execution or live-trading path."
+  ]
+}

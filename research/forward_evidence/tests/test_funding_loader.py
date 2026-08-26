@@ -281,31 +281,37 @@ def test_funding_symbol_declared():
 
 def test_existing_five_signals_unchanged():
     """
-    The five collecting signals, their exact ids and cost_bps, are pinned. Any
-    accidental edit to an existing signal block fails here rather than silently
-    changing what production collects.
+    The five originally-collecting signals, their exact ids and cost_bps, are
+    pinned. Any accidental edit to an existing signal block fails here rather
+    than silently changing what production collects. Updated at Gate 6A.8 to
+    add g2_funding_level as a sixth registered signal; the original five are
+    asserted unchanged as a subset, so this test still fails if one is removed
+    or its cost_bps altered.
     """
     sigs = _cfg()["signals"]
-    assert set(sigs) == {
+    original_five = {
         "h5_vol_regime",
         "g1_market_regime_sma200",
         "g3_momentum_tsmom",
         "ivrv_vrp_spread",
         "g3_atr_expansion",
     }
+    assert original_five <= set(sigs), "an originally-collecting signal was removed"
+    assert set(sigs) == original_five | {"g2_funding_level"}
     for sid in sigs:
         assert float(sigs[sid]["cost_bps"]) == 15.0
 
 
-def test_funding_signals_not_activated():
+def test_h6_still_not_activated():
     """
-    Gate 6A.6 wires the funding INPUT only. h6/g2 remain blocked on frozen
-    artifacts; activating either requires its own gate, which must update this
-    test deliberately rather than inherit a silent pass.
+    Gate 6A.8 activated g2 only. h6 remains blocked on SEALED artifacts: its
+    pre-registration has no top-level signal_id and stores its hash outside
+    function_spec (so verify_fn_hash rejects it), and both it and its decision
+    function are in BASELINE_46.json under DS-DEC-004. Activating h6 requires
+    its own governance gate, which must update this test deliberately rather
+    than inherit a silent pass.
     """
-    sigs = _cfg()["signals"]
-    assert "h6_funding_vol_regime" not in sigs
-    assert "g2_funding_level" not in sigs
+    assert "h6_funding_vol_regime" not in _cfg()["signals"]
 
 
 def test_collection_cadence_unchanged():

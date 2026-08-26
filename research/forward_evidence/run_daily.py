@@ -41,12 +41,13 @@ for _p in (str(_HERE), str(_RESEARCH_ROOT)):
 
 import sqlite3
 
-from forward_evidence import runner_h5, runner_g1, runner_g3, runner_ivrv
+from forward_evidence import runner_h5, runner_g1, runner_g3, runner_ivrv, runner_g2
 from forward_evidence import runner_atr_expansion as runner_atr
 from forward_evidence.init_forward_db import init_forward_db
 from forward_evidence.pre_reg_guard import FnHashViolation
 from forward_evidence.runner_base import (
-    DataUnavailableError, load_daily_closes, load_daily_dvol, load_daily_ohlcv,
+    DataUnavailableError, load_daily_closes, load_daily_dvol, load_daily_funding,
+    load_daily_ohlcv,
 )
 
 from forward_evidence import (
@@ -55,6 +56,7 @@ from forward_evidence import (
     decision_function_g3_tsmom         as _g3,
     decision_function_ivrv             as _ivrv,
     decision_function_g3_atr_expansion as _atr,
+    decision_function_g2_funding_level as _g2,
 )
 
 logging.basicConfig(
@@ -113,13 +115,16 @@ _GOVERNANCE_FAILURE_FN_HASH = "N/A-GOVERNANCE-CHECK-FAILED"
 
 def _blocked_signal_ids(sigs: dict) -> list[str]:
     """The signal_ids run_all() would have attempted for this config, mirroring
-    its own inclusion rules exactly (h5/g1/g3 always; ivrv whenever configured;
-    atr only when explicitly enabled) — so a governance-failure record never
-    claims a disabled signal was blocked when it was never going to run."""
+    its own inclusion rules exactly (h5/g1/g3 always; ivrv and g2 whenever
+    configured; atr only when explicitly enabled) — so a governance-failure
+    record never claims a disabled signal was blocked when it was never going
+    to run. Order mirrors run_all()'s branch order."""
     ids = ['h5_vol_regime', 'g1_market_regime_sma200', 'g3_momentum_tsmom']
     ids = [sid for sid in ids if sid in sigs]
     if sigs.get('ivrv_vrp_spread') is not None:
         ids.append('ivrv_vrp_spread')
+    if sigs.get('g2_funding_level') is not None:
+        ids.append('g2_funding_level')
     atr_cfg = sigs.get('g3_atr_expansion')
     if atr_cfg is not None and atr_cfg.get('enabled', False):
         ids.append('g3_atr_expansion')
@@ -221,6 +226,24 @@ def _run_dry(
         except Exception as exc:
             log.error("[dry-run] %s compute failed: %s", ivrv_id, exc)
             results[ivrv_id] = 'error'
+
+    # ── G2 Funding Level (funding-only input; closes price trades) ───────────
+    g2_id = 'g2_funding_level'
+    if g2_id in sigs:
+        try:
+            funding_dir = _RESEARCH_ROOT / cfg['funding']['parquet_dir']
+            funding     = load_daily_funding(funding_dir, run_date,
+                                             min_rows=_g2.MIN_HISTORY)
+            funding_to  = funding[funding.index <= run_date]
+            pos         = float(_g2.compute_signal(funding_to).iloc[-1])
+            log.info("[dry-run] %-35s position=%.1f (no DB write)", g2_id, pos)
+            results[g2_id] = 'dry-run'
+        except DataUnavailableError as exc:
+            results[g2_id] = 'unavailable'
+            log.warning("[dry-run] %s funding unavailable: %s", g2_id, exc)
+        except Exception as exc:
+            log.error("[dry-run] %s compute failed: %s", g2_id, exc)
+            results[g2_id] = 'error'
 
     # ── G3 ATR Expansion (OHLCV — H/L/C required) ────────────────────────────
     atr_id  = 'g3_atr_expansion'
@@ -340,6 +363,43 @@ def run_all(
             except Exception as exc:
                 results[ivrv_id] = 'error'
                 log.error("[%s] unexpected error: %s", ivrv_id, exc, exc_info=True)
+
+    # ── G2 Funding Level (funding input). Isolated branch — runs AFTER the
+    #    single-input loop and H-IVRV (both already committed), and loads funding
+    #    in its own try/except, so a funding outage degrades ONLY g2 coverage and
+    #    can never block or alter H5/G1/G3/IVRV. Skipped entirely if not in
+    #    config. Funding is passed as aux_series; closes still price the trade. ─
+    g2_id  = 'g2_funding_level'
+    g2_cfg = sigs.get(g2_id)
+    if g2_cfg is not None:
+        funding = None
+        try:
+            funding_dir = _RESEARCH_ROOT / cfg['funding']['parquet_dir']
+            funding = load_daily_funding(funding_dir, run_date,
+                                         min_rows=_g2.MIN_HISTORY)
+        except DataUnavailableError as exc:
+            results[g2_id] = 'unavailable'
+            log.error("[%s] funding unavailable: %s", g2_id, exc)
+        except Exception as exc:
+            results[g2_id] = 'error'
+            log.error("[%s] funding load failed: %s", g2_id, exc, exc_info=True)
+        if funding is not None:
+            try:
+                results[g2_id] = runner_g2.collect(
+                    run_date, closes, funding, db_path, float(g2_cfg['cost_bps'])
+                )
+            except FnHashViolation:
+                results[g2_id] = 'fn_hash_violation'
+                log.error("[%s] fn_hash_violation on %s", g2_id, run_date)
+            except DataUnavailableError as exc:
+                results[g2_id] = 'unavailable'
+                log.error("[%s] data unavailable: %s", g2_id, exc)
+            except RuntimeError as exc:
+                results[g2_id] = 'blocked'
+                log.error("[%s] blocked: %s", g2_id, exc)
+            except Exception as exc:
+                results[g2_id] = 'error'
+                log.error("[%s] unexpected error: %s", g2_id, exc, exc_info=True)
 
     # ── G3 ATR Expansion (OHLCV-based signal). Isolated branch — runs AFTER all
     #    close-only and two-input signals (both already committed). Loads its own
