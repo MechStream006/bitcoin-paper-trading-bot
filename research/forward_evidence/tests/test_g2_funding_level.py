@@ -184,6 +184,62 @@ def test_runner_refuses_insufficient_history(tmp_path):
         runner_g2.collect("2021-03-01", make_closes(n), make_funding(n), db, 15.0)
 
 
+def test_runner_refuses_short_funding_with_sufficient_closes(tmp_path):
+    """
+    Gate 6A.11 regression. The pre-fix Step 3 length check covered `closes`
+    only, so long closes + short funding reached compute_fn, whose rolling
+    windows were undefined, and the warmup 0.0 was persisted as a decision --
+    a silent flat from missing data. It must be a transient skip instead.
+
+    The older test above cannot catch this: it shortens BOTH series, so the
+    closes check trips first and the aux path is never exercised.
+    """
+    db = tmp_path / "fwd.db"
+    init_forward_db(db)
+    n = 400
+    closes = make_closes(n)
+    short_funding = make_funding(n).iloc[-40:]          # 40 rows << MIN_HISTORY
+
+    with pytest.raises(DataUnavailableError, match="Insufficient auxiliary history"):
+        runner_g2.collect(closes.index[-1], closes, short_funding, db, 15.0)
+
+    # Transient: nothing persisted, so the next run retries automatically.
+    with sqlite3.connect(db) as c:
+        for table in ("run_log", "signal_log", "trade_entries"):
+            assert c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_runner_accepts_sufficient_funding_unchanged(tmp_path):
+    """The fix must not alter behaviour when the aux series IS long enough."""
+    db = tmp_path / "fwd.db"
+    init_forward_db(db)
+    n = 400
+    closes, funding = make_closes(n), make_funding(n)
+    assert runner_g2.collect(closes.index[-1], closes, funding, db, 15.0) == "ok"
+    with sqlite3.connect(db) as c:
+        pos = c.execute("SELECT position FROM signal_log").fetchone()[0]
+    assert pos in (-1.0, 0.0, 1.0)
+
+
+def test_aux_length_boundary_is_min_history(tmp_path):
+    """Exactly MIN_HISTORY rows is sufficient; one fewer is not."""
+    n = 400
+    closes = make_closes(n)
+    funding = make_funding(n)
+    rd = closes.index[-1]
+
+    db_ok = tmp_path / "ok.db"
+    init_forward_db(db_ok)
+    assert runner_g2.collect(
+        rd, closes, funding.iloc[-df.MIN_HISTORY:], db_ok, 15.0) == "ok"
+
+    db_bad = tmp_path / "bad.db"
+    init_forward_db(db_bad)
+    with pytest.raises(DataUnavailableError, match="Insufficient auxiliary history"):
+        runner_g2.collect(
+            rd, closes, funding.iloc[-(df.MIN_HISTORY - 1):], db_bad, 15.0)
+
+
 # ===========================================================================
 # Pre-registration + hash verification
 # ===========================================================================

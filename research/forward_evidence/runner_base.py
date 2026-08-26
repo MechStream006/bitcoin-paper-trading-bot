@@ -565,6 +565,17 @@ def run_signal(
                 f"[{signal_id}] Auxiliary series unavailable for {run_date}. "
                 f"Latest: {latest}"
             )
+        # The Step 3 length check covers `closes` only. Without the same check
+        # here, a run with long closes but a short aux series reached compute_fn,
+        # whose rolling windows are then undefined, and the resulting warmup 0.0
+        # was persisted as a decision — a silent flat from missing data, which is
+        # exactly what the paragraph above forbids. Same threshold and same
+        # exception as the closes check, so a short aux is a transient skip.
+        if len(aux_to_date) < min_history:
+            raise DataUnavailableError(
+                f"[{signal_id}] Insufficient auxiliary history: need "
+                f"{min_history} rows, have {len(aux_to_date)}"
+            )
 
     # ── Step 4: Compute signal ───────────────────────────────────────────────
     try:

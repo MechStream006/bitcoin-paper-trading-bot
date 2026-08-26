@@ -285,6 +285,34 @@ def test_IVRV05_insufficient_history_propagates(db_path, ivrv_prereg):
         runner_ivrv.collect(closes.index[-1], closes, dvol, db_path, 15.0)
 
 
+def test_IVRV05b_short_dvol_with_sufficient_closes_is_a_skip(db_path, ivrv_prereg):
+    """
+    Gate 6A.11 regression on the IVRV path. IVRV shares run_signal's aux
+    handling with G2, so the same pre-fix gap applied here: the Step 3 length
+    check covered `closes` only, and long closes + a short DVOL series reached
+    compute_fn, persisting a warmup 0.0 as a decision.
+
+    IVRV05 above shortens BOTH series, so the closes check trips first and the
+    aux path is never reached — this case is what actually exercises it.
+    """
+    n = 320
+    closes = make_closes(n)
+    short_dvol = make_dvol(n).iloc[-40:]              # 40 rows << MIN_HISTORY
+
+    with pytest.raises(DataUnavailableError, match="Insufficient auxiliary history"):
+        runner_ivrv.collect(closes.index[-1], closes, short_dvol, db_path, 15.0)
+
+    assert _counts(db_path)["run_log"] == 0           # transient, nothing written
+
+
+def test_IVRV05c_sufficient_dvol_still_collects(db_path, ivrv_prereg):
+    """The fix must not change behaviour when DVOL history IS sufficient."""
+    n = 320
+    closes, dvol = make_closes(n), make_dvol(n)
+    assert runner_ivrv.collect(closes.index[-1], closes, dvol, db_path, 15.0) == "ok"
+    assert _counts(db_path)["run_log"] == 1
+
+
 def test_IVRV06_raw_value_is_current_vrp(db_path, ivrv_prereg):
     """signal_log.raw_value should equal DVOL/100 - RV30 at run_date."""
     n = 320
