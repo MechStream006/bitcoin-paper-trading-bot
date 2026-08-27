@@ -45,6 +45,57 @@ class DataUnavailableError(RuntimeError):
     """Raised when required OHLCV price data is absent from the Parquet store."""
 
 
+#: 1-minute bars in a complete UTC day. The freshness counterpart to
+#: MIN_DAILY_FUND, and enforced for the same reason: resample('D') is happy to
+#: build a "daily" row out of a partial day, so an ingest that dies mid-day
+#: yields an INTRADAY price silently labelled as the daily close (and, via
+#: agg(max/min), an understated daily high/low). That value then prices trades
+#: and feeds every signal, with nothing in the record marking it as partial.
+#:
+#: Measured, not assumed: of 2038 days in the real spot 1m corpus
+#: (2021-01-01..2026-07-31) 2031 carry exactly 1440 bars. The 7 that do not
+#: (2021-02-11, -03-06, -04-20, -04-25, -08-13, -09-29 and 2023-03-24; 1156-1361
+#: bars) are genuine Binance outages -- all of them predate the first forward
+#: run_date (2026-06-15), so this guard cannot retroactively alter any collected
+#: observation, and the perp corpus has no short day at all.
+#:
+#: Strict equality with 1440 is deliberate. A false reject stalls collection
+#: loudly (no run_log row, forward_cycle freshness alerts, operator decides); a
+#: false accept writes a wrong price into a permanent, immutable evidence
+#: record. This is the same fail-closed trade-off load_daily_dvol already makes
+#: for DVOL staleness.
+MIN_DAILY_BARS = 1440
+
+
+def _assert_final_day_complete(
+    dt: pd.Series,
+    through_date: str,
+    source: str,
+    ingest_hint: str,
+) -> None:
+    """
+    Raise DataUnavailableError unless `through_date` holds a full UTC day of bars.
+
+    Only the final bucket is checked. Earlier days are left exactly as they are:
+    dropping a historically short day would silently change the history that
+    already-registered signals were computed against, which is a research-
+    integrity change, not a data-quality fix.
+
+    Bars are counted on the [day, day+1) half-open UTC interval rather than by
+    formatting each timestamp -- the caller's frame holds millions of rows.
+    """
+    day_start = pd.Timestamp(through_date, tz='UTC')
+    day_end   = day_start + pd.Timedelta(days=1)
+    n_bars    = int(((dt >= day_start) & (dt < day_end)).sum())
+    if n_bars < MIN_DAILY_BARS:
+        raise DataUnavailableError(
+            f"Incomplete final day: {source} for {through_date} has {n_bars} "
+            f"1m bars, need {MIN_DAILY_BARS}. The day is still being ingested or "
+            f"the ingest was truncated; its close/high/low would be intraday "
+            f"values, not daily ones. {ingest_hint}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Price loading
 # ---------------------------------------------------------------------------
@@ -72,7 +123,8 @@ def load_daily_closes(
 
     Raises
     ------
-    DataUnavailableError if through_date absent or len < min_rows.
+    DataUnavailableError if through_date is absent, has fewer than
+    MIN_DAILY_BARS 1m bars (incomplete final day), or len < min_rows.
     """
     through_dt = date.fromisoformat(through_date)
     # Load min_rows + 32 calendar days of partitions (buffer for month boundaries)
@@ -110,6 +162,10 @@ def load_daily_closes(
             f"Close price for {through_date} not in OHLCV store. "
             f"Latest available: {latest}. Run ingest/binance_ohlcv.py to update."
         )
+    _assert_final_day_complete(
+        raw['dt'], through_date, 'spot close',
+        'Run ingest/binance_ohlcv.py to complete it.',
+    )
     if len(daily) < min_rows:
         raise DataUnavailableError(
             f"Insufficient OHLCV history: need {min_rows} rows, have {len(daily)}. "
@@ -339,7 +395,8 @@ def load_daily_ohlcv(
 
     Raises
     ------
-    DataUnavailableError if through_date absent or len < min_rows.
+    DataUnavailableError if through_date is absent, has fewer than
+    MIN_DAILY_BARS 1m bars (incomplete final day), or len < min_rows.
     """
     through_dt = date.fromisoformat(through_date)
     start_dt   = through_dt - timedelta(days=min_rows + 32)
@@ -379,6 +436,10 @@ def load_daily_ohlcv(
             f"OHLCV for {through_date} not in store. "
             f"Latest available: {latest}. Run ingest/binance_ohlcv.py to update."
         )
+    _assert_final_day_complete(
+        raw['dt'], through_date, 'OHLCV',
+        'Run ingest/binance_ohlcv.py to complete it.',
+    )
     if len(daily) < min_rows:
         raise DataUnavailableError(
             f"Insufficient OHLCV history: need {min_rows} rows, have {len(daily)}. "
@@ -499,7 +560,8 @@ def run_signal(
     Raises
     ------
     FnHashViolation      — decision function tampered; run_log row written.
-    DataUnavailableError — closes missing run_date or insufficient history.
+    DataUnavailableError — closes missing run_date, NaN at run_date, or
+                           insufficient history.
                            NOT written to run_log (transient; retry is automatic).
     RuntimeError         — idempotency block (prior error/violation on record).
     Exception            — unexpected; run_log row written as 'error'.
@@ -544,6 +606,20 @@ def run_signal(
         latest = closes_to_date.index[-1] if len(closes_to_date) > 0 else 'none'
         raise DataUnavailableError(
             f"[{signal_id}] Close for {run_date} not in series. Latest: {latest}"
+        )
+    # A present-but-NaN close must fail here, at the runner boundary. Decision
+    # functions map NaN to 0.0 by convention (e.g.
+    # decision_function_g2_funding_level: pos[f.isna() | ...] = 0.0), so without
+    # this check a missing price is persisted as a flat DECISION rather than
+    # skipped as missing DATA -- the same defect the aux branch below already
+    # guards against, and that run_ohlcv_signal guards for high/low/close. Until
+    # now the primary path was protected only incidentally, by load_daily_closes
+    # calling .dropna(); that is a property of one loader, not an invariant of
+    # the runner, and any caller passing a calendar-reindexed series bypassed it.
+    if pd.isna(closes_to_date.loc[run_date]):
+        raise DataUnavailableError(
+            f"[{signal_id}] Close for {run_date} is NaN. Missing price data must "
+            "not be recorded as a flat decision."
         )
     if len(closes_to_date) < min_history:
         raise DataUnavailableError(
