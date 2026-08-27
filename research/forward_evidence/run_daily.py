@@ -1,11 +1,13 @@
 """
 run_daily.py
 ============
-Daily forward evidence collection — runs H5, G1, G3, H-IVRV, then G3 ATR Expansion.
+Daily forward evidence collection — runs H5, G1, G3, G1-Trend-Regime, H-IVRV,
+then G3 ATR Expansion.
 
-H5/G1/G3 are single-input (spot closes). H-IVRV is two-input (spot closes +
-DVOL) and runs on its own isolated branch after the others have committed. G3 ATR
-Expansion is OHLCV-based (high/low/close) and runs on a third isolated branch.
+H5/G1/G3/G1-Trend-Regime are single-input (spot closes). H-IVRV is two-input
+(spot closes + DVOL) and runs on its own isolated branch after the others have
+committed. G3 ATR Expansion is OHLCV-based (high/low/close) and runs on a third
+isolated branch.
 
 Usage:
     conda run -n btc_bot python forward_evidence/run_daily.py
@@ -42,6 +44,7 @@ for _p in (str(_HERE), str(_RESEARCH_ROOT)):
 import sqlite3
 
 from forward_evidence import runner_h5, runner_g1, runner_g3, runner_ivrv, runner_g2
+from forward_evidence import runner_g1_trend_regime as runner_g1tr
 from forward_evidence import runner_atr_expansion as runner_atr
 from forward_evidence.init_forward_db import init_forward_db
 from forward_evidence.pre_reg_guard import FnHashViolation
@@ -61,6 +64,7 @@ from forward_evidence import (
     decision_function_ivrv             as _ivrv,
     decision_function_g3_atr_expansion as _atr,
     decision_function_g2_funding_level as _g2,
+    decision_function_g1_trend_regime  as _g1tr,
 )
 
 logging.basicConfig(
@@ -117,14 +121,29 @@ def _check_governance(research_root: pathlib.Path) -> tuple[bool, str]:
 _GOVERNANCE_FAILURE_FN_HASH = "N/A-GOVERNANCE-CHECK-FAILED"
 
 
+#: The close-only, single-input signals, in run order. Single source of truth
+#: for BOTH run_all()'s runner table and _blocked_signal_ids()'s audit roster.
+_CLOSE_ONLY_RUNNERS: tuple[tuple[str, object], ...] = (
+    ('h5_vol_regime',            runner_h5),
+    ('g1_market_regime_sma200',  runner_g1),
+    ('g3_momentum_tsmom',        runner_g3),
+    ('g1_trend_regime_ma_cross', runner_g1tr),
+)
+_CLOSE_ONLY_SIGNAL_IDS: tuple[str, ...] = tuple(s for s, _ in _CLOSE_ONLY_RUNNERS)
+
+
 def _blocked_signal_ids(sigs: dict) -> list[str]:
     """The signal_ids run_all() would have attempted for this config, mirroring
-    its own inclusion rules exactly (h5/g1/g3 always; ivrv and g2 whenever
-    configured; atr only when explicitly enabled) — so a governance-failure
-    record never claims a disabled signal was blocked when it was never going
-    to run. Order mirrors run_all()'s branch order."""
-    ids = ['h5_vol_regime', 'g1_market_regime_sma200', 'g3_momentum_tsmom']
-    ids = [sid for sid in ids if sid in sigs]
+    its own inclusion rules exactly (every close-only signal that is configured;
+    ivrv and g2 whenever configured; atr only when explicitly enabled) — so a
+    governance-failure record never claims a disabled signal was blocked when it
+    was never going to run. Order mirrors run_all()'s branch order.
+
+    The close-only roster is read from _CLOSE_ONLY_SIGNAL_IDS rather than
+    re-listed here: duplicating it is what let g1_trend_regime_ma_cross be wired
+    into run_all() while silently missing from the governance-failure audit
+    rows, so every other signal got an error row and that one got none."""
+    ids = [sid for sid in _CLOSE_ONLY_SIGNAL_IDS if sid in sigs]
     if sigs.get('ivrv_vrp_spread') is not None:
         ids.append('ivrv_vrp_spread')
     if sigs.get('g2_funding_level') is not None:
@@ -279,6 +298,7 @@ def _run_dry(
         ('h5_vol_regime',           _h5),
         ('g1_market_regime_sma200', _g1),
         ('g3_momentum_tsmom',       _g3),
+        ('g1_trend_regime_ma_cross', _g1tr),
     ]:
         if sig_id not in sigs:
             continue
@@ -377,7 +397,7 @@ def run_all(
     # Load closes once; use max MIN_HISTORY across all signals
     max_history = max(
         _h5.MIN_HISTORY, _g1.MIN_HISTORY, _g3.MIN_HISTORY,
-        _ivrv.MIN_HISTORY, _atr.MIN_HISTORY,
+        _ivrv.MIN_HISTORY, _atr.MIN_HISTORY, _g1tr.MIN_HISTORY,
     )
     try:
         closes = load_daily_closes(ohlcv_dir, run_date, min_rows=max_history)
@@ -388,11 +408,22 @@ def run_all(
     if dry_run:
         return _run_dry(run_date, closes, ohlcv_dir, sigs, cfg)
 
-    runners = {
-        'h5_vol_regime':           (runner_h5,  sigs['h5_vol_regime']),
-        'g1_market_regime_sma200': (runner_g1,  sigs['g1_market_regime_sma200']),
-        'g3_momentum_tsmom':       (runner_g3,  sigs['g3_momentum_tsmom']),
-    }
+    # Close-only single-input signals. Built from what the config actually
+    # declares: indexing sigs[...] directly raised KeyError for a wired-but-
+    # unconfigured signal, and that raise happens BEFORE the per-signal loop, so
+    # it took down every signal rather than one -- the opposite of the DQ3
+    # isolation contract this module documents. Config/code skew is a live
+    # possibility whenever a new signal is wired before the host config is
+    # updated, so an absent entry is skipped loudly instead. Matches the
+    # `sigs.get(...)` pattern the isolated ivrv/g2/atr branches already use.
+    runners = {}
+    for _sid, _mod in _CLOSE_ONLY_RUNNERS:
+        _cfg = sigs.get(_sid)
+        if _cfg is None:
+            log.warning("[%s] wired but absent from collection_config.yaml "
+                        "- skipped for %s", _sid, run_date)
+            continue
+        runners[_sid] = (_mod, _cfg)
 
     results: dict[str, str] = {}
     ident = _identity_cache()

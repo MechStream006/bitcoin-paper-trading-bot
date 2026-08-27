@@ -297,7 +297,8 @@ def test_existing_five_signals_unchanged():
         "g3_atr_expansion",
     }
     assert original_five <= set(sigs), "an originally-collecting signal was removed"
-    assert set(sigs) == original_five | {"g2_funding_level"}
+    assert set(sigs) == original_five | {"g2_funding_level",
+                                         "g1_trend_regime_ma_cross"}
     for sid in sigs:
         assert float(sigs[sid]["cost_bps"]) == 15.0
 

@@ -70,6 +70,22 @@ signals:
     decision_function_file: forward_evidence/decision_function_g3_atr_expansion.py
     decision_function_module: forward_evidence.decision_function_g3_atr_expansion
 
+  # G1 Trend Regime (MA cross) - 20/100 SMA crossover on daily spot closes.
+  # FEATURE role. Admitted at Gate 6A.17, wired at Gate 6A.18. Close-only and
+  # single-input, so it runs in the shared close-only loop in run_daily.py; no
+  # isolated branch is needed.
+  # Declared independence at admission: |r| = 0.6030 vs g1_market_regime_sma200
+  # on train positions (VIF 1.882). Clears max_clone_r 0.90 and the 0.70
+  # collecting-family bar, but becomes the HIGHEST pair in the collecting set
+  # (previous max 0.4432). Forward-return independence is NOT established by
+  # that number - max_pairwise_r is enforced on forward returns at Validated.
+  # See docs/governance/g1_trend_regime_admission_decision.md.
+  g1_trend_regime_ma_cross:
+    cost_bps: 15.0
+    pre_reg_file: forward_evidence/pre_registration_g1_trend_regime.json
+    decision_function_file: forward_evidence/decision_function_g1_trend_regime.py
+    decision_function_module: forward_evidence.decision_function_g1_trend_regime
+
 ohlcv:
   # Relative to the research/ root directory.
   # Parquet layout: {parquet_dir}/year=YYYY/month=MM/data.parquet

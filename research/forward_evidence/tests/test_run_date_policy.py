@@ -415,12 +415,12 @@ class TestMainChokePoint:
 
     def test_M18_refusal_covers_every_configured_signal(self, monkeypatch, db_path, no_collect):
         """
-        The choke point precedes per-signal dispatch, so a refusal protects all
-        six signals at once. Asserted against the real config so a newly
-        registered signal is covered automatically.
+        The choke point precedes per-signal dispatch, so a refusal protects
+        every configured signal at once. Asserted against the real config so
+        a newly registered signal is covered automatically.
         """
         cfg = yaml.safe_load(_run_daily._CONFIG_PATH.read_text(encoding="utf-8"))
-        assert len(cfg["signals"]) == 6
+        assert len(cfg["signals"]) == 7
         monkeypatch.setattr(sys, "argv", _argv(db_path, "2025-12-01", authorized=True))
         _run_daily.main()
         assert no_collect == []

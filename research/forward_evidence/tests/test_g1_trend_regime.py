@@ -551,18 +551,127 @@ class TestProtected:
         assert draft["function_spec"]["platform_new_choices"] == []
         assert draft["governance"]["lockbox"]["spent"] is False
 
-    def test_P04_signal_is_not_wired_into_collection(self):
-        cfg = (_RESEARCH / "forward_evidence" / "collection_config.yaml").read_text(
-            encoding="utf-8")
-        assert "g1_trend_regime_ma_cross" not in cfg
-        assert "decision_function_g1_trend_regime" not in cfg
-        rd = (_RESEARCH / "forward_evidence" / "run_daily.py").read_text(
-            encoding="utf-8")
-        assert "g1_trend_regime" not in rd
+    def test_P04_signal_is_wired_into_collection(self):
+        """Inverted at Gate 6A.18. Through 6A.16 this asserted the signal was
+        NOT wired, which was correct for that stage; 6A.18 is the gate that
+        wires it, so the assertion becomes positive rather than being deleted.
+        """
+        import yaml
+        cfg = yaml.safe_load(
+            (_RESEARCH / "forward_evidence" / "collection_config.yaml")
+            .read_text(encoding="utf-8"))
+        entry = cfg["signals"]["g1_trend_regime_ma_cross"]
+        assert entry["cost_bps"] == 15.0
+        assert entry["pre_reg_file"] == (
+            "forward_evidence/pre_registration_g1_trend_regime.json")
+        assert entry["decision_function_file"] == (
+            "forward_evidence/decision_function_g1_trend_regime.py")
+        assert entry["decision_function_module"] == (
+            "forward_evidence.decision_function_g1_trend_regime")
 
-    def test_P05_no_runner_module_was_added(self):
-        assert not (_RESEARCH / "forward_evidence"
-                    / "runner_g1_trend_regime.py").exists()
+        from forward_evidence import run_daily
+        assert "g1_trend_regime_ma_cross" in run_daily._CLOSE_ONLY_SIGNAL_IDS
+        assert dict(run_daily._CLOSE_ONLY_RUNNERS)["g1_trend_regime_ma_cross"] \
+            is run_daily.runner_g1tr
+
+    def test_P04b_governance_failure_audit_covers_the_new_signal(self):
+        """Regression for the defect this gate's own tests caught: the signal
+        was wired into run_all() but missing from _blocked_signal_ids(), so a
+        governance-check failure would have written an error row for every
+        signal EXCEPT this one -- a silent hole in the audit trail."""
+        import yaml
+        from forward_evidence import run_daily
+        cfg = yaml.safe_load(
+            (_RESEARCH / "forward_evidence" / "collection_config.yaml")
+            .read_text(encoding="utf-8"))
+        assert "g1_trend_regime_ma_cross" in run_daily._blocked_signal_ids(
+            cfg["signals"])
+
+    def test_P04c_absent_config_entry_skips_only_that_signal(self):
+        """A wired-but-unconfigured signal must not take down the whole run.
+        Indexing sigs[...] directly raised KeyError BEFORE the per-signal loop,
+        which is the opposite of run_daily's documented DQ3 isolation."""
+        from forward_evidence import run_daily
+        ids = run_daily._blocked_signal_ids(
+            {"h5_vol_regime": {}, "g3_momentum_tsmom": {}})
+        assert ids == ["h5_vol_regime", "g3_momentum_tsmom"]
+
+    def test_P05_runner_module_is_correct(self):
+        """Inverted at Gate 6A.18, for the same reason as P04. The runner must
+        point at the pinned decision function and pass the frozen constants
+        through unchanged."""
+        from forward_evidence import runner_g1_trend_regime as R
+        from forward_evidence import decision_function_g1_trend_regime as D
+        assert R.SIGNAL_ID == "g1_trend_regime_ma_cross"
+        assert R._FN_FILE == _FN_PATH
+        assert R._PRE_REG == (_RESEARCH / "forward_evidence"
+                              / "pre_registration_g1_trend_regime.json")
+        assert R._df is D
+        src = inspect.getsource(R.collect)
+        assert "hold_days=_df.HOLD_DAYS" in src
+        assert "min_history=_df.MIN_HISTORY" in src
+        assert "compute_fn=_df.compute_signal" in src
+
+    def test_P05b_runner_introduces_no_engine_or_duckdb_dependency(self):
+        """The forward path must stay free of the offline engine and DuckDB."""
+        tree = ast.parse((_RESEARCH / "forward_evidence"
+                          / "runner_g1_trend_regime.py").read_text(
+                              encoding="utf-8"))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported |= {a.name for a in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                imported.add(node.module or "")
+        assert not any(m.startswith("duckdb") or m == "engine"
+                       or m.endswith(".engine") or "signals" in m
+                       for m in imported), imported
+
+    def test_P05c_active_pre_registration_pins_the_frozen_hash(self):
+        """verify_fn_hash reads signal_id and function_spec.decision_function_hash
+        from the ACTIVE pre-registration, so those two fields are what actually
+        gate every run."""
+        import json
+        from forward_evidence.pre_reg_guard import verify_fn_hash
+        pre = (_RESEARCH / "forward_evidence"
+               / "pre_registration_g1_trend_regime.json")
+        d = json.loads(pre.read_text(encoding="utf-8"))
+        assert d["signal_id"] == "g1_trend_regime_ma_cross"
+        assert d["version"] == "1.0.0"
+        assert d["function_spec"]["decision_function_hash"] == _sha256_lf(_FN_PATH)
+        assert verify_fn_hash(pre, _FN_PATH,
+                              "g1_trend_regime_ma_cross") == _sha256_lf(_FN_PATH)
+
+    def test_P05d_observation_floors_are_frozen(self):
+        """U-1 (6A.17) and U-3 (6A.18). Fixed before any forward observation
+        exists; after that they cannot be set honestly."""
+        import json
+        d = json.loads((_RESEARCH / "forward_evidence"
+                        / "pre_registration_g1_trend_regime.json")
+                       .read_text(encoding="utf-8"))
+        f = d["observation_floors"]
+        assert f["minimum_trades"] == 30
+        assert f["minimum_calendar_months_before_assessment"] == 12
+        assert f["minimum_both_long_and_short_trades"] is True
+
+    def test_P05e_frozen_draft_is_untouched_by_wiring(self):
+        """The 6A.15 draft is the freeze record and must survive wiring
+        byte-identical, including its NOT_ADMITTED artifact status."""
+        import json
+        draft = json.loads(
+            (_RESEARCH / "forward_evidence" / "drafts"
+             / "g1_trend_regime_ma_cross_prereg_draft.json").read_text(
+                 encoding="utf-8"))
+        active = json.loads(
+            (_RESEARCH / "forward_evidence"
+             / "pre_registration_g1_trend_regime.json").read_text(
+                 encoding="utf-8"))
+        assert draft["status"] == "SPECIFICATION_FROZEN_NOT_ADMITTED"
+        for k in ("function_spec", "hypothesis", "governance",
+                  "integrity_rules", "provenance_contract",
+                  "return_and_cost_convention", "independence",
+                  "implementation", "admission"):
+            assert active[k] == draft[k], k
 
     def test_P06_registry_entry_state_is_untouched(self):
         import yaml
@@ -586,8 +695,11 @@ class TestProtected:
                 "aa2cb34fc9793b81466f253065b5a0f7791cd096b58d95e9dd991fdb1ce4ffdb",
             _RESEARCH / "forward_evidence" / "runner_base.py":
                 "a96fe714c7a92576fbe062ce9591359313748384ec69799f12b89a68473c3094",
+            # Updated at Gate 6A.18: wiring necessarily modifies run_daily.
+            # runner_base, signals.py, engine.py and run_date_policy are still
+            # asserted at their 6A.15 values -- wiring touched none of them.
             _RESEARCH / "forward_evidence" / "run_daily.py":
-                "e1eeb42bf2f79e227efedda3e081be93c2ed5f3cf66d07cab910a309cd64a960",
+                "578b1acf4fd81f35d6dd8ff5609097b9cb213ecb748cda8c0696d9d131c57414",
             _RESEARCH / "forward_evidence" / "run_date_policy.py":
                 "d89599e08fb9b01de09ee27bd6d1ee60cd6c7f941d09c24e786a123167c15dc6",
         }
@@ -597,10 +709,22 @@ class TestProtected:
     def test_P08_gate_touched_no_file_outside_its_allowlist(self):
         """Every tracked change in the working tree must belong to 6A.16."""
         allow = {
+            # 6A.16
             "research/forward_evidence/decision_function_g1_trend_regime.py",
             "research/forward_evidence/tests/test_g1_trend_regime.py",
             "research/forward_evidence/drafts/g1_trend_regime_ma_cross_prereg_draft.json",
             "docs/research/g1_trend_regime_ma_cross_6a15_specification.md",
+            # 6A.17
+            "research/evidence_library/registry.yaml",
+            "docs/governance/g1_trend_regime_admission_decision.md",
+            # 6A.18
+            "research/forward_evidence/pre_registration_g1_trend_regime.json",
+            "research/forward_evidence/runner_g1_trend_regime.py",
+            "research/forward_evidence/collection_config.yaml",
+            "research/forward_evidence/run_daily.py",
+            "research/forward_evidence/tests/test_funding_loader.py",
+            "research/forward_evidence/tests/test_run_date_policy.py",
+            "docs/governance/g1_trend_regime_wiring_record.md",
         }
         out = subprocess.run(["git", "status", "--porcelain"], cwd=_REPO,
                              capture_output=True, text=True).stdout
