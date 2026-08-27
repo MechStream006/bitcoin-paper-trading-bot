@@ -24,6 +24,7 @@ Design decisions (approved 2026-06-15):
 from __future__ import annotations
 
 import calendar
+import hashlib
 import logging
 import pathlib
 import sqlite3
@@ -43,6 +44,149 @@ _RESEARCH_ROOT = _HERE.parent
 
 class DataUnavailableError(RuntimeError):
     """Raised when required OHLCV price data is absent from the Parquet store."""
+
+
+#: Source files whose content defines WHAT a collection run does, beyond the
+#: decision function that run_log.fn_hash already pins. runner_base decides
+#: whether an input is admissible (6B.1 bar-count and NaN guards) and how a
+#: trade is opened/closed; run_daily decides which run_dates may be collected
+#: at all and dispatches the signals; run_date_policy is that decision. A change
+#: to any of them changes the meaning of an observation without touching
+#: fn_hash, which is exactly defect B-04a.
+_FRAMEWORK_FILES = ("runner_base.py", "run_daily.py", "run_date_policy.py")
+
+
+def framework_hash() -> str:
+    """
+    Content identity of the collection framework (defect B-04a).
+
+    SHA-256 over each file's own _sha256_lf digest, in a fixed order, rather
+    than over concatenated bytes: the per-file digests already carry the
+    project's one hashing convention (CRLF-normalised, pre_reg_guard._sha256_lf
+    == receipts.sha256_lf), and hashing digests keeps the result stable against
+    file ordering or encoding accidents.
+
+    A changed framework therefore cannot present the previous identity, and a
+    missing framework file raises rather than silently yielding a hash over
+    whatever remains.
+    """
+    parts = []
+    for name in _FRAMEWORK_FILES:
+        path = _HERE / name
+        if not path.exists():
+            raise DataUnavailableError(
+                f"framework file missing, cannot establish collection identity: {path}"
+            )
+        parts.append(f"{name}:{_sha256_lf(path)}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+_GIT_SHA_CACHE: list[str | None] = []
+
+
+def deployed_git_sha() -> str | None:
+    """
+    Deployed commit, best-effort and cached for the process.
+
+    Advisory only, and nullable by design: it is a convenience for a human
+    reading provenance, NOT the identity guarantee. framework_hash() is the
+    guarantee -- it is derived from the file contents, so it still differs when
+    the working tree is dirty or git is unavailable, which is precisely when a
+    commit SHA would lie.
+    """
+    if _GIT_SHA_CACHE:
+        return _GIT_SHA_CACHE[0]
+    sha: str | None = None
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_RESEARCH_ROOT,
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            sha = out.stdout.strip()
+    except Exception:                                           # noqa: BLE001
+        sha = None
+    _GIT_SHA_CACHE.append(sha)
+    return sha
+
+
+def _record_run_provenance(
+    conn: sqlite3.Connection,
+    run_id: int,
+    inputs: list[dict] | None,
+) -> None:
+    """
+    Write framework and input identity for one run (defects B-04a and B-04).
+
+    Called on the CALLER'S connection inside its open transaction, so provenance
+    commits atomically with the observation and a rollback discards both. It
+    does not swallow exceptions: unlike collection_provenance (an audit aid
+    written before collection starts), this describes the observation itself,
+    so a provenance failure must fail the collection rather than leave an
+    observation whose inputs are unknown.
+    """
+    conn.execute(
+        "INSERT INTO run_provenance (run_id, framework_hash, git_sha) VALUES (?,?,?)",
+        (run_id, framework_hash(), deployed_git_sha()),
+    )
+    for item in (inputs or []):
+        conn.execute(
+            "INSERT INTO run_inputs "
+            "(run_id, role, dataset, partition, parquet_sha256, rows) "
+            "VALUES (?,?,?,?,?,?)",
+            (run_id, item["role"], item["dataset"], item["partition"],
+             item["parquet_sha256"], item["rows"]),
+        )
+
+
+def resolve_input_identity(
+    parquet_dir: pathlib.Path,
+    through_date: str,
+    min_rows: int,
+    role: str,
+) -> list[dict]:
+    """
+    Pin the exact partition bytes a loader will read (defect B-04).
+
+    Mirrors the loaders' own _select_partitions call with the same arguments, so
+    what is recorded is what is read. Returns one entry per partition with its
+    raw SHA-256 and row count.
+
+    The digest is a RAW chunked SHA-256 (storage/manifest.py _sha256, the same
+    function that produced the corpus manifests' parquet_sha256), NOT
+    _sha256_lf: that one normalises CRLF->LF, which is right for source text and
+    would corrupt the digest of a binary Parquet file.
+
+    Raises DataUnavailableError if a partition cannot be hashed -- an
+    unidentifiable input must fail closed, never be recorded as identified.
+    """
+    import pyarrow.parquet as pq                               # already a hard dep of pandas IO
+    from storage.manifest import _sha256                       # stdlib-only module
+
+    through_dt = date.fromisoformat(through_date)
+    start_dt   = through_dt - timedelta(days=min_rows + 32)
+    dataset    = f"{parquet_dir.parent.name}/{parquet_dir.name}"
+
+    out: list[dict] = []
+    for p in _select_partitions(parquet_dir, start_dt, through_dt):
+        try:
+            digest = _sha256(p)
+            # Footer metadata only -- schema-agnostic (the timestamp column is
+            # named differently per dataset) and does not materialise the file.
+            n_rows = int(pq.ParquetFile(p).metadata.num_rows)
+        except Exception as exc:                                # noqa: BLE001
+            raise DataUnavailableError(
+                f"cannot establish input identity for {p}: {type(exc).__name__}: {exc}"
+            ) from exc
+        out.append({
+            "role": role,
+            "dataset": dataset,
+            "partition": f"{p.parent.parent.name}/{p.parent.name}",
+            "parquet_sha256": digest,
+            "rows": n_rows,
+        })
+    return out
 
 
 #: 1-minute bars in a complete UTC day. The freshness counterpart to
@@ -525,6 +669,7 @@ def run_signal(
     min_history:  int,
     cost_bps:     float,
     aux_series:   pd.Series | None = None,
+    inputs:       list[dict] | None = None,
 ) -> Literal['ok', 'skipped']:
     """
     Execute one day's forward evidence collection for a registered signal.
@@ -721,6 +866,8 @@ def run_signal(
             (signal_id, run_date, position, raw_value, run_id),
         )
 
+        _record_run_provenance(conn, run_id, inputs)
+
         conn.execute("COMMIT")
         log.info("[%s] ok  run_date=%s  position=%.1f", signal_id, run_date, position)
         return 'ok'
@@ -754,6 +901,7 @@ def run_ohlcv_signal(
     hold_days:    int,
     min_history:  int,
     cost_bps:     float,
+    inputs:       list[dict] | None = None,
 ) -> Literal['ok', 'skipped']:
     """
     Execute one day's forward evidence collection for an OHLCV-based signal.
@@ -912,6 +1060,8 @@ def run_ohlcv_signal(
             "VALUES (?,?,?,?,?)",
             (signal_id, run_date, position, raw_value, run_id),
         )
+
+        _record_run_provenance(conn, run_id, inputs)
 
         conn.execute("COMMIT")
         log.info("[%s] ok  run_date=%s  position=%.1f", signal_id, run_date, position)

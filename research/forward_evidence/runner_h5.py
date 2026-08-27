@@ -28,6 +28,7 @@ def collect(
     closes: pd.Series,
     db_path: pathlib.Path,
     cost_bps: float,
+    inputs: list[dict] | None = None,
 ) -> str:
     return run_signal(
         signal_id=SIGNAL_ID,
@@ -41,4 +42,5 @@ def collect(
         hold_days=_df.HOLD_DAYS,
         min_history=_df.MIN_HISTORY,
         cost_bps=cost_bps,
+        inputs=inputs,
     )

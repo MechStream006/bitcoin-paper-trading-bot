@@ -49,6 +49,7 @@ from forward_evidence.runner_base import (
     DataUnavailableError, load_daily_closes, load_daily_dvol, load_daily_funding,
     load_daily_ohlcv,
 )
+from forward_evidence.runner_base import resolve_input_identity
 from forward_evidence.run_date_policy import (
     MODE_BACKFILL, MODE_SCHEDULED, PolicyConfigError, evaluate_run_date, load_policy,
 )
@@ -132,6 +133,48 @@ def _blocked_signal_ids(sigs: dict) -> list[str]:
     if atr_cfg is not None and atr_cfg.get('enabled', False):
         ids.append('g3_atr_expansion')
     return ids
+
+
+def _validated_cost_bps(sig_cfg: dict, sig_id: str) -> float:
+    """
+    Read cost_bps and refuse a negative value (Gate 6B.6 rider, from 6B.5).
+
+    A negative cost was accepted silently at every layer and manufactured
+    profit: cost_bps = -9999 yields net_return = +0.9999. Zero stays valid --
+    governance permits a zero-cost measurement. This is a BOUNDS check only; the
+    registered per-trade cost CONVENTION (label spec 57ce016e51a0) is unchanged.
+
+    Missing/non-numeric already failed closed via KeyError/ValueError at
+    float(); this closes the remaining hole. Raises ValueError so run_all's
+    existing per-signal handler records it, preserving signal isolation.
+    """
+    cost = float(sig_cfg['cost_bps'])
+    if cost < 0:
+        raise ValueError(
+            f"[{sig_id}] cost_bps must be >= 0, got {cost}. A negative cost "
+            "inverts the sign of every net return."
+        )
+    return cost
+
+
+def _identity_cache() -> dict:
+    """Per-run memo so a dataset read by several signals is hashed once."""
+    return {}
+
+
+def _inputs_for(cache: dict, parquet_dir: pathlib.Path, run_date: str,
+                min_rows: int, role: str) -> list[dict]:
+    """
+    Resolve (and cache) the exact partition identity behind one input.
+
+    Keyed by (dir, min_rows, role): min_rows determines how far back
+    _select_partitions reaches, so two signals with different MIN_HISTORY
+    legitimately read different partition sets and must not share a cache entry.
+    """
+    key = (str(parquet_dir), min_rows, role)
+    if key not in cache:
+        cache[key] = resolve_input_identity(parquet_dir, run_date, min_rows, role)
+    return cache[key]
 
 
 def _record_collection_provenance(
@@ -352,10 +395,14 @@ def run_all(
     }
 
     results: dict[str, str] = {}
+    ident = _identity_cache()
     for sig_id, (runner_mod, sig_cfg) in runners.items():
-        cost_bps = float(sig_cfg['cost_bps'])
         try:
-            results[sig_id] = runner_mod.collect(run_date, closes, db_path, cost_bps)
+            cost_bps = _validated_cost_bps(sig_cfg, sig_id)
+            price_in = _inputs_for(ident, ohlcv_dir, run_date, max_history, 'price')
+            results[sig_id] = runner_mod.collect(
+                run_date, closes, db_path, cost_bps, inputs=price_in
+            )
         except FnHashViolation:
             results[sig_id] = 'fn_hash_violation'
             log.error("[%s] fn_hash_violation on %s", sig_id, run_date)
@@ -386,7 +433,11 @@ def run_all(
         if dvol is not None:
             try:
                 results[ivrv_id] = runner_ivrv.collect(
-                    run_date, closes, dvol, db_path, float(ivrv_cfg['cost_bps'])
+                    run_date, closes, dvol, db_path,
+                    _validated_cost_bps(ivrv_cfg, ivrv_id),
+                    inputs=(_inputs_for(ident, ohlcv_dir, run_date, max_history, 'price')
+                            + _inputs_for(ident, dvol_dir, run_date,
+                                          _ivrv.MIN_HISTORY, 'aux')),
                 )
             except FnHashViolation:
                 results[ivrv_id] = 'fn_hash_violation'
@@ -423,7 +474,11 @@ def run_all(
         if funding is not None:
             try:
                 results[g2_id] = runner_g2.collect(
-                    run_date, closes, funding, db_path, float(g2_cfg['cost_bps'])
+                    run_date, closes, funding, db_path,
+                    _validated_cost_bps(g2_cfg, g2_id),
+                    inputs=(_inputs_for(ident, ohlcv_dir, run_date, max_history, 'price')
+                            + _inputs_for(ident, funding_dir, run_date,
+                                          _g2.MIN_HISTORY, 'aux')),
                 )
             except FnHashViolation:
                 results[g2_id] = 'fn_hash_violation'
@@ -455,7 +510,10 @@ def run_all(
         if ohlcv is not None:
             try:
                 results[atr_id] = runner_atr.collect(
-                    run_date, ohlcv, db_path, float(atr_cfg['cost_bps'])
+                    run_date, ohlcv, db_path,
+                    _validated_cost_bps(atr_cfg, atr_id),
+                    inputs=_inputs_for(ident, ohlcv_dir, run_date,
+                                       _atr.MIN_HISTORY, 'ohlcv'),
                 )
             except FnHashViolation:
                 results[atr_id] = 'fn_hash_violation'

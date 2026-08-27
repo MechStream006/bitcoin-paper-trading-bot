@@ -48,6 +48,7 @@ def collect(
     dvol: pd.Series,
     db_path: pathlib.Path,
     cost_bps: float,
+    inputs: list[dict] | None = None,
 ) -> str:
     """Run one day's forward collection for ivrv_vrp_spread. Returns 'ok'/'skipped'."""
     return run_signal(
@@ -62,5 +63,6 @@ def collect(
         hold_days=_df.HOLD_DAYS,
         min_history=_df.MIN_HISTORY,
         cost_bps=cost_bps,
+        inputs=inputs,
         aux_series=dvol,
     )

@@ -93,7 +93,21 @@ CREATE TABLE IF NOT EXISTS trade_exits (
     entry_id            INTEGER NOT NULL REFERENCES trade_entries(id),
     exit_date           TEXT    NOT NULL,          -- 'YYYY-MM-DD' UTC
     exit_close_price    REAL    NOT NULL,          -- always available (job runs after close)
-    cost_bps            REAL    NOT NULL,          -- NO DEFAULT; explicit insert required
+    cost_bps            REAL    NOT NULL
+                            CHECK (cost_bps >= 0), -- NO DEFAULT; explicit insert required.
+                                                   -- Gate 6B.6 rider (from 6B.5): a negative
+                                                   -- cost was silently accepted and produced a
+                                                   -- manufactured profit (cost_bps = -9999 gave
+                                                   -- net_return = +0.9999). Zero stays valid.
+                                                   -- Bounds only -- the registered per-trade
+                                                   -- cost CONVENTION (label spec 57ce016e51a0)
+                                                   -- is unchanged.
+                                                   -- NOTE: CREATE TABLE IF NOT EXISTS means this
+                                                   -- CHECK reaches NEW databases only; SQLite
+                                                   -- cannot ALTER a CHECK onto the existing
+                                                   -- production table without a full rebuild, so
+                                                   -- run_daily also rejects a negative cost at
+                                                   -- config-read time.
     UNIQUE (entry_id)                              -- one exit per entry
 );
 
@@ -152,4 +166,54 @@ CREATE TABLE IF NOT EXISTS collection_provenance (
     invoked_at  TEXT    NOT NULL
                     DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'NOW')),
     UNIQUE (run_date, mode)
+);
+
+
+-- ---------------------------------------------------------------------------
+-- run_provenance / run_inputs (Gate 6B.6, defects B-04 and B-04a)
+--
+-- B-04a: run_log.fn_hash identifies only the decision-function file. The
+-- COLLECTION FRAMEWORK is invisible to it -- runner_base.py changed at 6B.1
+-- (bar-count + NaN guards) and run_daily.py at 6B.3 (run_date policy), both
+-- changing WHAT gets collected, yet fn_hash is byte-identical across those
+-- changes. framework_hash closes that: a changed framework cannot present the
+-- previous identity.
+--
+-- B-04: nothing recorded WHICH bytes produced an observation. The live ingest
+-- writer rewrites whole monthly partitions (storage/lake.py write_partition:
+-- "overwrites any existing file"), so the input file mutates by design after
+-- collection. run_inputs pins dataset + partition + parquet_sha256 + rows at
+-- collection time, making a later divergence detectable by re-hashing.
+--
+-- Both are written INSIDE run_signal's existing transaction, so provenance
+-- commits atomically with the observation it describes: no observation can
+-- exist without its provenance, and a rolled-back collection leaves neither.
+--
+-- Deliberately NEW tables, not columns on run_log: adding columns would need
+-- ALTER TABLE inside init_db, which is registered hazard EH-001. It also keeps
+-- requirement 4 true by construction -- rows collected before this gate simply
+-- have no row here, which reads as "never recorded", not as a fabricated
+-- retroactive claim.
+--
+-- parquet_sha256 is a RAW chunked SHA-256 (storage/manifest.py _sha256), NOT
+-- pre_reg_guard._sha256_lf: that one normalises CRLF->LF, which is correct for
+-- source text and would corrupt the digest of a binary Parquet file.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS run_provenance (
+    run_id          INTEGER PRIMARY KEY REFERENCES run_log(id),  -- 1:1, idempotent
+    framework_hash  TEXT    NOT NULL,   -- content hash of the collection framework
+    git_sha         TEXT,               -- deployed commit; best-effort, may be NULL
+    recorded_at     TEXT    NOT NULL
+                        DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'NOW'))
+);
+
+CREATE TABLE IF NOT EXISTS run_inputs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL REFERENCES run_log(id),
+    role            TEXT    NOT NULL,   -- 'price' | 'aux' | 'ohlcv'
+    dataset         TEXT    NOT NULL,   -- e.g. 'spot/BTCUSDT'
+    partition       TEXT    NOT NULL,   -- e.g. 'year=2026/month=08'
+    parquet_sha256  TEXT    NOT NULL,   -- raw SHA-256 of the partition file
+    rows            INTEGER NOT NULL,   -- row count read from that partition
+    UNIQUE (run_id, dataset, partition)
 );

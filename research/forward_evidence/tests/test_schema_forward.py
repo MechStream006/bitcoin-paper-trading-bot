@@ -122,8 +122,11 @@ class TestSchemaCreation:
         # each run_date was collected, so an authorised historical backfill can
         # never be mistaken for scheduled forward evidence. Additive — no
         # existing table or view was modified.
+        # run_provenance / run_inputs added at Gate 6B.6 (defects B-04a / B-04):
+        # framework identity and exact input-partition identity, written inside
+        # run_signal's transaction. Additive — no existing table or view changed.
         assert tables == {"run_log", "signal_log", "trade_entries", "trade_exits",
-                          "collection_provenance"}
+                          "collection_provenance", "run_provenance", "run_inputs"}
         assert views  == {"trade_returns"}
 
     def test_T02_wal_mode_persisted_on_new_connection(self, db_path: pathlib.Path) -> None:

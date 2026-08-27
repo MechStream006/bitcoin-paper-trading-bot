@@ -69,7 +69,7 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setattr(run_daily, "load_daily_dvol", _dvol_ok)
 
     def mk(name):
-        def collect(run_date, closes, db_path, cost_bps):
+        def collect(run_date, closes, db_path, cost_bps, inputs=None):
             calls[name] = "called"
             return "ok"
         return collect
@@ -77,7 +77,7 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setattr(run_daily.runner_g1, "collect", mk("g1"))
     monkeypatch.setattr(run_daily.runner_g3, "collect", mk("g3"))
 
-    def ivrv_collect(run_date, closes, dvol, db_path, cost_bps):
+    def ivrv_collect(run_date, closes, dvol, db_path, cost_bps, inputs=None):
         calls["ivrv"] = {"has_dvol": dvol is not None}
         return "ok"
     monkeypatch.setattr(run_daily.runner_ivrv, "collect", ivrv_collect)

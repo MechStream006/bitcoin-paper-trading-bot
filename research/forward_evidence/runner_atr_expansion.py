@@ -45,6 +45,7 @@ def collect(
     ohlcv: pd.DataFrame,
     db_path: pathlib.Path,
     cost_bps: float,
+    inputs: list[dict] | None = None,
 ) -> str:
     """Run one day's forward collection for g3_atr_expansion. Returns 'ok'/'skipped'."""
     return run_ohlcv_signal(
@@ -59,4 +60,5 @@ def collect(
         hold_days=_df.HOLD_DAYS,
         min_history=_df.MIN_HISTORY,
         cost_bps=cost_bps,
+        inputs=inputs,
     )
