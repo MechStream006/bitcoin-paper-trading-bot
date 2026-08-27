@@ -1,0 +1,54 @@
+# run_date policy for forward-evidence collection (Gate 6B.3, B-03).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Until 6B.3, run_daily accepted ANY --run-date. A date inside the sealed
+# lockbox or inside the INC-0005 immutable provenance gap produced a complete,
+# valid-looking observation (run_log + signal_log + trade_entry) that was
+# indistinguishable from genuine scheduled forward evidence, and invisible to
+# every existing detector -- healthcheck's forward_cycle compares only
+# MAX(run_date), so a past-dated row never moves `latest`.
+#
+# These windows are DATA, not code. They live here rather than in Python so a
+# policy change is a reviewable config change, and rather than in
+# collection_config.yaml / thresholds.yaml because this is neither a collection
+# parameter nor a governance threshold -- and both of those files are frozen
+# under separate governance.
+#
+# lockbox: cross-checked against the canonical sealed artifact
+# research/reports/evidence_library/lockbox_validation.json ("lockbox" key) by
+# test, so this copy cannot silently drift from the source of truth.
+#
+# gap: the INC-0005 outage window. It has no other machine-readable
+# declaration anywhere in the repository -- CLAUDE.md Sec.20 and
+# docs/engineering/incidents/INC-0005-*.md are prose. This is the first.
+
+schema_version: 1
+
+# Sealed out-of-sample window. Spent once, never reused. Writing a forward
+# observation dated inside it would contaminate the lockbox with data produced
+# after the seal. UNCONDITIONAL refusal -- no authorization flag lifts it.
+lockbox:
+  start: "2025-06-01"
+  end:   "2026-05-31"
+  reason: >-
+    sealed lockbox window; a forward observation dated inside it would
+    contaminate the one-shot out-of-sample test
+
+# INC-0005: btcbot-fwd-hg.service failed on 19 consecutive days, writing zero
+# observations. CLAUDE.md Sec.20: "The gap is immutable provenance. No backfill
+# was performed and none is permitted." Its ABSENCE is the evidence.
+# UNCONDITIONAL refusal -- no authorization flag lifts it.
+immutable_gaps:
+  - start: "2026-07-18"
+    end:   "2026-08-05"
+    reason: >-
+      INC-0005 forward-evidence outage; the gap is immutable provenance and
+      backfilling it would destroy the record that it happened
+
+# How far back an EXPLICITLY AUTHORIZED manual backfill may reach. Bounds the
+# blast radius of a mistyped date: outside this horizon the date is refused
+# even with --backfill-authorized. 14 days covers a realistic host outage or
+# missed-run window while staying far short of any historically sensitive
+# period. Scheduled collection (yesterday UTC) is unaffected by this value.
+backfill_horizon_days: 14

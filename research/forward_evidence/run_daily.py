@@ -49,6 +49,9 @@ from forward_evidence.runner_base import (
     DataUnavailableError, load_daily_closes, load_daily_dvol, load_daily_funding,
     load_daily_ohlcv,
 )
+from forward_evidence.run_date_policy import (
+    MODE_BACKFILL, MODE_SCHEDULED, PolicyConfigError, evaluate_run_date, load_policy,
+)
 
 from forward_evidence import (
     decision_function_h5               as _h5,
@@ -129,6 +132,40 @@ def _blocked_signal_ids(sigs: dict) -> list[str]:
     if atr_cfg is not None and atr_cfg.get('enabled', False):
         ids.append('g3_atr_expansion')
     return ids
+
+
+def _record_collection_provenance(
+    db_path: pathlib.Path,
+    run_date: str,
+    mode: str,
+    detail: str,
+) -> None:
+    """
+    Record HOW this run_date came to be collected (Gate 6B.3, defect B-03).
+
+    Best-effort by design, and deliberately so: provenance is an audit aid, not
+    a precondition for evidence. A provenance-write failure must never abort a
+    collection that policy has already authorised, exactly as SnapshotWriter
+    treats collection_metrics. The refusal path is what protects the record;
+    this row explains an ACCEPTED one.
+
+    INSERT OR IGNORE against UNIQUE(run_date, mode) keeps re-invocation and
+    idempotent skips from accumulating rows.
+    """
+    try:
+        init_forward_db(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO collection_provenance (run_date, mode, detail) "
+                "VALUES (?,?,?)",
+                (run_date, mode, detail),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning("could not record collection provenance for %s: %s", run_date, exc)
 
 
 def _record_governance_check_failure(
@@ -458,10 +495,48 @@ def main() -> int:
             'Governance check still runs. Exits 0 if all enabled signals are computable.'
         ),
     )
+    parser.add_argument(
+        '--backfill-authorized',
+        action='store_true',
+        help=(
+            'Authorise manual historical collection of a --run-date other than '
+            'yesterday UTC, within the configured backfill horizon. Never lifts the '
+            'unconditional refusals (sealed lockbox, immutable provenance gaps). '
+            'Authorised backfills are recorded in collection_provenance.'
+        ),
+    )
     args = parser.parse_args()
 
-    run_date = args.run_date or _derive_run_date()
-    log.info("run_date=%s  db=%s  dry_run=%s", run_date, args.db_path, args.dry_run)
+    run_date  = args.run_date or _derive_run_date()
+    scheduled = args.run_date is None
+
+    # ── run_date policy choke point (Gate 6B.3, defect B-03) ─────────────────
+    # Before governance, before any loader, before any collection: a refused
+    # date must write NOTHING. Placed here rather than in runner_base so the
+    # shared path all six signals use is untouched, and so there is exactly one
+    # place where "may this date be collected at all?" is answered.
+    try:
+        policy = load_policy()
+    except PolicyConfigError as exc:
+        log.error("run_date policy unavailable: %s", exc)
+        log.error("Refusing to collect without an enforceable run_date policy.")
+        return 1
+
+    decision = evaluate_run_date(
+        run_date,
+        today=datetime.now(timezone.utc).date(),
+        policy=policy,
+        authorized=args.backfill_authorized,
+    )
+    if not decision.allowed:
+        log.error("run_date REFUSED [%s]: %s", decision.code, decision.detail)
+        log.error("Nothing was written. Collection did not start.")
+        return 1
+    if decision.mode == MODE_BACKFILL:
+        log.warning("AUTHORISED BACKFILL: %s", decision.detail)
+
+    log.info("run_date=%s  mode=%s  db=%s  dry_run=%s",
+             run_date, decision.mode, args.db_path, args.dry_run)
 
     gov_ok, gov_detail = _check_governance(_RESEARCH_ROOT)
     if not gov_ok:
@@ -473,12 +548,30 @@ def main() -> int:
             )
         return 1
 
+    if not args.dry_run:
+        _record_collection_provenance(
+            args.db_path, run_date, decision.mode, decision.detail,
+        )
+
     results = run_all(run_date, db_path=args.db_path, dry_run=args.dry_run)
     for sig, outcome in results.items():
         log.info("  %-35s %s", sig, outcome)
 
     failed = [s for s, r in results.items() if r in ('fn_hash_violation', 'error', 'blocked')]
-    return 1 if failed else 0
+    if failed:
+        return 1
+
+    # A MANUAL invocation that collected nothing must not report success
+    # (Gate 6B.3, defect B-09's observability half). 'unavailable' stays
+    # non-fatal for SCHEDULED runs on purpose: per-signal isolation is a
+    # documented guarantee -- a DVOL or funding outage marks one signal
+    # 'unavailable' and must never fail the daily job. The distinction is the
+    # operator's intent, not the outcome: an explicit manual attempt that
+    # produced no observation is a failed attempt and should be visible.
+    if not scheduled and results and all(r == 'unavailable' for r in results.values()):
+        log.error("Manual run for %s collected nothing (all signals unavailable).", run_date)
+        return 1
+    return 0
 
 
 if __name__ == '__main__':

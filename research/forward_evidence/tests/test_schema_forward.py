@@ -118,7 +118,12 @@ class TestSchemaCreation:
             "SELECT name FROM sqlite_master WHERE type='view'"
         )}
         c.close()
-        assert tables == {"run_log", "signal_log", "trade_entries", "trade_exits"}
+        # collection_provenance added at Gate 6B.3 (defect B-03): records HOW
+        # each run_date was collected, so an authorised historical backfill can
+        # never be mistaken for scheduled forward evidence. Additive — no
+        # existing table or view was modified.
+        assert tables == {"run_log", "signal_log", "trade_entries", "trade_exits",
+                          "collection_provenance"}
         assert views  == {"trade_returns"}
 
     def test_T02_wal_mode_persisted_on_new_connection(self, db_path: pathlib.Path) -> None:

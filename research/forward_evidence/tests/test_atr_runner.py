@@ -198,6 +198,21 @@ class TestAtrRunner:
 
 # ===========================================================================
 # Group GC — _check_governance() and main() gate
+
+
+def _policy_valid_run_date() -> str:
+    """
+    A run_date that run_daily's Gate 6B.3 run_date policy accepts.
+
+    These tests exercise the GOVERNANCE gate, not the date policy, so they need
+    a date that reaches the governance check. They previously hard-coded
+    '2026-01-01', which falls inside the sealed lockbox window and is now
+    refused unconditionally — before governance runs, because a refused date
+    must write nothing (and _record_governance_check_failure writes rows).
+    Yesterday UTC is the scheduled date, so it needs no --backfill-authorized
+    and stays valid as the clock moves.
+    """
+    return _run_daily._derive_run_date()
 # ===========================================================================
 
 class TestGovernanceCheck:
@@ -222,10 +237,11 @@ class TestGovernanceCheck:
         self, monkeypatch, db_path: pathlib.Path,
     ) -> None:
         """main() returns 1 immediately and never calls run_all() if governance fails."""
+        run_date = _policy_valid_run_date()
         monkeypatch.setattr(_run_daily, '_check_governance', lambda _: (False, 'forced test failure'))
         monkeypatch.setattr(
             sys, 'argv',
-            ['run_daily.py', '--run-date', '2026-01-01', '--db-path', str(db_path)],
+            ['run_daily.py', '--run-date', run_date, '--db-path', str(db_path)],
         )
 
         run_all_calls: list[tuple] = []
@@ -251,10 +267,11 @@ class TestGovernanceCheck:
         """main() persists a status='error' run_log row for every tracked signal
         when governance fails — the exact gap the 2026-07-18..08-05 outage
         exposed (18 failed runs left zero trace in any evidence-DB table)."""
+        run_date = _policy_valid_run_date()
         monkeypatch.setattr(_run_daily, '_check_governance', lambda _: (False, 'forced test failure'))
         monkeypatch.setattr(
             sys, 'argv',
-            ['run_daily.py', '--run-date', '2026-01-01', '--db-path', str(db_path)],
+            ['run_daily.py', '--run-date', run_date, '--db-path', str(db_path)],
         )
         monkeypatch.setattr(_run_daily, 'run_all', lambda *a, **kw: {})
 
@@ -267,7 +284,7 @@ class TestGovernanceCheck:
         con = sqlite3.connect(db_path)
         rows = con.execute(
             "SELECT signal_id, status, note FROM run_log WHERE run_date = ?",
-            ('2026-01-01',),
+            (run_date,),
         ).fetchall()
         con.close()
 
@@ -286,10 +303,11 @@ class TestGovernanceCheck:
         """A second same-day invocation after an already-recorded failure must not
         raise on the UNIQUE(signal_id, run_date) constraint (schema's own stated
         crash/recovery contract: retries start clean)."""
+        run_date = _policy_valid_run_date()
         monkeypatch.setattr(_run_daily, '_check_governance', lambda _: (False, 'forced test failure'))
         monkeypatch.setattr(
             sys, 'argv',
-            ['run_daily.py', '--run-date', '2026-01-01', '--db-path', str(db_path)],
+            ['run_daily.py', '--run-date', run_date, '--db-path', str(db_path)],
         )
         monkeypatch.setattr(_run_daily, 'run_all', lambda *a, **kw: {})
 
@@ -299,7 +317,7 @@ class TestGovernanceCheck:
 
         con = sqlite3.connect(db_path)
         n = con.execute(
-            "SELECT COUNT(*) FROM run_log WHERE run_date = ?", ('2026-01-01',),
+            "SELECT COUNT(*) FROM run_log WHERE run_date = ?", (run_date,),
         ).fetchone()[0]
         con.close()
         cfg = yaml.safe_load(_run_daily._CONFIG_PATH.read_text(encoding='utf-8'))
@@ -309,10 +327,11 @@ class TestGovernanceCheck:
         self, monkeypatch, db_path: pathlib.Path,
     ) -> None:
         """--dry-run must never write to the DB, including on governance failure."""
+        run_date = _policy_valid_run_date()
         monkeypatch.setattr(_run_daily, '_check_governance', lambda _: (False, 'forced test failure'))
         monkeypatch.setattr(
             sys, 'argv',
-            ['run_daily.py', '--run-date', '2026-01-01', '--db-path', str(db_path), '--dry-run'],
+            ['run_daily.py', '--run-date', run_date, '--db-path', str(db_path), '--dry-run'],
         )
 
         rc = _run_daily.main()

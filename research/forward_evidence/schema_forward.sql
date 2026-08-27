@@ -124,3 +124,32 @@ SELECT
     AS INTEGER)                                                 AS hold_days_actual
 FROM trade_entries te
 JOIN trade_exits   tx ON tx.entry_id = te.id;
+
+
+-- ---------------------------------------------------------------------------
+-- collection_provenance (Gate 6B.3, defect B-03)
+--
+-- Records HOW each run_date came to be collected. Before 6B.3 an authorized
+-- historical backfill and a scheduled observation were byte-for-byte
+-- indistinguishable in run_log/signal_log, so a mistyped or deliberate
+-- backfill entered the permanent evidence record with no trace.
+--
+-- Written by run_daily.main() only -- never by runner_base -- so the shared
+-- collection path used by all six signals is untouched. Additive: no existing
+-- table or view is modified, and rows collected before this table existed stay
+-- valid (their provenance is simply unrecorded, which is itself informative:
+-- absence means "collected before 6B.3", not "scheduled").
+--
+-- INSERT OR IGNORE against the UNIQUE key makes re-invocation idempotent, so a
+-- repeated scheduled run or an idempotent skip does not accumulate rows.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS collection_provenance (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date    TEXT    NOT NULL,          -- 'YYYY-MM-DD' UTC
+    mode        TEXT    NOT NULL
+                    CHECK (mode IN ('scheduled', 'backfill_authorized')),
+    detail      TEXT,                      -- policy decision detail
+    invoked_at  TEXT    NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'NOW')),
+    UNIQUE (run_date, mode)
+);
