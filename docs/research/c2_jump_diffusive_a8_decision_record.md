@@ -21,7 +21,8 @@ Econometrics* 4(1), 1–30.**
 | | |
 |---|---|
 | Retrieved | `https://public.econ.duke.edu/~get/browse/courses/883/Spr15/COURSE-MATERIALS/Z_Papers/BNSJFEC2006.pdf` |
-| SHA-256 | `460c77d5…` *(A2 fetch; see §9 note)* |
+| SHA-256 | `cbdaa3609b5150dcb2bd984d15e7678d581d4af4d699065231885543532af5fe` |
+| Bytes | 737,510 |
 | Extraction | content streams inflated; math glyph byte-codes decoded and cross-verified against contexts where the mathematics fixes the meaning |
 
 Glyph map established and verified in this gate:
@@ -220,11 +221,23 @@ inventing the very bridge I am declining to invent.
 
 ## 9. Provenance note, stated rather than glossed
 
-The SHA-256 recorded in §1 is from the A2 fetch of the same URL. The bytes used
-for this gate's extraction are the locally cached copy of that fetch. A
-re-download was **not** performed at A8, so §1's hash attests what A2 retrieved,
-not an independent re-verification today. Any implementation gate should
-re-fetch and confirm the hash before pinning it into a pre-registration.
+**CORRECTED at A9 (2026-08-27).** As first written, §1 recorded the SHA-256 as
+`460c77d5…`. That was wrong: `460c77d5…` is the **BNKS 2008 semivariance** paper
+(C3's source, 251,638 bytes), mistakenly copied into C2's provenance table. The
+BNS 2006 jumps paper is `cbdaa360…`, 737,510 bytes. §1 now carries the correct
+value.
+
+The error was in the recorded hash only. A8's extraction did read the correct
+document, which A9 verified two ways: an independent re-fetch of the same URL
+returned **byte-identical** content (737,510 bytes, `cbdaa360…`), and the body
+text contains "Econometrics of Testing for Jumps", "Bipower Variation" and
+"Barndorff-Nielsen". **U1–U5 and every formula in §3 are unaffected**, and are
+further corroborated by the constants recovered from the paper matching its own
+printed values (θ ≈ 2.6090, μ₁² ≈ 0.6366).
+
+A8 as originally written also noted that no re-download had been performed and
+that an implementation gate must re-fetch before pinning. A9 performed exactly
+that check, and it is what surfaced the error.
 
 ## 10. Governance
 
