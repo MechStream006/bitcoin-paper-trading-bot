@@ -3,7 +3,7 @@
   "version": "1.0.0-draft",
   "signal_id": "g1_trend_regime_ma_cross",
   "status": "SPECIFICATION_FROZEN_NOT_ADMITTED",
-  "status_note": "Gate 6A.15. Specification freeze only. NOT registered, NOT implemented, NOT wired, NOT collecting, NOT deployed. Deliberately placed in drafts/ so no loader can mistake it for an active pre-registration. Becomes hash-pinned only when the decision function is written at the implementation gate.",
+  "status_note": "Gates 6A.15 (specification freeze) and 6A.16 (implementation + validation). The decision function now exists and is hash-pinned, but the candidate is still NOT registered, NOT wired into collection_config.yaml or run_daily.py, NOT collecting and NOT deployed. Deliberately kept in drafts/ so no loader can mistake it for an active pre-registration.",
   "pre_registration_date": "2026-08-27T00:00:00+00:00",
   "human_readable_specification": "docs/research/g1_trend_regime_ma_cross_6a15_specification.md",
   "gate_trail": [
@@ -11,7 +11,8 @@
     "2026-06-13 — admitted candidate, role feature, on the Feature gate",
     "6A.14-PRE / 6A.14 — g5_trend_4h rejected for collection; trend branch falls back to this candidate",
     "6A.15-PRE — clone screen: max |r| 0.6030, VIF 1.882, no pair >= 0.70, admissible",
-    "6A.15 — specification frozen (this document)"
+    "6A.15 — specification frozen (this document)",
+    "6A.16 — implementation + validation: standalone decision function written, proven behaviourally identical to sig_trend_regime(20,100), hash-pinned"
   ],
 
   "primary_source": {
@@ -51,9 +52,9 @@
     "version": "1.0.0-draft",
     "signal_class": "trend-regime long/short",
     "frozen_definition": "research/evidence/signals.py :: sig_trend_regime(m, fast=20, slow=100)",
-    "decision_function_file": null,
-    "decision_function_hash": null,
-    "hash_note": "NOT IMPLEMENTED. File and hash are assigned at the implementation gate and only then does this become hash-pinned.",
+    "decision_function_file": "forward_evidence/decision_function_g1_trend_regime.py",
+    "decision_function_hash": "2e6f95977503fc2aeaf4358253c83cc461ce87ce0bf2cad740b2ea072edeba3e",
+    "hash_note": "HASH-PINNED at Gate 6A.16. SHA-256 of LF-normalised bytes (pre_reg_guard._sha256_lf). verify_fn_hash aborts any run whose function bytes drift from this value. Pinning the hash does NOT admit the candidate: status remains SPECIFICATION_FROZEN_NOT_ADMITTED.",
     "implementation_obligation": "The standalone decision function must accept a plain pd.Series (platform convention, stated verbatim in decision_function_g1_market_regime.py: do NOT import sig_market_regime from signals.py) and must be PROVEN behaviourally identical to sig_trend_regime(m, 20, 100) on the same close series by an equivalence test. Reimplementation is a hashing requirement, never a licence to reinterpret.",
 
     "data_source": {
@@ -323,6 +324,21 @@
     }
   ],
 
+  "implementation": {
+    "gate": "6A.16",
+    "date": "2026-08-28T00:00:00+00:00",
+    "decision_function_file": "forward_evidence/decision_function_g1_trend_regime.py",
+    "decision_function_sha256_lf": "2e6f95977503fc2aeaf4358253c83cc461ce87ce0bf2cad740b2ea072edeba3e",
+    "test_file": "research/forward_evidence/tests/test_g1_trend_regime.py",
+
+    "standalone": "The module imports only __future__ and pandas. It does NOT import signals.py or engine.py — asserted structurally by parsing its import graph (test_E12), per the platform convention stated verbatim in decision_function_g1_market_regime.py.",
+    "equivalence": "PROVEN, not asserted: byte-equal positions against signals.sig_trend_regime(m, 20, 100) on synthetic series at lengths 100/101/250/900, on seven pathological inputs (constant, exact ties, embedded NaN, monotone down, single row, exactly SLOW rows, SLOW-1 rows), and on the real train slice. Independently cross-checked against a per-row loop reference written from the contract text with no pandas rolling call and no boolean masking.",
+    "frozen_decisions_unchanged": "No 6A.15 decision was altered. FAST/SLOW/HOLD_DAYS/MIN_HISTORY/ANN/COST_BPS, the adopted cost specification, the hypothesis, the direction, the role, the independence findings and platform_new_choices=[] are byte-identical to the freeze. Only decision_function_file, decision_function_hash, hash_note, status_note, gate_trail, the final note and this block changed.",
+    "hold_and_cost_are_metadata": "HOLD_DAYS and the 15 bps cost appear in the hashed file as declared constants and documentation only; compute_signal references neither (test_P10). No shared infrastructure was altered to accommodate them.",
+    "shared_infrastructure_unmodified": "signals.py, engine.py, runner_base.py, run_daily.py and run_date_policy.py re-hashed at 6A.16 and byte-identical to artifact_hashes (test_P07). No runner and no loader was added (test_P05).",
+    "fail_closed_ownership": "compute_signal performs no loading, no validation and raises nothing (test_U18). The manufactured-FLAT branch is retained VERBATIM from the frozen contract and rendered unreachable from outside by the loader's and the runner's independent MIN_HISTORY guards plus the runner's B-02 NaN guard (tests U12/U13/U14/U15)."
+  },
+
   "governance": {
     "n_trials": 34,
     "n_trials_note": "FROZEN. This family was inside the original Phase B battery and its pinned run already records n_trials = 34. This candidate does not reopen the denominator.",
@@ -369,8 +385,8 @@
 
   "notes": [
     "This candidate is ALREADY registered as state=candidate, role=feature, pinned_run=abc6078e-0dce-4c89-b73f-c1aa9467e795. Gate 6A.15 does not admit it, promote it, or alter its registry entry in any way — it freezes the forward-collection specification that does not yet exist for it.",
-    "Not present in collection_config.yaml. Not wired into run_daily.py. No decision function file exists. Nothing is deployed.",
+    "Not present in collection_config.yaml. Not wired into run_daily.py. Nothing is deployed. The decision function file DOES now exist (created and hash-pinned at 6A.16); existence is not wiring and not admission.",
     "Do not modify sig_trend_regime or the 20/100 construction after this freeze. Parameter changes require a version bump and a new pre-registration.",
-    "The specification is frozen but NOT hash-pinned. It becomes hash-pinned when the decision function is written and hashed at the implementation gate."
+    "HASH-PINNED at Gate 6A.16: decision_function_hash is set and verify_fn_hash will abort on any drift. Pinning is not admission — the candidate remains unregistered, unwired and uncollected."
   ]
 }
