@@ -326,7 +326,7 @@
 
   "implementation": {
     "gate": "6A.16",
-    "date": "2026-08-28T00:00:00+00:00",
+    "date": "2026-08-27T00:00:00+00:00",
     "decision_function_file": "forward_evidence/decision_function_g1_trend_regime.py",
     "decision_function_sha256_lf": "2e6f95977503fc2aeaf4358253c83cc461ce87ce0bf2cad740b2ea072edeba3e",
     "test_file": "research/forward_evidence/tests/test_g1_trend_regime.py",
