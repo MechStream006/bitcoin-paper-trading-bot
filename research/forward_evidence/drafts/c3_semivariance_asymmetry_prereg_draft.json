@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "version": "1.0.0-draft",
+  "signal_id": "c3_semivariance_asymmetry",
+  "status": "SPECIFICATION_FROZEN_NOT_ADMITTED",
+  "status_note": "Gate A5. Specification freeze only. NOT registered, NOT implemented, NOT collecting. Deliberately placed in drafts/ rather than alongside the active pre_registration_*.json files so it cannot be mistaken for an admitted family.",
+  "pre_registration_date": "2026-08-27T00:00:00+00:00",
+  "gate_trail": ["A1 universe", "A2 source extraction", "A3 U6 resolution + draft", "A4 direction frozen + clone screen", "A5 final specification"],
+
+  "primary_source": {
+    "citation": "Barndorff-Nielsen, O.E., Kinnebrock, S. and Shephard, N. (2008). Measuring downside risk - realised semivariance.",
+    "url": "https://public.econ.duke.edu/~get/browse/courses/201/spr08/DOWNLOADS/New_Methods_and_JumpTests/BNKS-semivariance-2008.pdf",
+    "bytes": 251638,
+    "sha256": "460c77d59daaaaa80ccc2222174b709c9a6d7b9fb3be7184f009275cd5f8f318",
+    "extraction_method": "PDF content streams inflated; math glyph byte-codes decoded and cross-verified against contexts where mathematics fixes the meaning",
+    "glyph_resolution": {
+      "0x00": "minus, fixed by p-lim and Y_t - Y_{t-}",
+      "0x14": "less-or-equal, fixed by sum over jump times s <= t and t_j <= t",
+      "0x15": "greater-or-equal, fixed by t >= 0 in the Brownian semimartingale definition"
+    }
+  },
+
+  "artifact_hashes": {
+    "signals.py": "85644baf6e737f060016098a8907c0d7a6e49004aaf9afe328a45440a85e",
+    "engine.py": "aa2cb34fc9793b81466f253065b5a0f7791cd096b58d95e9dd991fdb1ce4",
+    "governance.py": "a3759079fc909f88657b1138004704947befec775dc10090bb09d7a16af1",
+    "analyze_mtf_independence.py": "eb874c65370d0ebd3bf09cb3ddc1687fa31162c6b062cc56d22d83de661a",
+    "hash_note": "SHA-256 of LF-normalised bytes (CRLF->LF), project convention pre_reg_guard._sha256_lf. Truncated as stored by the existing pre-registration convention."
+  },
+
+  "source_formula": {
+    "tag": "SOURCE",
+    "RS_minus": "sum_j (Y_tj - Y_tj-1)^2 * indicator(Y_tj - Y_tj-1 <= 0)",
+    "RS_plus": "sum_j (Y_tj - Y_tj-1)^2 * indicator(Y_tj - Y_tj-1 >= 0)",
+    "RV": "RS_minus + RS_plus",
+    "identity_note": "RS- + RS+ = RV exactly: the only overlapping point r=0 contributes r^2=0. Verified empirically at A4 over 2031 days, max abs error 0.000e+00.",
+    "zero_return_treatment": "counted in BOTH RS- and RS+, contributing exactly zero to each",
+    "scaling_constant": null,
+    "scaling_constant_note": "None. Unlike bipower variation, realised semivariance carries no mu factor.",
+    "source_prescribes_sampling_frequency": false,
+    "source_prescribes_trading_rule": false,
+    "source_prescribes_direction": false,
+    "source_prescribes_log_price": false
+  },
+
+  "hypothesis": {
+    "tag": "PLATFORM-NEW",
+    "frozen_at": "A4, before any computation",
+    "record": "docs/research/c3_semivariance_a4_direction_decision.md",
+    "statement": "In a structurally long-skewed BTC perpetual book, downside-dominated realized variance is disproportionately mechanical (liquidation cascades on the crowded side) and therefore a candidate for reversal, while upside-dominated variance marks leverage accumulating and rising fragility.",
+    "direction": "long_short",
+    "mapping": "contrarian",
+    "expected_sign": "positive mean forward return when SJ is in its bottom trailing tercile; negative when in its top tercile",
+    "mechanism": "positioning / forced-deleveraging asymmetry",
+    "premise_source": "Long-skewed positioning is already registered on this platform: decision_function_g2_funding_level.py states that perpetual funding is the price longs pay shorts.",
+    "null_hypothesis": "The trailing tercile rank of SJ has no predictive relationship with forward BTC returns.",
+    "falsification": "Wrong if low-SJ days are not followed by relative strength and high-SJ days not by relative weakness. Direction may not be revised after any outcome is observed.",
+    "role": "feature",
+    "role_note": "Feature role. No edge claim is made or supported; no performance statistic has ever been computed for this candidate.",
+    "rejected_alternatives": [
+      "momentum on SJ - defensible in an information-driven market; rejected because the long-skewed-book premise makes the mechanical reading the stronger prior and is evidenced on this platform",
+      "one-sided long-only - better motivated on the long leg but adds an exposure convention as a second free parameter",
+      "RS- level instead of SJ - rejected at A3 as a volatility-level measure structurally duplicating the registered vol families"
+    ]
+  },
+
+  "function_spec": {
+    "name": "Realized Semivariance Asymmetry (contrarian)",
+    "version": "1.0.0-draft",
+    "signal_class": "intraday variance-asymmetry contrarian long/short",
+    "decision_function_file": null,
+    "decision_function_hash": null,
+    "hash_note": "NOT IMPLEMENTED. File and hash are assigned at A6 and only then does this become hash-pinned.",
+    "data_source": {
+      "instrument": "Binance BTCUSDT spot",
+      "tag": "PLATFORM-CONV",
+      "parquet_dir": "research/data/raw/spot/BTCUSDT",
+      "layout": "year=YYYY/month=MM/data.parquet"
+    },
+    "sampling": {
+      "bar_interval_minutes": 1,
+      "tag": "PLATFORM-NEW",
+      "note": "Source prescribes no sampling frequency; it uses all available tick times."
+    },
+    "day_boundary": {
+      "convention": "UTC calendar day",
+      "tag": "PLATFORM-CONV"
+    },
+    "completeness": {
+      "required_bars_per_day": 1440,
+      "tag": "PLATFORM-CONV",
+      "convention_source": "MIN_DAILY_BARS, gate 6B.1",
+      "incomplete_day_behaviour": "drop the day entirely; never compute partially"
+    },
+    "return_definition": {
+      "type": "log_first_difference",
+      "formula": "r_i = ln(close_i) - ln(close_i-1)",
+      "tag": "PLATFORM-NEW",
+      "note": "Resolves U6b. BNKS says only 'trade or quote prices' and never states log price."
+    },
+    "day_boundary_return": {
+      "cross_day_return_included": false,
+      "returns_per_complete_day": 1439,
+      "tag": "PLATFORM-NEW",
+      "note": "Surfaced at A4, absent from the A3 draft. BTC trades 24/7 so there is no session break; excluding the boundary return is a choice, not a necessity. Chosen so a day's value cannot be dominated by one cross-boundary move."
+    },
+    "transformation": {
+      "raw_value": "SJ = (RS_plus - RS_minus) / RV",
+      "range": [-1.0, 1.0],
+      "tag": "PLATFORM-NEW",
+      "rv_zero_behaviour": "SJ := NaN, position 0",
+      "affine_note": "SJ = 1 - 2*(RS_minus/RV). Signed-asymmetry and downside-share formulations are affine transforms, so a tercile gate on either induces the identical partition. Not a discretionary choice."
+    },
+    "parameters": {
+      "MIN_DAILY_BARS": 1440,
+      "RW": 252,
+      "MINP": 126,
+      "PCTILE": 33,
+      "UPPER_PCTILE": 67,
+      "HOLD_DAYS": 7,
+      "MIN_HISTORY": 253
+    },
+    "parameter_tags": {
+      "MIN_DAILY_BARS": "PLATFORM-CONV (gate 6B.1)",
+      "RW": "PLATFORM-CONV (G2, IVRV)",
+      "MINP": "PLATFORM-CONV (G2, IVRV)",
+      "PCTILE": "PLATFORM-CONV (G2, IVRV)",
+      "UPPER_PCTILE": "PLATFORM-CONV (derived as 100 - PCTILE)",
+      "HOLD_DAYS": "PLATFORM-CONV (all six collectors)",
+      "MIN_HISTORY": "PLATFORM-CONV (RW + 1, as G2 and IVRV)"
+    },
+    "entry_condition_long": "SJ <= rolling 33rd percentile over RW=252 days (min_periods=126)",
+    "entry_condition_short": "SJ >= rolling 67th percentile over RW=252 days (min_periods=126)",
+    "flat_condition": "SJ strictly between the terciles, OR SJ NaN, OR either quantile NaN",
+    "direction": "long_short",
+    "hold_days": 7,
+    "exit_rule": "scheduled exit at entry_date + 7 calendar days; no early exit; signal re-evaluated daily but a new trade opens only when none is open",
+    "trade_counting_definition": "one entry-to-exit pair is one trade; at most one open trade at a time",
+    "entry_price": "spot close of run_date",
+    "exit_price": "spot close of planned_exit_date",
+    "cost_assumption_bps": 15,
+    "cost_convention": "charged ONCE per completed trade",
+    "cost_convention_tag": "PLATFORM-CONV",
+    "cost_convention_note": "Registered label specification 57ce016e51a0. Gate 6B.5 established this as a deliberate Specification distinct from the engine turnover model. NOT reopened by this candidate.",
+    "state_or_recursion_required": false,
+    "repaint_risk": "none",
+    "lockbox_status": "not spent by this signal"
+  },
+
+  "integrity_rules": {
+    "no_lookahead": "inputs filtered to run_date inclusive before any computation",
+    "completed_observations_only": true,
+    "missing_data_policy": "DataUnavailableError -> transient skip; never recorded as a flat decision (gate 6B.1 defect B-02)",
+    "incomplete_final_day_policy": "rejected by the 1440-bar guard (gate 6B.1 defect B-01)",
+    "run_date_policy": "sealed lockbox and immutable provenance gaps refused unconditionally (gate 6B.3)",
+    "provenance": "framework hash plus input partition SHA-256 and row counts recorded per observation (gate 6B.6)"
+  },
+
+  "evidence_basis": {
+    "corpus": "Binance BTCUSDT spot 1m, 2021-01-01..2026-07-31 local",
+    "pinned_run": null,
+    "gating_basis": "NONE. No battery run exists for this candidate.",
+    "train_slice_sharpe": null,
+    "oos_sharpe": null,
+    "wf_pass": null,
+    "sens_pass_frac": null,
+    "loo_sign_consistency": null,
+    "breakeven_cost_bps": null,
+    "n_trades_IS": null,
+    "evidence_score": null,
+    "verdict": null,
+    "n_trials": 34,
+    "dsr_prob": null,
+    "bh_p": null,
+    "NOT_COMPUTED_NOTE": "Every field above is null because ZERO performance statistics have been computed for C3 at any gate. This is a specification freeze, not an admission dossier. Contrast pre_registration_g2_funding_level.json, which rests on a real Phase B battery run. C3 has none and must not be compared to it.",
+    "independence_maxcorr_collecting": 0.0323,
+    "independence_worst_comparator": "g2_funding_level",
+    "independence_vif": 1.008,
+    "independence_r2_on_others": 0.008,
+    "independence_note": "Measured at Gate A4 on the train slice only (1612 rows, 2021-01-01..2025-05-31) with the analyze_mtf_independence Test 1 convention plus governance.vif_table. NO performance quantity was computed. A near-zero correlation cannot distinguish genuine orthogonality from absence of information; only forward evidence can.",
+    "candidate_gate_result": "NOT EVALUATED - no evidence exists to evaluate"
+  },
+
+  "governance": {
+    "n_trials": 34,
+    "n_trials_note": "FROZEN. This candidate does not reopen the denominator.",
+    "validated_gate": {
+      "role": "feature",
+      "min_dsr_prob": 0.50,
+      "max_bh_p": 0.10,
+      "max_pairwise_r": 0.70,
+      "requires_non_offline_provenance": true
+    },
+    "max_clone_r": 0.90,
+    "clone_methodology": "analyze_mtf_independence.py Test 1 (Pearson on positions, _arr alignment, std>0 guard) plus governance.vif_table",
+    "lockbox": {
+      "window": ["2025-06-01", "2026-05-31"],
+      "spent": false,
+      "read_by_any_c3_gate": false
+    }
+  },
+
+  "platform_new_choices": [
+    "1-minute sampling grid (source prescribes none)",
+    "log first differences (source says only 'trade or quote prices')",
+    "cross-day return excluded, 1439 within-day returns per day",
+    "SJ transformation and CONTRARIAN direction (source defines no signal, threshold or direction)"
+  ],
+
+  "notes": [
+    "C3 is a MEASUREMENT taken from the source and a SIGNAL constructed by this project. The two must never be conflated.",
+    "Not present in registry.yaml, ledger.db or collection_config.yaml.",
+    "Next gate A6 implements this specification exactly and validates the implementation before any evidence collection."
+  ]
+}
