@@ -28,13 +28,54 @@ import pytest
 
 from reference.mutanabby import pine_port as pp
 
+#: Evidence artifacts live IN THE REPOSITORY (Gate M-7A), so the equivalence
+#: claim is reproducible from a clean clone rather than from one local disk.
+#: Absence is a HARD FAILURE, never a skip: a skip would leave the suite green
+#: while silently not testing the thing the suite exists to prove.
+_EVIDENCE = pathlib.Path(__file__).resolve().parents[1]
+
 FIXTURE_SHA256 = "33825fbe7a10e5a84289fdd1da64c207d6d610c905d295dac7c2738d8cefe0cc"
 FIXTURE_PATH = pathlib.Path(
     os.environ.get(
         "MUTANABBY_M3_FIXTURE",
-        r"D:\pine-logs-M3 REF Mutanabby_AI _ Ultimate Algo _ Remastered+.csv",
+        _EVIDENCE / "fixture"
+        / "pine-logs-M3 REF Mutanabby_AI _ Ultimate Algo _ Remastered+.csv",
     )
 )
+
+PINE_SHA256 = "75f1914a2f3e982cfc36eeb98edc142b494dcce2745e0707865389e77acc379d"
+PINE_PATH = _EVIDENCE / "source" / "mutanabby_ai_ultimate_algo.pine.txt"
+
+EXPECTED_BARS = 5813
+
+
+def load_fixture_or_fail(path: pathlib.Path) -> pd.DataFrame:
+    """Load the frozen fixture, failing closed on absence or tampering.
+
+    Deliberately raises rather than skipping. Extracted as a callable so the
+    fail-closed behaviour is itself testable (see the integrity tests).
+    """
+    if not path.exists():
+        raise AssertionError(
+            f"M-3 equivalence fixture MISSING at {path}.\n"
+            "This is a hard failure, not a skip: without the fixture the "
+            "Pine<->Python equivalence claim is unfalsifiable, and a green "
+            "suite would be actively misleading. Restore the artifact "
+            f"(sha256 {FIXTURE_SHA256}) before trusting any result."
+        )
+    got = hashlib.sha256(path.read_bytes()).hexdigest()
+    if got != FIXTURE_SHA256:
+        raise AssertionError(
+            "M-3 fixture hash mismatch — refusing to validate against an "
+            f"unknown file.\n  expected {FIXTURE_SHA256}\n  got      {got}"
+        )
+    df = pd.read_csv(path)
+    msg = df["Message"].astype(str)
+    rows = msg[msg.str.startswith("ROW|")].str.split("|")
+    out = pd.DataFrame(rows.tolist(), columns=["tag"] + COLS).drop(columns="tag")
+    for c in COLS:
+        out[c] = pd.to_numeric(out[c].replace("NaN", np.nan), errors="coerce")
+    return out.reset_index(drop=True)
 
 COLS = [
     "timestamp_ms", "open", "high", "low", "close", "atr", "upperBasic",
@@ -56,21 +97,84 @@ EXACT_LADDER = ["direction", "bull", "bear", "strength"]
 
 @pytest.fixture(scope="module")
 def fixture() -> pd.DataFrame:
-    if not FIXTURE_PATH.exists():
-        pytest.skip(f"M-3 fixture not present at {FIXTURE_PATH}")
-    raw = FIXTURE_PATH.read_bytes()
-    got = hashlib.sha256(raw).hexdigest()
-    assert got == FIXTURE_SHA256, (
-        f"fixture hash mismatch — refusing to validate against an unknown file.\n"
-        f"  expected {FIXTURE_SHA256}\n  got      {got}"
+    return load_fixture_or_fail(FIXTURE_PATH)
+
+
+# ===========================================================================
+# Evidence-durability integrity (Gate M-7A)
+#
+# Distinguishes three things that are easy to conflate:
+#   A. code durability      -- pine_port.py is committed
+#   B. evidence durability  -- the Pine source AND the fixture are committed
+#   C. reproducibility      -- the equivalence claim can be re-derived from a
+#                              clean clone, and FAILS LOUDLY if it cannot
+# ===========================================================================
+
+def test_E01_pine_source_is_committed_and_byte_exact():
+    """B: the authoritative Pine source lives in the repository, unmodified."""
+    assert PINE_PATH.exists(), (
+        f"Pine source MISSING at {PINE_PATH}. Without it the port cannot be "
+        "audited against its origin and the M-2 specification is unverifiable."
     )
-    df = pd.read_csv(FIXTURE_PATH)
-    msg = df["Message"].astype(str)
-    rows = msg[msg.str.startswith("ROW|")].str.split("|")
-    out = pd.DataFrame(rows.tolist(), columns=["tag"] + COLS).drop(columns="tag")
-    for c in COLS:
-        out[c] = pd.to_numeric(out[c].replace("NaN", np.nan), errors="coerce")
-    return out.reset_index(drop=True)
+    got = hashlib.sha256(PINE_PATH.read_bytes()).hexdigest()
+    assert got == PINE_SHA256, (
+        f"Pine source hash mismatch.\n  expected {PINE_SHA256}\n  got      {got}\n"
+        "If this fails on a fresh clone, EOL normalisation has corrupted the "
+        "artifact — check research/reference/mutanabby/.gitattributes (-text)."
+    )
+
+
+def test_E02_fixture_is_committed_and_byte_exact():
+    """B: the frozen M-3 fixture lives in the repository, unmodified."""
+    assert FIXTURE_PATH.exists(), f"M-3 fixture MISSING at {FIXTURE_PATH}"
+    got = hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest()
+    assert got == FIXTURE_SHA256, (
+        f"fixture hash mismatch.\n  expected {FIXTURE_SHA256}\n  got      {got}"
+    )
+
+
+def test_E03_missing_evidence_fails_closed_rather_than_skipping():
+    """C: absence must raise, never skip.
+
+    A skip would leave the suite green while silently not testing the claim —
+    exactly the failure mode this gate exists to remove.
+    """
+    missing = FIXTURE_PATH.parent / "definitely-not-present.csv"
+    assert not missing.exists()
+    with pytest.raises(AssertionError, match="hard failure, not a skip"):
+        load_fixture_or_fail(missing)
+
+
+def test_E04_tampered_evidence_fails_closed(tmp_path):
+    """C: a fixture with the right shape but wrong bytes must be refused."""
+    tampered = tmp_path / "tampered.csv"
+    tampered.write_bytes(FIXTURE_PATH.read_bytes() + b"\n")
+    with pytest.raises(AssertionError, match="hash mismatch"):
+        load_fixture_or_fail(tampered)
+
+
+def test_E05_fixture_provenance_and_bar_count(fixture):
+    """B/C: provenance is pinned, not merely asserted in prose."""
+    assert len(fixture) == EXPECTED_BARS
+    ts = fixture["timestamp_ms"].astype("int64")
+    assert int(ts.iloc[0]) == 1704067200000    # 2024-01-01T00:00:00Z
+    assert int(ts.iloc[-1]) == 1787760000000   # 2026-08-26T16:00:00Z
+    assert set(np.diff(ts.to_numpy())) == {14_400_000}   # BTCUSDT 4H
+
+
+def test_E06_evidence_is_protected_from_eol_normalisation():
+    """C: .gitattributes must disable EOL conversion for both artifacts.
+
+    The repo runs core.autocrlf=true and the Pine source is 315 CRLF lines, so
+    without `-text` git would store the LF-normalised blob and a Linux checkout
+    would hash to a different value — the claim would break on CI, and silently
+    become non-reproducible from a clone.
+    """
+    attrs = (_EVIDENCE / ".gitattributes")
+    assert attrs.exists(), "research/reference/mutanabby/.gitattributes missing"
+    body = attrs.read_text(encoding="utf-8")
+    assert "source/** -text" in body
+    assert "fixture/** -text" in body
 
 
 @pytest.fixture(scope="module")

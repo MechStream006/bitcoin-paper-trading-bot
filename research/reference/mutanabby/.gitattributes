@@ -1,0 +1,11 @@
+# Evidence artifacts: store and check out byte-for-byte, everywhere.
+#
+# The repo runs core.autocrlf=true. Without this, git would normalise the Pine
+# source (315 CRLF lines) to LF in the blob, so a Linux checkout would hash to
+# cb94ea08... instead of 75f1914a... and the integrity test would fail on CI --
+# and, worse, the equivalence claim would no longer be reproducible from the
+# repository. -text disables all EOL conversion for these paths.
+#
+# Scoped to this directory deliberately: repo-wide EOL behaviour is unchanged.
+source/** -text
+fixture/** -text
