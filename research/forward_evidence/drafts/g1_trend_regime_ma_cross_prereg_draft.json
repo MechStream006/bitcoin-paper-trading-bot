@@ -1,0 +1,376 @@
+{
+  "schema_version": 1,
+  "version": "1.0.0-draft",
+  "signal_id": "g1_trend_regime_ma_cross",
+  "status": "SPECIFICATION_FROZEN_NOT_ADMITTED",
+  "status_note": "Gate 6A.15. Specification freeze only. NOT registered, NOT implemented, NOT wired, NOT collecting, NOT deployed. Deliberately placed in drafts/ so no loader can mistake it for an active pre-registration. Becomes hash-pinned only when the decision function is written at the implementation gate.",
+  "pre_registration_date": "2026-08-27T00:00:00+00:00",
+  "human_readable_specification": "docs/research/g1_trend_regime_ma_cross_6a15_specification.md",
+  "gate_trail": [
+    "Phase B battery — family evaluated, run_kind=discovery, verdict Weak",
+    "2026-06-13 — admitted candidate, role feature, on the Feature gate",
+    "6A.14-PRE / 6A.14 — g5_trend_4h rejected for collection; trend branch falls back to this candidate",
+    "6A.15-PRE — clone screen: max |r| 0.6030, VIF 1.882, no pair >= 0.70, admissible",
+    "6A.15 — specification frozen (this document)"
+  ],
+
+  "primary_source": {
+    "exists": false,
+    "note": "There is NO external primary source. This candidate is a platform-native construct that entered the registry through the Phase B battery. Nothing in this specification may be presented as source-derived. The origin of record is research/evidence/signals.py GROUP1 SignalSpec 'Trend Regime (MA cross)'."
+  },
+
+  "artifact_hashes": {
+    "signals.py": "85644baf6e737f060016098a8907c0d7a6e49004aaf9afe328a45440a85e87b7",
+    "engine.py": "aa2cb34fc9793b81466f253065b5a0f7791cd096b58d95e9dd991fdb1ce4ffdb",
+    "governance.py": "a3759079fc909f88657b1138004704947befec775dc10090bb09d7a16af15c21",
+    "analyze_mtf_independence.py": "eb874c65370d0ebd3bf09cb3ddc1687fa31162c6b062cc56d22d83de661a020b",
+    "runner_base.py": "a96fe714c7a92576fbe062ce9591359313748384ec69799f12b89a68473c3094",
+    "run_daily.py": "e1eeb42bf2f79e227efedda3e081be93c2ed5f3cf66d07cab910a309cd64a960",
+    "run_date_policy.py": "d89599e08fb9b01de09ee27bd6d1ee60cd6c7f941d09c24e786a123167c15dc6",
+    "schema_forward.sql": "c7111f9eecc292b7dc9de460fb3913ae79b3dcd81b7eb8346d2476a4943002d5",
+    "hash_note": "SHA-256 of LF-normalised bytes (CRLF->LF), project convention pre_reg_guard._sha256_lf == receipts.sha256_lf. Full digests, untruncated. signals.py and engine.py match the values recorded in the g2_funding_level pre-registration, i.e. the collecting families were screened against these exact definitions."
+  },
+
+  "hypothesis": {
+    "tag": "PLATFORM-ORIGIN",
+    "frozen_at": "registry entry, 2026-06-13; restated unchanged at 6A.15",
+    "statement": "When a fast moving average leads a slow moving average, price momentum tends to persist.",
+    "direction": "long_short",
+    "mapping": "momentum",
+    "expected_sign": "positive mean forward return while SMA(20) > SMA(100) (long); negative forward return while SMA(20) < SMA(100), so a short position earns positive return",
+    "mechanism": "trend/momentum persistence",
+    "null_hypothesis": "7-day forward BTC returns are identically distributed across the SMA(20)>SMA(100) and SMA(20)<SMA(100) states; the MA-cross state carries no directional information.",
+    "falsification": "Wrong if fast-above-slow days are not followed by relative strength and fast-below-slow days not by relative weakness. The direction is frozen and may not be flipped on a negative result.",
+    "role": "feature",
+    "role_note": "Role feature, set in registry.yaml on 2026-06-13 and NOT reopened here. Edge-ineligible: recorded battery sharpe 0.2337 < candidate.edge.min_sharpe 0.30.",
+    "rationale_of_record": "Fast/slow SMA crossover as a trend-persistence filter; tests whether MA-cross structure adds information beyond the SMA200 slope regime."
+  },
+
+  "function_spec": {
+    "name": "Trend Regime (MA cross)",
+    "version": "1.0.0-draft",
+    "signal_class": "trend-regime long/short",
+    "frozen_definition": "research/evidence/signals.py :: sig_trend_regime(m, fast=20, slow=100)",
+    "decision_function_file": null,
+    "decision_function_hash": null,
+    "hash_note": "NOT IMPLEMENTED. File and hash are assigned at the implementation gate and only then does this become hash-pinned.",
+    "implementation_obligation": "The standalone decision function must accept a plain pd.Series (platform convention, stated verbatim in decision_function_g1_market_regime.py: do NOT import sig_market_regime from signals.py) and must be PROVEN behaviourally identical to sig_trend_regime(m, 20, 100) on the same close series by an equivalence test. Reimplementation is a hashing requirement, never a licence to reinterpret.",
+
+    "data_source": {
+      "instrument": "Binance BTCUSDT spot",
+      "tag": "PLATFORM-CONV",
+      "parquet_dir": "research/data/raw/spot/BTCUSDT",
+      "layout": "year=YYYY/month=MM/data.parquet",
+      "loader": "runner_base.load_daily_closes",
+      "aux_series_used": false,
+      "aux_note": "Single-input signal. run_signal takes the unmodified close-only path; aux_series stays None."
+    },
+    "sampling": {
+      "bar_interval_minutes": 1,
+      "daily_close_rule": "last 1m bar of the UTC calendar day (resample('D').last())",
+      "tag": "PLATFORM-CONV"
+    },
+    "day_boundary": { "convention": "UTC calendar day", "tag": "PLATFORM-CONV" },
+    "completeness": {
+      "required_bars_per_day": 1440,
+      "tag": "PLATFORM-CONV",
+      "convention_source": "MIN_DAILY_BARS, gate 6B.1",
+      "incomplete_final_day_behaviour": "DataUnavailableError; never computed partially",
+      "interior_short_day_behaviour": "NOT guarded — _assert_final_day_complete checks only the final day. The 7 known short days in the real corpus (2021-02-11, 2021-03-06, 2021-04-20, 2021-04-25, 2021-08-13, 2021-09-29, 2023-03-24) all predate the first forward run_date 2026-06-15 and cannot affect a forward observation."
+    },
+
+    "parameters": {
+      "FAST": 20,
+      "SLOW": 100,
+      "HOLD_DAYS": 7,
+      "MIN_HISTORY": 100,
+      "ANN": 365.0,
+      "COST_BPS": 15.0
+    },
+    "parameter_tags": {
+      "FAST": "PLATFORM-ORIGIN (frozen) — SignalSpec.params in signals.py; the exact battery parameter and the one screened at 6A.15-PRE",
+      "SLOW": "PLATFORM-ORIGIN (frozen) — as above",
+      "HOLD_DAYS": "PLATFORM-CONV — unanimous 7 across all seven decision functions",
+      "MIN_HISTORY": "DERIVED — equals SLOW; the exact minimum at which the undefined-MA branch is unreachable. Not padded, not chosen.",
+      "ANN": "PLATFORM-CONV",
+      "COST_BPS": "PLATFORM-CONV — unanimous 15.0 in collection_config.yaml"
+    },
+    "platform_new_choices": [],
+    "platform_new_note": "EMPTY, and that is the point: no PLATFORM-NEW choice was required. Every value is either the frozen candidate's own, an existing platform convention, or mechanically derived. Unlike C3, this gate had nothing left to invent.",
+
+    "entry_condition_long": "SMA(20) > SMA(100) on daily close",
+    "entry_condition_short": "SMA(20) < SMA(100) on daily close",
+    "flat_condition": "SMA(20) exactly equals SMA(100) (measure-zero), or either moving average undefined — the latter made unreachable by MIN_HISTORY",
+    "direction": "long_short",
+    "output_alphabet": [-1.0, 0.0, 1.0],
+    "transformation": "NONE. The position IS the raw signal. No shift, no re-signing, no threshold, no scaling.",
+    "hold_days": 7,
+    "exit_rule": "scheduled exit at entry_date + 7 calendar days; no early exit; signal re-evaluated daily but a new trade opens only when no trade is open",
+    "trade_counting_definition": "one entry-to-exit pair is one trade; at most one open trade at a time",
+    "entry_price": "spot close of run_date",
+    "exit_price": "spot close of planned_exit_date",
+
+    "warm_up_semantics": {
+      "MIN_HISTORY": 100,
+      "derivation": "rolling(SLOW, min_periods=SLOW) first yields a non-NaN value on row SLOW; SMA(FAST) is satisfied far earlier. MIN_HISTORY = SLOW = 100 is therefore the exact minimum.",
+      "enforced_twice": [
+        "load_daily_closes raises DataUnavailableError when len(daily) < min_rows",
+        "run_signal re-checks len(closes_to_date) < min_history at its own boundary"
+      ],
+      "warm_up_is_never_observed": "A run with insufficient history writes no run_log row at all, not a flat one.",
+      "verified": "V3.4 — zero undefined finals over every series length 100..400"
+    },
+
+    "declared_limitations": [
+      {
+        "id": "L1",
+        "title": "Rolling windows are row-indexed, not calendar-indexed",
+        "detail": "load_daily_closes ends in .dropna(), so the series holds only days present in the corpus. rolling(100) counts ROWS: a corpus gap makes the 100-row window silently span more than 100 calendar days.",
+        "scope": "Shared loader property; identical for every collecting family including g1_market_regime_sma200's SMA200.",
+        "resolution": "INHERITED DELIBERATELY, not resolved here. Changing it for one family would diverge this candidate from the platform."
+      },
+      {
+        "id": "L2",
+        "title": "Short interior days pass through unguarded",
+        "detail": "See function_spec.completeness.interior_short_day_behaviour.",
+        "resolution": "Declared; cannot affect a forward observation."
+      }
+    ],
+
+    "state_or_recursion_required": false,
+    "repaint_risk": "none",
+    "lockbox_status": "not spent by this signal"
+  },
+
+  "provenance_contract": {
+    "input_identity_fn": "runner_base.resolve_input_identity(parquet_dir, run_date, min_rows=MIN_HISTORY, role='closes')",
+    "input_digest_convention": "RAW chunked SHA-256 (storage/manifest.py _sha256) per Parquet partition — NOT _sha256_lf, which normalises CRLF->LF and would corrupt a binary digest",
+    "recorded_fields_per_partition": ["role", "dataset", "partition", "parquet_sha256", "rows"],
+    "framework_identity_fn": "runner_base.framework_hash()",
+    "framework_files": ["runner_base.py", "run_daily.py", "run_date_policy.py"],
+    "persisted_to": ["run_provenance (PK run_id)", "run_inputs"],
+    "fail_closed": "resolve_input_identity raises DataUnavailableError if a partition cannot be hashed; framework_hash raises if a framework file is missing. An unidentifiable input must fail, never be recorded as identified.",
+    "governance_source": "gate 6B.6 (defects B-04, B-04a)",
+    "run_date_policy": {
+      "file": "research/forward_evidence/run_date_policy.yaml",
+      "lockbox_window": ["2025-06-01", "2026-05-31"],
+      "immutable_gap": ["2026-07-18", "2026-08-05"],
+      "backfill_horizon_days": 14,
+      "note": "Lockbox and immutable-gap run_dates are refused UNCONDITIONALLY, ahead of any authorization branch (gate 6B.3)."
+    }
+  },
+
+  "integrity_rules": {
+    "no_lookahead": "closes filtered to run_date inclusive before any computation (run_signal: closes[closes.index <= run_date]); all rolling windows trailing-only, no center=, no negative shift",
+    "completed_observations_only": true,
+    "missing_data_policy": "DataUnavailableError -> transient skip; NEVER recorded as a flat decision (gate 6B.1 defect B-02)",
+    "manufactured_flat_hazard": "CONFIRMED and CLOSED. Verified V5.1: a NaN close at run_date makes the frozen definition return 0.0 — it cannot distinguish absent data from a genuine flat view. Every guard therefore sits upstream at the runner/loader boundary, not in the decision function.",
+    "fail_closed_surface": [
+      "run_date absent from close series -> DataUnavailableError",
+      "close present but NaN at run_date -> DataUnavailableError (explicit B-02 guard)",
+      "final UTC day < 1440 1m bars -> DataUnavailableError",
+      "history < MIN_HISTORY -> DataUnavailableError (loader AND runner)",
+      "Parquet partition unhashable -> DataUnavailableError",
+      "framework file missing -> raises, no fallback identity",
+      "run_date in lockbox or immutable gap -> refused unconditionally"
+    ],
+    "interior_gap_note": "Interior corpus gaps cannot produce a NaN moving average: the loader drops missing days rather than delivering them as NaN. The manufactured-FLAT surface is therefore exactly two cases, both closed.",
+    "incomplete_final_day_policy": "rejected by the 1440-bar guard (gate 6B.1 defect B-01)",
+    "fn_hash_enforcement": "verify_fn_hash aborts any run whose decision-function bytes drift; a fn_hash_violation row is recorded. Active from the moment the file exists."
+  },
+
+  "return_and_cost_convention": {
+    "adopted_spec_hash": "57ce016e51a0d55097e8fb38396f8628b15a8532ada9af1eb6671a99d75a2736",
+    "binding_id": "forward_evidence.runner_base.trade_returns_view",
+    "phase": "Registered",
+    "definition_name": "trade_forward_return",
+    "horizon_days": 7,
+    "horizon_governance": "calendar_span",
+    "fill_convention": "close-to-close per trade: entry_close_price and exit_close_price, both spot close",
+    "gross_return": "(exit_close_price / entry_close_price - 1.0) * direction",
+    "net_return": "gross_return - cost_bps / 10000.0",
+    "cost_convention": "flat cost_bps per trade, charged ONCE",
+    "direction_convention": "explicit +-1 column, CHECK-constrained — supports both long and short",
+    "maturity_rule": "matures when trade_exits is written for the entry (UNIQUE(entry_id)); the trade_returns VIEW then serves the computed columns",
+    "served_by": "trade_returns view in schema_forward.sql",
+    "tag": "PLATFORM-CONV",
+    "rejected_specifications": [
+      {
+        "spec_hash_prefix": "89869c534200",
+        "binding_id": "forward_evidence.daily_job.close_trade",
+        "reason": "LONG-ONLY and hardcoded (direction = 1). This candidate is long_short; adopting it would silently discard every short trade."
+      },
+      {
+        "spec_hash_prefix": "0db88b4fc0dd",
+        "binding_id": "research_evidence.engine.net_daily",
+        "reason": "Offline battery convention: per-turnover cost on every daily position change, horizon 1 day. It is the convention under which this family's recorded in-sample statistics were produced, and gate 6B.5 established it as a deliberately distinct registered Specification, not a defect."
+      }
+    ],
+    "is_vs_forward_comparability": "NOT DIRECTLY COMPARABLE, declared explicitly. The Phase B SignalSpec for 'Trend Regime (MA cross)' sets no hold_days and therefore inherited engine.py's default hold_days = 1; forward collection uses HOLD_DAYS = 7. Different hold, different cost convention, different horizon. Any future comparison must say so."
+  },
+
+  "independence": {
+    "measured_at": "Gate 6A.15-PRE",
+    "slice": "train only, 1612 rows, 2021-01-01..2025-05-31; 365 lockbox rows excluded",
+    "methodology": "analyze_mtf_independence.py Test 1 (_arr alignment, Pearson on positions, both-std>0 guard) plus governance.vif_table / continuous_correlation / high_pairs",
+    "maxcorr_collecting": 0.6030,
+    "worst_collecting_comparator": "g1_market_regime_sma200",
+    "maxcorr_overall": 0.6030,
+    "worst_overall_comparator": "g1_market_regime_sma200",
+    "vif": 1.882,
+    "r2_on_collecting_set": 0.469,
+    "unexplained_fraction": 0.531,
+    "high_pairs_at_0_70": [],
+    "clone_bar": 0.90,
+    "clone_result": "PASS",
+    "collecting_bar": 0.70,
+    "collecting_result": "PASS",
+    "verdict": "ADMISSIBLE FOR COLLECTION",
+    "tier2_collecting": {
+      "g1_market_regime_sma200": 0.6030,
+      "g2_funding_level": -0.4581,
+      "g3_momentum_tsmom": 0.3559,
+      "g3_atr_expansion": 0.2453,
+      "ivrv_vrp_spread": 0.1379,
+      "h5_vol_regime": 0.0790
+    },
+    "tier1_other_existing": {
+      "trend_1d_50_200": 0.5358,
+      "trend_alignment": 0.4586,
+      "breakout_regime": 0.4464,
+      "basis_level": -0.3966,
+      "trend_4h_50_200": 0.3692,
+      "vol_of_vol": 0.3598,
+      "momentum_30": 0.3559,
+      "trend_continuation": 0.3126,
+      "mean_reversion_20": -0.2989,
+      "implied_vol_regime": -0.1325,
+      "range_regime": -0.0484,
+      "trend_1h_50_200": 0.0476,
+      "funding_acceleration": 0.0142
+    },
+    "activity": { "active_rows": 1513, "total_rows": 1612, "long": 804, "short": 709 },
+    "context_new_maximum": "This would become the HIGHEST pair in the collecting set. The 15 existing pairs among the collecting six top out at 0.4432 (g3_momentum_tsmom x g3_atr_expansion). 0.6030 clears 0.70 with 0.097 of headroom — comfortable, but a new maximum, not a marginal addition.",
+    "context_vs_6a14_rejection": "g5_trend_4h was blocked at 0.7380 against a collecting family. This candidate's relationship to the collecting set is materially weaker, and its correlation with g5_trend_4h itself was 0.3692 — it is not a repackaging of the rejected family.",
+    "registry_weakness_resolved": "The registry entry's third weakness reads 'Likely correlated with g1_market_regime_sma200; VIF check needed.' 6A.15-PRE performed that check: r = +0.6030, VIF 1.882. registry.yaml still carries the stale wording because this gate does not write to the registry."
+  },
+
+  "evidence_basis": {
+    "retrieved_not_computed": "Every value below was READ from the existing ledger run abc6078e-0dce-4c89-b73f-c1aa9467e795. NOTHING was recomputed at gate 6A.15-PRE or 6A.15.",
+    "pinned_run": "abc6078e-0dce-4c89-b73f-c1aa9467e795",
+    "run_kind": "discovery",
+    "provenance": "offline-corpus",
+    "engine_version": "phase_b_v1",
+    "window": ["2021-01-01", "2026-05-31"],
+    "corpus": "Binance BTCUSDT spot 1m",
+    "n_trials": 34,
+    "sharpe": 0.2337039738954391,
+    "is_sharpe": 0.022395065718374733,
+    "oos_sharpe": 0.8690137697000508,
+    "n_trades": 23,
+    "sens_pass_frac": 1.0,
+    "wf_pass_frac": 0.8,
+    "loo_sign_consistency": 1.0,
+    "breakeven_cost_bps": 100,
+    "stability_score": 0.95,
+    "cagr_pct": -2.0229459137037886,
+    "max_dd_pct": 60.49796251565235,
+    "struct_sign_ok": false,
+    "oos_sign_ok": true,
+    "evidence_score": 59.2,
+    "verdict": "Weak",
+    "dsr_prob": null,
+    "bh_p": null,
+    "dsr_bh_note": "BOTH NULL — never computed for this family, unlike g1_market_regime_sma200 (0.2788 / 0.1305) or H-IVRV (0.1646 / 0.2893). There is no in-sample statistical prior of any kind here.",
+    "gate_results": [
+      { "gate_code": "E3_KNIFE_EDGE", "role": null, "passed": true, "observed": 1.0, "threshold": 0.4 },
+      { "gate_code": "B_SENSITIVITY", "role": "feature", "passed": true, "observed": 1.0, "threshold": 0.6 },
+      { "gate_code": "B_OOS_POSITIVE", "role": "feature", "passed": true, "observed": 0.8690137697000508, "threshold": ">0" }
+    ],
+    "edge_ineligible": "sharpe 0.2337 < candidate.edge.min_sharpe 0.30. Role stays feature — a restatement of the 2026-06-13 registry decision, not a new determination.",
+    "sensitivity_variants": [
+      { "fast": 10, "slow": 50 },
+      { "fast": 50, "slow": 200 },
+      { "fast": 30, "slow": 150 },
+      { "fast": 20, "slow": 80 }
+    ],
+    "sensitivity_variants_note": "Restated from the battery's own SignalSpec.variants. NOT re-chosen at this gate, and NOT re-run."
+  },
+
+  "known_risks": [
+    { "id": "R1", "risk": "STRUCTURAL-EVENT SIGN NOT PRESERVED (struct_sign_ok = false). Registry records clean Sharpe -0.13: the in-sample result does not survive removal of major structural events. The family's most serious recorded weakness. Not a candidate-gate criterion and does not block collection, but the single most likely way forward evidence disappoints." },
+    { "id": "R2", "risk": "NO IN-SAMPLE DSR OR BH-p EXISTS. Both NULL on the pinned run. Under section-16 R1, NULL is a hard failure — but the Validated gate is evaluated on FORWARD returns, so this does not block collection. It does mean there is no in-sample statistical prior." },
+    { "id": "R3", "risk": "LOW TRADE COUNT. 23 in-sample trades; n is small for a per-trade distribution. Already flagged in the registry." },
+    { "id": "R4", "risk": "PAIRWISE INDEPENDENCE MEASURED ON TRAIN POSITIONS, NOT FORWARD RETURNS. max_pairwise_r = 0.70 is enforced at Validated over forward returns (Proposal 1, implemented 2026-07-19). The 0.6030 recorded here does NOT guarantee the forward-return pair clears 0.70 against g1_market_regime_sma200. A real promotion risk, not a resolved matter." },
+    { "id": "R5", "risk": "TWO TREND FAMILIES COLLECTING SIMULTANEOUSLY. Permitted under the 6A.14 determination and quantified at 0.6030 — recorded so the choice is visible rather than incidental." }
+  ],
+
+  "unresolved_items": [
+    {
+      "id": "U-1",
+      "title": "No family-specific observation floor is set",
+      "blocking_this_freeze": false,
+      "detail": "g1_market_regime_sma200 carries observation_floors / promotion_criteria (minimum trades, regime-coverage counts). No equivalent is set here, deliberately: inventing per-family thresholds at a specification gate would introduce unpre-registered free parameters chosen with knowledge of the recorded evidence_basis results.",
+      "governing_defaults": "thresholds.yaml min_active_days 60, min_calendar_years 2, min_dsr_prob 0.50, max_bh_p 0.10, max_pairwise_r 0.70 apply and are sufficient to gate promotion.",
+      "for_gate": "A registration gate may set family-specific floors; if it does, they must be fixed BEFORE any forward observation exists."
+    },
+    {
+      "id": "U-2",
+      "title": "Registry carries a stale independence weakness",
+      "blocking_this_freeze": false,
+      "detail": "Weakness 3 says 'VIF check needed'; 6A.15-PRE performed it. Correcting it requires a registry.yaml write, which this gate forbids.",
+      "for_gate": "registration gate"
+    }
+  ],
+
+  "governance": {
+    "n_trials": 34,
+    "n_trials_note": "FROZEN. This family was inside the original Phase B battery and its pinned run already records n_trials = 34. This candidate does not reopen the denominator.",
+    "validated_gate": {
+      "role": "feature",
+      "min_dsr_prob": 0.5,
+      "max_bh_p": 0.1,
+      "max_pairwise_r": 0.7,
+      "requires_non_offline_provenance": true
+    },
+    "candidate_gate": { "max_clone_r": 0.9, "edge_min_sharpe": 0.3 },
+    "clone_methodology": "analyze_mtf_independence.py Test 1 (Pearson on positions, _arr alignment, std>0 guard) plus governance.vif_table",
+    "collecting_family_bar": "6A.14 determination — a candidate whose |r| vs a CURRENTLY COLLECTING family reaches 0.70 is inadmissible for collection. This candidate clears it at 0.6030.",
+    "lockbox": {
+      "window": ["2025-06-01", "2026-05-31"],
+      "spent": false,
+      "read_by_gate_6A15_PRE": false,
+      "read_by_gate_6A15": false
+    },
+    "artifacts_modified": "NONE. registry.yaml, thresholds.yaml, collection_config.yaml, signals.py, engine.py, runner_base.py, run_daily.py, ledger.db and label_store.db were all read-only at this gate.",
+    "production": "unmodified; nothing deployed",
+    "performance_statistics_computed": "NONE at 6A.15-PRE or 6A.15"
+  },
+
+  "adversarial_verification": {
+    "run_at": "Gate 6A.15",
+    "result": "40/40 checks passed",
+    "groups": {
+      "V1_frozen_parameters": "4/4 — defaults are 20/100; only fast/slow parameterise the computation; the body introduces no constant beyond the 0.0/1.0 position literals; the frozen values are the ones 6A.15-PRE screened",
+      "V2_raw_polarity": "5/5 — sustained uptrend yields +1, downtrend -1, +1 coincides EXACTLY with SMA(20)>SMA(100) (no offset, no inversion), alphabet is exactly {-1,0,+1}, no transformation applied",
+      "V3_min_history": "5/5 — decidable at exactly 100 rows; NaN at 99 (the manufactured-FLAT branch demonstrated firing); zero undefined finals over lengths 100..400; MIN_HISTORY = SLOW is the exact minimum",
+      "V4_no_lookahead": "5/5 — position at t unchanged when the future is truncated; unchanged when EVERY future close is multiplied by 5; sensitivity to close[t] confirmed so the guard is not vacuous; trailing-only windows; runner filters to run_date before computing",
+      "V5_missing_data_fail_closed": "8/8 — hazard CONFIRMED at the function level then proven closed at the runner boundary; the B-02 guard, the absent-run_date guard, the 1440-bar guard and the min_history guard (loader AND runner) all present; interior gaps dropped not NaN; DataUnavailableError never written to run_log",
+      "V6_cost_hold_consistency": "7/7 — spec 57ce016e51a0 Registered, horizon_days 7 == HOLD_DAYS 7, cost charged once, short supported; the long-only spec correctly NOT adopted; cost_bps 15.0 unanimous across 6 configured signals; HOLD_DAYS 7 unanimous across 7 decision functions",
+      "V7_lockbox": "3/3 — lockbox window intact in policy; no lockbox-dated data read; no performance keyword present anywhere in the verification",
+      "V8_protected_artifacts": "3/3 — zero tracked modifications to any protected artifact; signals.py hash unchanged from 6A.15-PRE; no decision function created"
+    },
+    "test_construction_defects_found_and_fixed": [
+      "V1.3 tokenised the def line, which legitimately carries 20/100 — narrowed to the function body",
+      "V5.2 searched for a message string that is split across two source lines — matched both halves; the guard itself was present and correct all along",
+      "V7.3 scanned its own keyword list and so could never pass — excluded its own definition, and added V5.8 (the runner's independent min_history re-check) discovered while reading the guard"
+    ]
+  },
+
+  "notes": [
+    "This candidate is ALREADY registered as state=candidate, role=feature, pinned_run=abc6078e-0dce-4c89-b73f-c1aa9467e795. Gate 6A.15 does not admit it, promote it, or alter its registry entry in any way — it freezes the forward-collection specification that does not yet exist for it.",
+    "Not present in collection_config.yaml. Not wired into run_daily.py. No decision function file exists. Nothing is deployed.",
+    "Do not modify sig_trend_regime or the 20/100 construction after this freeze. Parameter changes require a version bump and a new pre-registration.",
+    "The specification is frozen but NOT hash-pinned. It becomes hash-pinned when the decision function is written and hashed at the implementation gate."
+  ]
+}
