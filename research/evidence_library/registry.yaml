@@ -231,7 +231,7 @@ g1_trend_regime_ma_cross:
   weaknesses:
     - "Structural-event sign NOT preserved (clean Sharpe -0.13); edge collapses around major BTC events"
     - "Only 23 trades; n too low for robust per-trade distribution"
-    - "Likely correlated with g1_market_regime_sma200; VIF check needed"
+    - "Correlated with g1_market_regime_sma200: |r| = 0.6030 on train positions (VIF 1.882; 53.1% unexplained). Measured at Gate 6A.15-PRE. Clears max_clone_r 0.90 and the 0.70 collecting-family bar, and would become the highest pair in the collecting set (existing max 0.4432). Forward-return independence is NOT established by this — max_pairwise_r is enforced on forward returns at Validated."
   dq_reasons: []
   supersedes: null
   superseded_by: null

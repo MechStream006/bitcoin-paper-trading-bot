@@ -3,7 +3,7 @@
   "version": "1.0.0-draft",
   "signal_id": "g1_trend_regime_ma_cross",
   "status": "SPECIFICATION_FROZEN_NOT_ADMITTED",
-  "status_note": "Gates 6A.15 (specification freeze) and 6A.16 (implementation + validation). The decision function now exists and is hash-pinned, but the candidate is still NOT registered, NOT wired into collection_config.yaml or run_daily.py, NOT collecting and NOT deployed. Deliberately kept in drafts/ so no loader can mistake it for an active pre-registration.",
+  "status_note": "Gates 6A.15 (freeze), 6A.16 (implementation) and 6A.17 (admission). ADMITTED for forward collection at 6A.17 (see docs/governance/g1_trend_regime_admission_decision.md), but still NOT wired into collection_config.yaml or run_daily.py, NOT collecting and NOT deployed. The `status` field below describes THIS ARTIFACT, not the governance decision: it stays SPECIFICATION_FROZEN_NOT_ADMITTED because the file is still a draft. It becomes an active pre-registration (renamed out of drafts/, version 1.0.0) at the wiring gate, matching pre_registration_g2_funding_level.json.",
   "pre_registration_date": "2026-08-27T00:00:00+00:00",
   "human_readable_specification": "docs/research/g1_trend_regime_ma_cross_6a15_specification.md",
   "gate_trail": [
@@ -12,7 +12,8 @@
     "6A.14-PRE / 6A.14 — g5_trend_4h rejected for collection; trend branch falls back to this candidate",
     "6A.15-PRE — clone screen: max |r| 0.6030, VIF 1.882, no pair >= 0.70, admissible",
     "6A.15 — specification frozen (this document)",
-    "6A.16 — implementation + validation: standalone decision function written, proven behaviourally identical to sig_trend_regime(20,100), hash-pinned"
+    "6A.16 — implementation + validation: standalone decision function written, proven behaviourally identical to sig_trend_regime(20,100), hash-pinned",
+    "6A.17 — ADMITTED for forward collection; U-1 and U-2 resolved, U-3 opened"
   ],
 
   "primary_source": {
@@ -337,6 +338,40 @@
     "hold_and_cost_are_metadata": "HOLD_DAYS and the 15 bps cost appear in the hashed file as declared constants and documentation only; compute_signal references neither (test_P10). No shared infrastructure was altered to accommodate them.",
     "shared_infrastructure_unmodified": "signals.py, engine.py, runner_base.py, run_daily.py and run_date_policy.py re-hashed at 6A.16 and byte-identical to artifact_hashes (test_P07). No runner and no loader was added (test_P05).",
     "fail_closed_ownership": "compute_signal performs no loading, no validation and raises nothing (test_U18). The manufactured-FLAT branch is retained VERBATIM from the frozen contract and rendered unreachable from outside by the loader's and the runner's independent MIN_HISTORY guards plus the runner's B-02 NaN guard (tests U12/U13/U14/U15)."
+  },
+
+  "admission": {
+    "gate": "6A.17",
+    "date": "2026-08-27T00:00:00+00:00",
+    "decision": "ADMITTED for forward collection",
+    "record": "docs/governance/g1_trend_regime_admission_decision.md",
+
+    "what_admission_is_here": "There is no `admitted` lifecycle state and no registry field marking a family as collecting — g2_funding_level has been collecting since 2026-08-26 with preregistration=null and a schema-identical entry. Collection is what happens BETWEEN candidate and validated, so this decision is a governance judgement recorded in prose. Its operative effect is that the wiring gate is unblocked.",
+    "criteria_applied": "check_candidate_gate re-evaluated on the RECORDED pinned run against current thresholds: E3_KNIFE_EDGE 1.00 >= 0.40, B_SENSITIVITY 1.00 >= 0.60, B_OOS_POSITIVE 0.8690 > 0 — identical to the three gate_results already in the ledger. check_hard_dq: (False, []). Clone 0.6030 < 0.90; collecting-family bar 0.6030 < 0.70. No new statistic was generated.",
+    "feature_path_scope": "min_sharpe, min_wf_agreement, min_loo_consistency, min_breakeven_bps, structural_sign_required, min_active_days, min_calendar_years and min_regimes all live under thresholds.yaml candidate.EDGE, and check_candidate_gate applies that block only if 'edge' in roles. This family is role=['feature'], so R1 (struct_sign_ok=False) and R3 (23 IS trades) are not criteria that apply to it — which is how it was admitted to candidacy on 2026-06-13 with struct_sign_ok already False.",
+    "clone_is_a_pass_not_a_case": "The 0.6030 result establishes that this family is not a duplicate. It establishes nothing about whether the signal works, and no part of this admission rests on it as evidence of merit.",
+    "r2_precedent": "g2_funding_level, the most recent admission (2026-08-26), was admitted to collection with dsr_prob=null and bh_p=null, deferring both to 'computed at the FROZEN n_trials=34 on forward returns'. NULL governance stats are not a bar to collection; they mean there is no in-sample statistical prior.",
+    "risks_carried_forward": "R1, R2, R3 and R4 are all carried unchanged into the promotion assessment, where they ARE adjudicated. R4 in particular — 0.6030 is a train-slice POSITION correlation and does not establish forward-return independence — is now recorded in the registry weakness itself so it cannot be lost.",
+
+    "U1_resolution": {
+      "question": "governance floors unchanged, or a family-specific threshold?",
+      "finding": "thresholds.yaml provides NO observation floor for a feature-role family: min_active_days and min_calendar_years sit under candidate.edge only. 'Floors unchanged' would leave this family with no floor at all, which is why every collecting family sets its own.",
+      "decision": "Adopt the platform-precedent floor. Introduce no tuned number. thresholds.yaml is NOT modified.",
+      "minimum_trades": 30,
+      "minimum_trades_basis": "Identical in g1_market_regime_sma200 and g2_funding_level, both feature-role. Not chosen for this family.",
+      "minimum_both_long_and_short_trades": true,
+      "direction_coverage_basis": "Implied by the frozen long_short direction; supported by the already-recorded 6A.15-PRE train activity split of 804 long / 709 short. A coverage condition, not a threshold.",
+      "deliberately_not_set": "minimum_calendar_months_before_assessment — genuinely family-specific and genuinely divergent between precedents (60 for g1_market_regime_sma200, 12 for g2_funding_level). Choosing requires a trade-frequency derivation, which would be introducing a threshold from a derived quantity. Deferred as U-3."
+    },
+    "U2_resolution": {
+      "old": "Likely correlated with g1_market_regime_sma200; VIF check needed",
+      "action": "Replaced in registry.yaml with the measured 6A.15-PRE result. Deliberately NOT deleted: the measurement resolves the QUESTION, not the CONCERN.",
+      "authorized_scope": "The only registry write at this gate. state, state_since, state_reason, role, pinned_run and preregistration are all untouched — none of them represents admission, and preregistration must keep pointing at nothing while this file is still a draft."
+    },
+
+    "U3_open": "minimum_calendar_months_before_assessment MUST be fixed at the wiring gate, before the first observation is collected. After that it can never be set honestly.",
+    "governance_gap_surfaced": "The 6A.14 collecting-family determination (a candidate whose |r| against a currently-collecting family reaches 0.70 is inadmissible for collection, established when g5_trend_4h was rejected at 0.7380) has NO durable record in docs/governance/. This admission applies and depends on that rule. Writing 6A.14's record retroactively is not this gate's authority; the gap is recorded so a gate that owns it can close it.",
+    "not_authorized_by_this_gate": ["collection_config.yaml", "run_daily.py", "deployment", "any change to the frozen 6A.15 specification or the 6A.16 implementation", "thresholds.yaml"]
   },
 
   "governance": {
