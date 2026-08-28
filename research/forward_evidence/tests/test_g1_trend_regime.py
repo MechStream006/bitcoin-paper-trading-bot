@@ -674,10 +674,28 @@ class TestProtected:
             assert active[k] == draft[k], k
 
     def test_P06_registry_entry_state_is_untouched(self):
+        """The registry entry must keep the admission state 6A.17 set.
+
+        Dockerfile.research deliberately ships no evidence_library -- the CI
+        job's INV-1 step greps for `*/evidence_library*` and FAILS the build if
+        any is found, so its absence there is the invariant working, not a
+        broken checkout. Skip only for that case.
+
+        The whole directory missing is the packaged-image shape. The directory
+        present but registry.yaml missing is an anomaly and stays a hard
+        failure -- a blanket exists() skip would have turned an accidentally
+        deleted or renamed registry into a green run.
+        """
         import yaml
-        reg = yaml.safe_load(
-            (_RESEARCH / "evidence_library" / "registry.yaml").read_text(
-                encoding="utf-8"))
+        lib = _RESEARCH / "evidence_library"
+        reg_path = lib / "registry.yaml"
+        if not lib.exists():
+            pytest.skip("evidence_library not present (Dockerfile.research "
+                        "excludes it by INV-1)")
+        assert reg_path.exists(), (
+            f"evidence_library exists but {reg_path.name} is missing -- this is "
+            "not the packaged-image case and must not be skipped")
+        reg = yaml.safe_load(reg_path.read_text(encoding="utf-8"))
         fams = reg.get("families", reg)
         e = fams["g1_trend_regime_ma_cross"]
         assert e["state"] == "candidate"
@@ -707,7 +725,22 @@ class TestProtected:
             assert _sha256_lf(path) == want, path.name
 
     def test_P08_gate_touched_no_file_outside_its_allowlist(self):
-        """Every tracked change in the working tree must belong to 6A.16."""
+        """Every tracked change in the working tree must belong to this
+        family's gates.
+
+        Requires an actual git working tree. Dockerfile.research ships neither
+        `.git` nor the git binary -- the image is a flat copy of the sources,
+        so "tracked change" has no meaning inside it. Skip only when the tree
+        itself is absent, and only for the two specific reasons; anything else
+        still fails.
+        """
+        import shutil
+        if not (_REPO / ".git").exists():
+            pytest.skip("no git working tree (Dockerfile.research ships a flat "
+                        "source copy, not a repository)")
+        if shutil.which("git") is None:
+            pytest.skip("git binary unavailable (not installed in "
+                        "Dockerfile.research)")
         allow = {
             # 6A.16
             "research/forward_evidence/decision_function_g1_trend_regime.py",
@@ -726,9 +759,11 @@ class TestProtected:
             "research/forward_evidence/tests/test_run_date_policy.py",
             "docs/governance/g1_trend_regime_wiring_record.md",
         }
-        out = subprocess.run(["git", "status", "--porcelain"], cwd=_REPO,
-                             capture_output=True, text=True).stdout
-        changed = {l[3:].strip().strip('"') for l in out.splitlines()
+        proc = subprocess.run(["git", "status", "--porcelain"], cwd=_REPO,
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, (
+            f"git status failed ({proc.returncode}): {proc.stderr.strip()}")
+        changed = {l[3:].strip().strip('"') for l in proc.stdout.splitlines()
                    if not l.startswith("??")}
         assert changed <= allow, changed - allow
 
