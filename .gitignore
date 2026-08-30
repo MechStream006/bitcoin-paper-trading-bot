@@ -37,6 +37,11 @@ research/evidence_library/ledger.db
 research/evidence_library/ledger.db-wal
 research/evidence_library/ledger.db-shm
 research/evidence_library/ledger.pre-*.db
+# Superseded local governance chain retired by GL-2, retained permanently as
+# the historical archive holding the ORIGINAL dataset.seal receipt. Immutable,
+# never pruned; off-host custody under BK3. See
+# docs/governance/gl3_ledger_reconciliation_record.md §2.
+research/evidence_library/ledger.superseded-local.*.db*
 
 # Feature Store registry/value-store DB — data populated by
 # migrate_evidence_engine_features.py, not code
