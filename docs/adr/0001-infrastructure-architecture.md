@@ -411,6 +411,15 @@ transfer). **This ADR extends its operational envelope; it does not redesign it.
 - **BK1.** The governance ledger is the only truly irreplaceable artifact.
   Market data is re-collectable; the corpus is re-ingestable; the hash-chained
   decision record is not.
+  **Canonical location (GL-2, 2026-08-28):**
+  `/opt/btcbot/research/evidence_library/ledger.db` on the production host is
+  the canonical governance ledger. The developer-workstation copy at
+  `research/evidence_library/ledger.db` is a byte-identical **replica**, not a
+  second authority: no governance act may be recorded solely on it, and it is
+  refreshed from production rather than merged with it (the two chains are
+  hash-linked and append-only, so a merge is structurally impossible). Decision
+  record: `docs/governance/gl2_ledger_canonicity_decision.md`; reconciliation
+  and archive custody: `docs/governance/gl3_ledger_reconciliation_record.md`.
 - **BK2.** Backups are worthless until a **restore drill** proves them. A
   quarterly drill on a clean host is mandatory: restore, then verify
   `receipt_ledger.verify_chain()` valid and `report.py --check` clean. A

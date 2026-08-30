@@ -211,9 +211,20 @@ python -c "import sys;sys.path.insert(0,'research/evidence_library');import rece
 ```
 
 **Pass condition:** `integrity_check: ok` **and** `verify_chain ok=True` with the
-expected receipt count (ledger 27 canonical / 26 production, feature 17,
-label 8). The chain check is the one that matters — bytes can survive while the
-chain does not.
+expected receipt count. The **canonical** governance ledger is the PRODUCTION
+copy, `/opt/btcbot/research/evidence_library/ledger.db` (GL-2,
+`docs/governance/gl2_ledger_canonicity_decision.md`). As of 2026-08-30 it holds
+**27 receipts**; the local working copy is a byte-identical replica of it, not a
+separate authority. Feature 17, label 8. The chain check is the one that matters
+— bytes can survive while the chain does not.
+
+> **Corrected 2026-08-30 (GL-3e).** This line previously read "ledger 27
+> canonical / 26 production", which named the LOCAL copy as canonical. GL-2
+> reversed that: production is canonical. The counts it quoted are also stale
+> — both copies now hold 27 receipts, after GL-3c added the
+> `attestation_basis`/`contract_version` columns and GL-3b appended the
+> `dataset.seal` re-attestation at seq 27. Use a live `verify_chain()` reading,
+> not a number copied from this document.
 
 **Custody proof:** perform the decrypt using only the stored identity copy, on a
 machine that has never held it.
