@@ -1,5 +1,5 @@
 # Evidence Library
-_Generated 2026-07-13 04:04 UTC · as-of 2026-07-13_
+_Generated 2026-08-30 14:12 UTC · as-of 2026-08-30_
 _Families: 35_
 
 ## g1_market_regime_sma200
@@ -31,7 +31,7 @@ _Families: 35_
 - MaxDD 57.4% — high drawdown as standalone edge
 - Pre-registered 2026-06-14; Validated gate requires live-forward collection
 
-**Pre-registration:** `research/forward_evidence/pre_registration_g1_market_regime_sma200.json` (hash `a3310aa790b7722e...`)  
+**Pre-registration:** `research/forward_evidence/pre_registration_g1_market_regime_sma200.json` (hash `693ef379b5e44d38...`)  
 
 ---
 
@@ -62,7 +62,9 @@ _Families: 35_
 **Weaknesses:**
 - Structural-event sign NOT preserved (clean Sharpe -0.13); edge collapses around major BTC events
 - Only 23 trades; n too low for robust per-trade distribution
-- Likely correlated with g1_market_regime_sma200; VIF check needed
+- Correlated with g1_market_regime_sma200: |r| = 0.6030 on train positions (VIF 1.882; 53.1% unexplained). Measured at Gate 6A.15-PRE. Clears max_clone_r 0.90 and the 0.70 collecting-family bar, and would become the highest pair in the collecting set (existing max 0.4432). Forward-return independence is NOT established by this — max_pairwise_r is enforced on forward returns at Validated.
+
+**Pre-registration:** `research/forward_evidence/pre_registration_g1_trend_regime.json` (hash `2d3cbd210dd56449...`)  
 
 ---
 
@@ -95,12 +97,14 @@ _Families: 35_
 - Bull regime Sharpe -0.36 (mean-reverts poorly in bull); sideways 2.21 (concentrated)
 - Redundant at r≥0.70 with Funding-Basis Composite (cluster head)
 
+**Pre-registration:** `research/forward_evidence/pre_registration_g2_funding_level.json` (hash `8355c16512cb5558...`)  
+
 ---
 
 ## g3_atr_expansion
 
 **Display name:** ATR Expansion  
-**State:** candidate (since 2026-06-25)  
+**State:** candidate (since 2026-06-26)  
 **Role:** edge  
 **Group:** G3 Price Action  
 **Hypothesis:** Rising true-range accompanies conviction-driven moves; trading direction of price during vol expansion rides breakouts.  
@@ -160,7 +164,7 @@ _Families: 35_
 - Sideways regime Sharpe -0.95 (trend-following collapses in choppy markets)
 - OOS Sharpe +0.07 marginal; 2026 YTD -1.33 (recent degradation)
 
-**Pre-registration:** `research/forward_evidence/pre_registration_g3_tsmom.json` (hash `90865666cf83c6a1...`)  
+**Pre-registration:** `research/forward_evidence/pre_registration_g3_tsmom.json` (hash `1cab78041d4c3560...`)  
 
 ---
 
@@ -224,7 +228,7 @@ _Families: 35_
 - LOO consistency 67% (exactly at threshold); Sharpe CV 2.45 (high instability)
 - MaxDD 79.6% — very high drawdown as standalone rule
 
-**Pre-registration:** `research/forward_evidence/pre_registration_h5_vol_regime.json` (hash `fc1720ccb3d9adf9...`)  
+**Pre-registration:** `research/forward_evidence/pre_registration_h5_vol_regime.json` (hash `0a27671bd19afd10...`)  
 
 ---
 
@@ -257,14 +261,14 @@ _Families: 35_
 - n=22 trades underpowered; lockbox verdict REJECT BOTH (only 2 trades in sealed window)
 - Validated gate blocked until live-forward OOS accumulates
 
-**Pre-registration:** `research/forward_evidence/pre_registration.json` (hash `f78f0a52bfcd8add...`)  
+**Pre-registration:** `research/forward_evidence/pre_registration.json` (hash `9201bd3a9d90d324...`)  
 
 ---
 
 ## ivrv_vrp_spread
 
 **Display name:** VRP Spread (HV-2, IV-RV)  
-**State:** candidate (since 2026-06-21)  
+**State:** candidate (since 2026-06-19)  
 **Role:** feature  
 **Group:** DVOL Options-Vol  
 **Hypothesis:** A rich variance risk premium (DVOL/100 - RV30 in its top trailing tercile) precedes positive forward BTC spot returns; a cheap premium precedes negative.  
@@ -273,13 +277,13 @@ _Families: 35_
 
 ### Decision anchor
 
-**Pinned run:** `b98c9685-134b-410f-ac98-684b0ee01da6` (lane L0, offline-corpus/discovery)  
+**Pinned run:** `b98c9685-134b-410f-ac98-684b0ee01da6` (lane L1, offline-corpus/confirmatory)  
 **Pinned metrics:** Sharpe +0.26 | DSR 0.165 | BH-p 0.2893 | N=109  
 
 ### Evidence by lane
 
-- **L0 Discovery:** +0.26 / +0.50 / 109 (run `b98c9685`)
-- **L1 Confirmatory:** —
+- **L0 Discovery:** +0.26 / +0.50 / 109 (run `efbe6acb`)
+- **L1 Confirmatory:** +0.00 (2026-06-19) (run `b98c9685`)
 - **L2 Forward:** —
 - **L3 Production:** —
 

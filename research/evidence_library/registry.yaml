@@ -45,7 +45,7 @@ h6_funding_vol_regime:
   pinned_run: 6b29cb25-d5c0-458a-913b-de714344802b
   preregistration:
     path: "research/forward_evidence/pre_registration.json"
-    hash: "f78f0a52bfcd8add023222958a54dcf1f4359e11d76680dd211a6ded72c78aff"
+    hash: "9201bd3a9d90d324f2fb6af7c1d58a73d1e060dd80ce29206800460b713b5a27"
   weaknesses:
     - "OOS Sharpe -0.15 (IS/OOS sign disagreement); IS likely rich relative to battery population"
     - "n=22 trades underpowered; lockbox verdict REJECT BOTH (only 2 trades in sealed window)"
@@ -76,7 +76,7 @@ g1_market_regime_sma200:
   pinned_run: e4074104-be78-46b0-896d-8f6e374f4981
   preregistration:
     path: "research/forward_evidence/pre_registration_g1_market_regime_sma200.json"
-    hash: "a3310aa790b7722ee794d2efda6174b130ff36c711bc439446ead4f5b4ad1375"
+    hash: "693ef379b5e44d38f9d16fa2aab6b852847ba7fb292e5af1432d245f537e2de1"
   weaknesses:
     - "WF 50% borderline (exactly at threshold); 2 of 4 years negative"
     - "MaxDD 57.4% — high drawdown as standalone edge"
@@ -107,7 +107,7 @@ h5_vol_regime:
   pinned_run: 036349a1-d49f-465e-9533-62d547d566db
   preregistration:
     path: "research/forward_evidence/pre_registration_h5_vol_regime.json"
-    hash: "fc1720ccb3d9adf99ddcee2e7d9d4d8d655e3ce7ffff4e28b7fd432d0f18a2be"
+    hash: "0a27671bd19afd10035a211e3c96852d51935c05e63625040e2badca5f6cfa52"
   weaknesses:
     - "IS Sharpe -0.06 (IS/OOS sign disagreement); effect only visible in OOS window"
     - "LOO consistency 67% (exactly at threshold); Sharpe CV 2.45 (high instability)"
@@ -137,7 +137,9 @@ g2_funding_level:
   role:
     - feature
   pinned_run: cc916a89-ba48-4816-8bbe-73af6f3ae315
-  preregistration: null
+  preregistration:
+    path: "research/forward_evidence/pre_registration_g2_funding_level.json"
+    hash: "8355c16512cb5558bb7102cc746923164b7d2f26c72730e8e345c5b98aaddcc6"
   weaknesses:
     - "OOS Sharpe +0.11 is marginal; WF 3/6=50% borderline"
     - "Bull regime Sharpe -0.36 (mean-reverts poorly in bull); sideways 2.21 (concentrated)"
@@ -198,7 +200,7 @@ g3_momentum_tsmom:
   pinned_run: c75f6a4e-256a-47c0-8840-7fe8714a9dbf
   preregistration:
     path: "research/forward_evidence/pre_registration_g3_tsmom.json"
-    hash: "90865666cf83c6a1972ba5d0ce7fb8d4694cd2281c9f5654cd99042940a5b7c4"
+    hash: "1cab78041d4c3560eb57d59b841877494464aad00058ba3bb1401c461406e125"
   weaknesses:
     - "Correlated at r≥0.70 with 4H Trend; independence check fires at Validated gate"
     - "Sideways regime Sharpe -0.95 (trend-following collapses in choppy markets)"
@@ -227,7 +229,9 @@ g1_trend_regime_ma_cross:
   role:
     - feature
   pinned_run: abc6078e-0dce-4c89-b73f-c1aa9467e795
-  preregistration: null
+  preregistration:
+    path: "research/forward_evidence/pre_registration_g1_trend_regime.json"
+    hash: "2d3cbd210dd564493634c61b6417e0445160ff922c6fe527cc3267a28e34e966"
   weaknesses:
     - "Structural-event sign NOT preserved (clean Sharpe -0.13); edge collapses around major BTC events"
     - "Only 23 trades; n too low for robust per-trade distribution"

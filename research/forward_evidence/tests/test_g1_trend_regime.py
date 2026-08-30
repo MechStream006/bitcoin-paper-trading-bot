@@ -674,7 +674,15 @@ class TestProtected:
             assert active[k] == draft[k], k
 
     def test_P06_registry_entry_state_is_untouched(self):
-        """The registry entry must keep the admission state 6A.17 set.
+        """The registry entry must keep the admission state 6A.17 set, and its
+        pre-registration pointer must follow the A2a convention.
+
+        The pointer assertion was `is None` from 6A.16 until Gate A2b. That was
+        correct while the pre-registration was still a draft (6A.17 s4 required
+        it) and became false when A2b populated it under the convention decided
+        at A2a: `preregistration.hash` is the LF-normalised SHA-256 of the JSON
+        at `preregistration.path`. See
+        docs/governance/a2a_preregistration_hash_convention.md.
 
         Dockerfile.research deliberately ships no evidence_library -- the CI
         job's INV-1 step greps for `*/evidence_library*` and FAILS the build if
@@ -700,7 +708,17 @@ class TestProtected:
         e = fams["g1_trend_regime_ma_cross"]
         assert e["state"] == "candidate"
         assert e["role"] == ["feature"]
-        assert e["preregistration"] is None
+
+        pre = e["preregistration"]
+        assert pre is not None, (
+            "pointer was populated at Gate A2b; a null here means the registry "
+            "was reverted below the A2a convention")
+        assert pre["path"] == (
+            "research/forward_evidence/pre_registration_g1_trend_regime.json")
+        assert pre["hash"] == _sha256_lf(_REPO / pre["path"]), (
+            "registry preregistration.hash must be the LF-normalised SHA-256 of "
+            "the pre-registration JSON at `path` (A2a convention). A mismatch "
+            "means the pre-registration was amended after registration.")
 
     def test_P07_shared_infrastructure_is_unmodified(self):
         """runner_base, engine and signals must be byte-identical to the hashes
