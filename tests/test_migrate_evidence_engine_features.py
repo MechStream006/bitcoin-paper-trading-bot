@@ -17,6 +17,9 @@ Three tiers:
 """
 from __future__ import annotations
 
+import inspect
+import itertools
+import json
 import sys
 from pathlib import Path
 
@@ -43,10 +46,29 @@ _REAL_DATA_PRESENT = (RESEARCH_ROOT / "data" / "raw" / "spot" / "BTCUSDT").exist
 
 
 def _fake_master() -> pd.DataFrame:
+    """Synthetic load_master() output: every column distinct, deterministically.
+
+    The per-column offset is the enumeration INDEX, not `hash(name)`. It used
+    to be `(hash(name) % 1000) / 1000.0`, which made two columns byte-identical
+    whenever their names' hashes collided mod 1000. Python randomises str
+    hashing per process, so that happened for roughly 1 run in 1000 -- and when
+    it hit `rv_21d`/`log_ret` it silently defanged
+    TestEquivalenceCheck::test_equivalence_check_fails_for_a_mismatched_column,
+    a NEGATIVE CONTROL, which then failed with `assert True is False`. Observed
+    in CI on 796560a (run 33311405451 attempt 1 failed, attempt 2 on the same
+    commit passed); reproduced deterministically with PYTHONHASHSEED=157, where
+    hash('rv_21d') % 1000 == hash('log_ret') % 1000 == 697. See GL-3h.
+
+    `enumerate` gives distinct offsets by construction and does not depend on
+    the hash seed. Deliberately NOT fixed by pinning PYTHONHASHSEED: that would
+    hide the class of bug rather than remove it, and this repository already
+    tests elsewhere for hash-seed independence rather than pinning it.
+    TestFakeMasterFixture below asserts the distinctness this relies on.
+    """
     n = 400
     cols = {
-        name: [float(i) + (hash(name) % 1000) / 1000.0 for i in range(n)]
-        for name in bindings.BINDINGS
+        name: [float(i) + idx / 1000.0 for i in range(n)]
+        for idx, name in enumerate(bindings.BINDINGS)
     }
     # market_regime/vol_regime/funding_regime are string-typed in the real
     # engine output; keep at least one non-numeric column to prove the
@@ -64,6 +86,44 @@ def _mocked_engine(monkeypatch):
     below undoes this via its own fixture)."""
     monkeypatch.setattr(engine, "load_master", _fake_master)
     yield
+
+
+class TestFakeMasterFixture:
+    """Guards the premise every negative control in this module rests on.
+
+    `test_equivalence_check_fails_for_a_mismatched_column` can only prove
+    anything if two different columns actually hold different data. Nothing
+    asserted that until GL-3i, which is why a hash collision could turn the
+    control into a silent no-op.
+    """
+
+    def test_all_columns_are_pairwise_distinct(self):
+        frame = _fake_master()
+        rendered = {name: json.dumps(frame[name].tolist(), sort_keys=True)
+                    for name in frame.columns}
+        collisions = [
+            (a, b)
+            for a, b in itertools.combinations(sorted(rendered), 2)
+            if rendered[a] == rendered[b]
+        ]
+        assert collisions == [], (
+            "two _fake_master columns render identically, so any negative "
+            f"control comparing them proves nothing: {collisions}")
+
+    def test_offsets_do_not_depend_on_hash_randomisation(self):
+        """The offset must come from enumeration, not hash(). Structural, so
+        prose in the docstring cannot satisfy it."""
+        src = inspect.getsource(_fake_master)
+        body = src.split('"""')[-1]          # strip the docstring
+        assert "hash(" not in body, (
+            "_fake_master's column values must not depend on hash(); "
+            "str hashing is randomised per process")
+        assert "enumerate(bindings.BINDINGS)" in body
+
+    def test_every_binding_has_a_column(self):
+        """Distinctness must not be achieved by dropping columns."""
+        frame = _fake_master()
+        assert set(bindings.BINDINGS) <= set(frame.columns)
 
 
 class TestFeaturesTableConsistency:
