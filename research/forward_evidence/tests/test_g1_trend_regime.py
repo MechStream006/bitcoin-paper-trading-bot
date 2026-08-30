@@ -731,11 +731,13 @@ class TestProtected:
                 "aa2cb34fc9793b81466f253065b5a0f7791cd096b58d95e9dd991fdb1ce4ffdb",
             _RESEARCH / "forward_evidence" / "runner_base.py":
                 "a96fe714c7a92576fbe062ce9591359313748384ec69799f12b89a68473c3094",
-            # Updated at Gate 6A.18: wiring necessarily modifies run_daily.
+            # Updated at Gate 6A.18 (wiring) and again at Gate FB-1b, where
+            # run_daily gained the guarded post-collection ledger-sync call.
+            # Re-pinned deliberately, exactly as 6A.18 did.
             # runner_base, signals.py, engine.py and run_date_policy are still
             # asserted at their 6A.15 values -- wiring touched none of them.
             _RESEARCH / "forward_evidence" / "run_daily.py":
-                "578b1acf4fd81f35d6dd8ff5609097b9cb213ecb748cda8c0696d9d131c57414",
+                "6fad13bc7f84c2468baa78d451128dcfaf89cde0d212cb33a9ee18666fb86984",
             _RESEARCH / "forward_evidence" / "run_date_policy.py":
                 "d89599e08fb9b01de09ee27bd6d1ee60cd6c7f941d09c24e786a123167c15dc6",
         }

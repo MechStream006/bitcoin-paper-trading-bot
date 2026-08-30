@@ -46,6 +46,7 @@ import sqlite3
 from forward_evidence import runner_h5, runner_g1, runner_g3, runner_ivrv, runner_g2
 from forward_evidence import runner_g1_trend_regime as runner_g1tr
 from forward_evidence import runner_atr_expansion as runner_atr
+from forward_evidence import ledger_sync
 from forward_evidence.init_forward_db import init_forward_db
 from forward_evidence.pre_reg_guard import FnHashViolation
 from forward_evidence.runner_base import (
@@ -594,6 +595,16 @@ def main() -> int:
             'Authorised backfills are recorded in collection_provenance.'
         ),
     )
+    parser.add_argument(
+        '--no-ledger-sync',
+        action='store_true',
+        help=(
+            'Skip publishing accumulated forward evidence to the governance '
+            'ledger. Collection still runs and writes evidence_forward.db as '
+            'normal. Kill-switch only -- the sync never blocks or alters '
+            'collection, and never affects the exit code.'
+        ),
+    )
     args = parser.parse_args()
 
     run_date  = args.run_date or _derive_run_date()
@@ -660,7 +671,42 @@ def main() -> int:
     if not scheduled and results and all(r == 'unavailable' for r in results.values()):
         log.error("Manual run for %s collected nothing (all signals unavailable).", run_date)
         return 1
+
+    # Ledger sync: publish accumulated forward evidence as live-forward (L2)
+    # runs. Placed here deliberately -- AFTER collection has committed and after
+    # both early-return guards, so the exit code is already determined and a day
+    # with hard collection failures never triggers an unattended ledger write.
+    # Guarded so a sync fault can never propagate: it appends run rows ONLY --
+    # no state transition, no gate_result, no registry edit, DSR/BH-p left NULL,
+    # therefore no promotion. Skipped in --dry-run, which writes nothing by
+    # definition.
+    _run_ledger_sync(args, run_date, results)
     return 0
+
+
+def _run_ledger_sync(args, run_date: str, results: dict) -> None:
+    """Publish forward evidence to the governance ledger. Never raises.
+
+    Isolated in its own function with a blanket handler so that no failure mode
+    -- schema assertion, ledger lock, unexpected bug -- can alter the collection
+    run's outcome. The caller ignores the return value on purpose: collection
+    health is the exit code's only input.
+    """
+    if args.dry_run:
+        log.info("[ledger_sync] skipped (dry-run)")
+        return
+    if args.no_ledger_sync:
+        log.info("[ledger_sync] skipped (--no-ledger-sync)")
+        return
+    try:
+        # Destination is owned by ledger_sync, not named here: SC01 forbids
+        # this module from referencing a protected artifact path.
+        sync = ledger_sync.sync_all(list(results.keys()), run_date, args.db_path)
+        for fid, outcome in sorted(sync.items()):
+            log.info("  [ledger] %-35s %s", fid, outcome)
+    except Exception as exc:  # noqa: BLE001 -- must never fail the collection run
+        log.error("[ledger_sync] failed (collection unaffected): %s: %s",
+                  type(exc).__name__, exc, exc_info=True)
 
 
 if __name__ == '__main__':

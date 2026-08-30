@@ -139,11 +139,21 @@ These must be fixed by the same work, or the new design inherits them:
 - **`registry.yaml: provenance`** is a denormalised per-family copy of a
   *per-run* property. It is stale by construction the moment a family has runs of
   two provenances. It must become derived, or be deleted.
-- **`has_live_evidence` VIEW** (`provenance != 'offline-corpus'`) will return true
-  the instant the bridge writes its first row — including for a family with **zero
-  closed forward trades** (`ledger_sync` writes a row with `n_trades=0`,
-  `sharpe=NULL`). Any consumer treating this view as "has meaningful live
-  evidence" is wrong. It answers "has a live *row*", not "has live *evidence*".
+- **`has_live_evidence` VIEW** (`provenance != 'offline-corpus'`) returns true the
+  instant the bridge writes its first row. It answers "has a live *row*", not
+  "has live *evidence*", and any consumer treating it as the latter is wrong —
+  a row can carry `n_trades=1` and `sharpe=NULL` and still satisfy the view.
+
+  > **Corrected 2026-08-30 (Gate FB-1b).** This paragraph previously said the
+  > view would return true "including for a family with **zero closed forward
+  > trades** (`ledger_sync` writes a row with `n_trades=0`, `sharpe=NULL`)".
+  > That described a behaviour the bridge does not have. `sync_family()` returns
+  > `'no-evidence'` and **writes nothing** when a family has no closed trades —
+  > the behaviour was ambiguous between doc and code while the bridge sat
+  > unmerged, and was resolved at FB-1b in favour of skipping. A family with no
+  > closed trade has no live-forward evidence, and asserting otherwise is
+  > precisely the false reading this bullet warns against. The caution above
+  > still stands on its own terms: the view is about rows, not sufficiency.
 
 ---
 
