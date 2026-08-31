@@ -78,6 +78,10 @@ ENGINE_ACTOR_TYPE = "human"
 #: so a reader can trace any excluded day back to reviewable config.
 EXCLUSION_BASIS = "run_date_policy.yaml#immutable_gaps"
 
+#: The key under which the block is frozen into a run's metrics_json.
+#: `readiness_gate._from_run_block` reads exactly this name.
+READINESS_KEY = "readiness"
+
 _DEFAULT_FORWARD_DB = _RESEARCH_ROOT / "data" / "evidence_forward.db"
 
 
@@ -259,6 +263,7 @@ def build_readiness_block(
     window_end: str,
     forward_db: pathlib.Path | str | None = None,
     policy_path: pathlib.Path | None = None,
+    signal_id: str | None = None,
 ) -> dict[str, Any]:
     """The `readiness` payload for a run over this window.
 
@@ -272,7 +277,10 @@ def build_readiness_block(
       non-ready -- missing for any other reason. That fails closed.
     """
     days = _utc_days(window_start, window_end)
-    collected = collected_days(forward_db or _DEFAULT_FORWARD_DB, family_id)
+    # The corpus is keyed by signal_id, the ledger by family_id. They coincide
+    # for all seven forward families; the parameter exists so a caller that
+    # holds both never has to assume it.
+    collected = collected_days(forward_db or _DEFAULT_FORWARD_DB, signal_id or family_id)
     excluded_universe = declared_gap_days(policy_path)
 
     ready, excluded, non_ready = [], [], []

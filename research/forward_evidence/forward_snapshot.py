@@ -22,15 +22,17 @@ WHAT IT DOES
 ------------
 For one family at one `as_of`: reads the forward corpus, evaluates the FB-7
 observation floors against the hash-pinned pre-registration, builds the FB-8
-payload, and appends ONE new L2 run containing it.
+payload, builds the FB-12e readiness block over the run's own evidence window,
+and appends ONE new L2 run containing both.
+
+Readiness is frozen into the row at creation (FB-12g) because that is the only
+moment at which it is contemporaneous, and because `DefaultReadinessProvider`
+reads a `readiness` block **as recorded** and never recomputes it. Exclusions
+come solely from `run_date_policy.yaml immutable_gaps`; a payload excluding any
+undeclared day aborts the snapshot before the row is written.
 
 WHAT IT DELIBERATELY DOES NOT DO
 --------------------------------
-- **No readiness payload.** `DefaultReadinessProvider` reads a `readiness` block
-  as recorded and never recomputes it, and no forward readiness contract exists
-  (FB-9b adopted Option C: defer). Emitting a block here would mean inventing
-  completeness criteria. Its absence keeps the run correctly blocked at
-  Validated -- that is the gate working, not a defect.
 - **No DSR / BH-p.** `governance=None` always, so both stay NULL. Computing them
   is a different authority and a different gate.
 - **No admission, re-pin, transition, gate_result, receipt or promotion.** This
@@ -68,6 +70,7 @@ if str(_RESEARCH_ROOT) not in sys.path:
 
 from forward_evidence import forward_admissibility as fa  # noqa: E402
 from forward_evidence import ledger_sync as ls  # noqa: E402
+from forward_evidence import forward_readiness as fr  # noqa: E402
 from forward_evidence import observation_floors as of  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -170,13 +173,29 @@ def write_snapshot(
         log.info("[snapshot] %s: dry-run, nothing written", family_id)
         return None, "dry-run"
 
+    # The run's declared evidence window, computed ONCE so the row and the
+    # readiness block that describes it can never disagree.
+    window_start = ls._first_run_date(forward_db, signal_id) or metrics["window_first_entry"]
+
+    # FB-12g: the readiness assessment is frozen into the row at creation --
+    # the only moment at which it is contemporaneous. `assert_exclusions_declared`
+    # runs BEFORE the write, so a payload excluding any day that
+    # run_date_policy.yaml does not declare aborts the snapshot rather than
+    # entering the ledger. Both calls may raise; neither is caught, because a
+    # row written without readiness would be indistinguishable from one whose
+    # window was genuinely complete.
+    readiness = fr.build_readiness_block(
+        family_id, window_start, as_of, forward_db=forward_db, signal_id=signal_id)
+    fr.assert_exclusions_declared(readiness)
+    metrics[fr.READINESS_KEY] = readiness
+
     run_id = ls._record().append_run(
         ledger_db,
         family_id=family_id,
         metrics=metrics,
         provenance=ls.PROVENANCE,
         run_kind=ls.RUN_KIND,
-        window_start=ls._first_run_date(forward_db, signal_id) or metrics["window_first_entry"],
+        window_start=window_start,
         window_end=as_of,
         git_sha=ls._git_sha(),
         fn_hash=ls._fn_hash(forward_db, signal_id, as_of),

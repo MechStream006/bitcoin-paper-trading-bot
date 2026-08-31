@@ -152,10 +152,15 @@ class TestPayload:
         assert json.loads(json.dumps(a, default=str)) == json.loads(
             json.dumps(b, default=str))
 
-    def test_no_readiness_and_no_dsr_bh(self, env):
+    def test_readiness_present_and_no_dsr_bh(self, env):
+        """FB-12g reversed half of this test's original contract.
+
+        The readiness block IS now written (governance-approved Option B); the
+        DSR/BH half is unchanged and still load-bearing.
+        """
         run_id, _ = _write(env)
         r = record.get_run(env["led"], run_id)
-        assert "readiness" not in r["metrics"]
+        assert "readiness" in r["metrics"]
         assert r["dsr_prob"] is None and r["bh_p"] is None
         assert r["oos_sharpe"] is None and r["verdict"] is None
 
@@ -325,13 +330,19 @@ class TestStillBlockedAtValidated:
         assert ok is False
         assert any("dsr" in e.lower() for e in errors), errors
 
-    def test_readiness_is_absent_so_the_readiness_gate_cannot_pass(self, env):
+    def test_readiness_is_now_present_and_consumed_via_the_run_block(self, env):
+        """FB-12g: this test previously asserted readiness was ABSENT and the
+        gate therefore could not pass. Option B reversed that deliberately --
+        the block is embedded at run creation and consumed via the run-block
+        path. The gate's verdict now depends on the window's own completeness,
+        which is the point.
+        """
         import readiness_gate
         run_id, _ = _write(env)
         run = record.get_run(env["led"], run_id)
         a = readiness_gate.DEFAULT_PROVIDER.assess(env["led"], run)
-        assert a.ok is False
-        assert a.source in ("none", "readiness_receipts")
+        assert a.source == "run_block"
+        assert "readiness" in run["metrics"]
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +378,10 @@ class TestNoSideEffects:
         for banned in ("admit_evidence", "reject_evidence", "pin_evidence",
                        "repin_evidence", "append_transition", "append_gate_result",
                        "append_receipt", "promote", "UPDATE", "DELETE",
-                       "dsr_prob", "bh_p", "readiness"):
+                       # "readiness" was banned here until FB-12g; the block is
+                       # now written deliberately. Every other token stands,
+                       # dsr_prob and bh_p emphatically included.
+                       "dsr_prob", "bh_p"):
             assert banned not in code, f"{banned} must not appear in executable code"
 
     def test_scheduler_does_not_import_the_producer(self):

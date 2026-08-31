@@ -319,8 +319,15 @@ class TestNoSideEffects:
                 assert "decision_function" not in node.module
 
     def test_no_collector_or_scheduler_imports_this_module(self):
+        """Collectors and the scheduler must never reach this module.
+
+        `forward_snapshot.py` was on this list until FB-12g and is now
+        deliberately off it: it is an operator-invoked producer, not a
+        collector, and embedding the block at run creation is the approved
+        design. Every scheduled path stays guarded.
+        """
         for name in ("run_daily.py", "daily_job.py", "runner_base.py",
-                     "ledger_sync.py", "forward_snapshot.py"):
+                     "ledger_sync.py"):
             path = ROOT / "research/forward_evidence" / name
             if path.exists():
                 assert "forward_readiness" not in path.read_text("utf-8")
