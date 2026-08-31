@@ -125,7 +125,13 @@
       "mechanism": "fn_hash in run_log must match decision_function_hash at every run call",
       "alert": "fn_hash mismatch: abort run, do NOT write to signal_log"
     },
-    "integration_status": "Phase 2 complete (load_daily_ohlcv, run_ohlcv_signal, decision function, 26 tests). Phase 4 required for run_daily.py integration and live collection."
+    "integration_status": "Phase 2 complete (load_daily_ohlcv, run_ohlcv_signal, decision function, 26 tests). Phase 4 required for run_daily.py integration and live collection.",
+    "evidence_snapshots": {
+      "content": [
+        "DSR on non-overlapping 7-day forward trade returns (compute when n >= 26)",
+        "The DSR minimum n >= 26 is a governance criterion DISTINCT from the observation floor minimum_trades = 26. The two coincide numerically for this family and are NOT conflated: the observation floor governs admissibility, the DSR minimum governs when DSR/BH may be computed. FR-5's three minima remain separate, and n >= 5 stays the mathematical computability guard which never establishes sufficiency. Adopted at FB-10b-O (FDB-8 Option A, human-authorized)."
+      ]
+    }
   },
   "notes": [
     "Do not modify decision_function_g3_atr_expansion.py after registration. Any change requires a VERSION bump and new pre-registration JSON — the fn_hash guard will raise FnHashViolation otherwise.",

@@ -116,6 +116,12 @@
     "determinism_check": {
       "mechanism": "fn_hash in run_log must match decision_function_hash every run",
       "alert": "fn_hash mismatch: abort run, do NOT write to signal_log"
+    },
+    "evidence_snapshots": {
+      "content": [
+        "DSR on non-overlapping 7-day forward trade returns (compute when n >= 30)",
+        "The DSR minimum n >= 30 is a governance criterion DISTINCT from the observation floor minimum_trades = 30. The two coincide numerically for this family and are NOT conflated: the observation floor governs admissibility, the DSR minimum governs when DSR/BH may be computed. FR-5's three minima remain separate, and n >= 5 stays the mathematical computability guard which never establishes sufficiency. Adopted at FB-10b-O (FDB-8 Option A, human-authorized)."
+      ]
     }
   },
   "source_divergence_assessment": {

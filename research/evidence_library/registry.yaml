@@ -139,7 +139,7 @@ g2_funding_level:
   pinned_run: cc916a89-ba48-4816-8bbe-73af6f3ae315
   preregistration:
     path: "research/forward_evidence/pre_registration_g2_funding_level.json"
-    hash: "8355c16512cb5558bb7102cc746923164b7d2f26c72730e8e345c5b98aaddcc6"
+    hash: "6cba09d3bf1e4eaa7bace81d4a09e54f9df1c594cfb7e885a0a8f14a2236aec3"
   weaknesses:
     - "OOS Sharpe +0.11 is marginal; WF 3/6=50% borderline"
     - "Bull regime Sharpe -0.36 (mean-reverts poorly in bull); sideways 2.21 (concentrated)"
@@ -231,7 +231,7 @@ g1_trend_regime_ma_cross:
   pinned_run: abc6078e-0dce-4c89-b73f-c1aa9467e795
   preregistration:
     path: "research/forward_evidence/pre_registration_g1_trend_regime.json"
-    hash: "2d3cbd210dd564493634c61b6417e0445160ff922c6fe527cc3267a28e34e966"
+    hash: "a270d1631b6b47216dd967244e96183bd94d3f5c20b388e6345fc5aacbed97e4"
   weaknesses:
     - "Structural-event sign NOT preserved (clean Sharpe -0.13); edge collapses around major BTC events"
     - "Only 23 trades; n too low for robust per-trade distribution"
@@ -272,7 +272,7 @@ ivrv_vrp_spread:
   pinned_run: b98c9685-134b-410f-ac98-684b0ee01da6    # set by migrate_ivrv_admission.py (discovery → candidate)
   preregistration:
     path: "research/forward_evidence/pre_registration_ivrv.json"
-    hash: "7d1e897efb47522455bc1c3c4c25e781424fe6c779c2818594eaae29168a43c8"
+    hash: "eb6f8e6fcd4c824ce569feba51efac8a0d462af990ed6d8e020971f95dccbb66"
   weaknesses:
     - "IS DSR 0.165 / BH-p 0.289 fail the Validated gate in-sample (expected); validation is a multi-year forward proposition"
     - "P&L is spot-directional VRP timing, NOT literal short-vol P&L"
@@ -407,7 +407,7 @@ g3_atr_expansion:
   pinned_run: 0c7e1bf9-31e2-4662-a843-eef7f98c9331
   preregistration:
     path: "research/forward_evidence/pre_registration_g3_atr_expansion.json"
-    hash: "b76c5af9455be3cf91d42697106560887716e2ee1d8e0b8faa146c5a3f1d6ebd"
+    hash: "846a965d8440fdb4ca330d81bac3956ada544e94503ef21a9287534f50dce28f"
   weaknesses:
     - "IS DSR 0.270 < 0.50 Validated threshold — expected; Validated gate requires live-forward evidence"
     - "IS BH-p 0.207 > 0.10 Validated threshold — expected; evaluated on forward returns at promotion"
