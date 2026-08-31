@@ -41,16 +41,32 @@ The asymmetry with PR-6 is deliberate and worth stating: `evidence.admit` is
 `discretionary` (replay verifies the envelope and stops). Evidence
 admissibility is a computation. Promotion is a judgment.
 
---- What this module does NOT do ---
+--- Readiness (TG-RDY) is ARMED ---
 
 Readiness (data_completeness_gate.md §7 G2 -- "the pinned run's evidence
-window must be 100% READY") is CHECKED WHEN PRESENT and reported as
-`not_computed` when absent. It is NOT yet blocking, because G3 (the
-`readiness` block in `runs.metrics_json`) is that document's own PR-4 and
-does not exist: no run on this platform carries a readiness block, so making
-it mandatory would instantly invalidate all 35 real families -- a
-backward-compatibility break masquerading as rigour. The hook is here and
-tested; arming it is PR-9. This is stated explicitly rather than implied.
+window must be 100% READY") is enforced by `_readiness_check()`, whose
+docstring is the authoritative description. In short:
+
+  * Entering **validated** (`readiness_gate.STATES_REQUIRING_READINESS`,
+    which is exactly `{"validated"}`): the evidence window MUST be 100%
+    READY, and **absence of readiness evidence blocks**. Since no producer
+    of readiness evidence exists yet, nothing can currently be validated.
+    That is the intended consequence, not a defect -- the alternative is
+    promoting on data nobody checked.
+  * Every other state: readiness is REPORTED, never blocking. A
+    non-computed result renders as `not_computed`, never as a bare pass.
+
+Superseded note, corrected at Gate FB-9d (2026-08-31): this section
+previously read "It is NOT yet blocking ... The hook is here and tested;
+arming it is PR-9." PR-9 subsequently armed it, and
+`tests/test_readiness_gate.py` asserts the blocking behaviour directly
+(`test_validated_blocked_when_no_readiness_evidence_exists`,
+`test_validated_blocked_by_a_non_ready_run_block`). The old text
+contradicted `_readiness_check()` in this same file. No behaviour was
+changed by that correction -- only this description.
+
+Arming remains backward compatible by construction: the real ledger has zero
+validated families, so nothing that exists was invalidated.
 """
 from __future__ import annotations
 
