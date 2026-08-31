@@ -97,13 +97,23 @@ def build_snapshot_metrics(
     as_of: str,
     repo_root: pathlib.Path | None = None,
 ) -> dict[str, Any] | None:
-    """Metrics for one snapshot, or None when there is no closed-trade evidence.
+    """The COMPLETE payload for one snapshot, or None when there is no
+    closed-trade evidence.
+
+    "Complete" is the point: this returns exactly what `write_snapshot()`
+    persists -- metrics, `forward_admissibility` and `readiness` -- so a
+    `--dry-run` and a real write render the same bytes. Nothing is added to the
+    payload after this function returns.
 
     Deterministic for a fixed (corpus, as_of): the trade set is fully ordered
     and every statistic is a pure function of it. Returns None -- rather than a
     zero-trade row -- because a family with no closed trade has no forward
     evidence, and a row asserting otherwise would make `has_live_evidence`
     report something untrue (the FB-1b decision, applied here unchanged).
+
+    Reads only. The immutable-gap invariant is enforced here, so it also guards
+    a dry run, and a payload with an undeclared exclusion raises before any
+    caller can persist it.
     """
     trades = ls.load_closed_trades(forward_db, signal_id, as_of)
     if not trades:
@@ -122,6 +132,21 @@ def build_snapshot_metrics(
     metrics[fa.FORWARD_ADMISSIBILITY_KEY] = fa.build_payload(
         report, ls.PROVENANCE, ls.RUN_KIND,
     )
+
+    # FB-12i-R: readiness is built HERE, not in write_snapshot, so a --dry-run
+    # renders the exact payload a real write would persist. Building it after
+    # the dry-run early-return was the FB-12i defect: the dry run displayed a
+    # payload the write would never produce, which is worse than no dry run at
+    # all, because it looks like verification.
+    #
+    # `window_start` is the run's own, computed once here and carried inside the
+    # block, so `write_snapshot` reads it back rather than recomputing it and
+    # the row can never disagree with the block describing it.
+    window_start = ls._first_run_date(forward_db, signal_id) or metrics["window_first_entry"]
+    readiness = fr.build_readiness_block(
+        family_id, window_start, as_of, forward_db=forward_db, signal_id=signal_id)
+    fr.assert_exclusions_declared(readiness)
+    metrics[fr.READINESS_KEY] = readiness
     return metrics
 
 
@@ -173,21 +198,10 @@ def write_snapshot(
         log.info("[snapshot] %s: dry-run, nothing written", family_id)
         return None, "dry-run"
 
-    # The run's declared evidence window, computed ONCE so the row and the
-    # readiness block that describes it can never disagree.
-    window_start = ls._first_run_date(forward_db, signal_id) or metrics["window_first_entry"]
-
-    # FB-12g: the readiness assessment is frozen into the row at creation --
-    # the only moment at which it is contemporaneous. `assert_exclusions_declared`
-    # runs BEFORE the write, so a payload excluding any day that
-    # run_date_policy.yaml does not declare aborts the snapshot rather than
-    # entering the ledger. Both calls may raise; neither is caught, because a
-    # row written without readiness would be indistinguishable from one whose
-    # window was genuinely complete.
-    readiness = fr.build_readiness_block(
-        family_id, window_start, as_of, forward_db=forward_db, signal_id=signal_id)
-    fr.assert_exclusions_declared(readiness)
-    metrics[fr.READINESS_KEY] = readiness
+    # Read back the window the payload was built for. NOT recomputed: one
+    # source of truth means the row and its readiness block cannot diverge,
+    # and it is the same value a --dry-run already displayed.
+    window_start = metrics[fr.READINESS_KEY]["window_start"]
 
     run_id = ls._record().append_run(
         ledger_db,
