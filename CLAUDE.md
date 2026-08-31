@@ -1470,6 +1470,48 @@ check (`docs/ops/unit-drift-and-failure-alerting-2026-08-26.md`).
 
 ---
 
+## 21. h6 Unevaluable Window — Permanent Provenance (2026-06-16 -> 2026-08-26)
+
+**Read this before counting h6 observation days, computing h6 continuity, or
+assessing h6 sample size.**
+
+`h6_funding_vol_regime` was **collected but not evaluable** on **70 days**,
+2026-06-16 through 2026-08-26 inclusive. The collector ran, reported
+`status='ok'`, and wrote `h6_canonical=0` every day -- but the signal was never
+computed. `_funding_regime()` requires 252 valid funding observations in a
+273-day window, and `daily_ingest.py` writes only the current month, so the
+research funding lake held ~2 months. A backfill of 19 partitions
+(2025-01..2026-05) on **2026-08-26 08:25-08:26 UTC** fixed it; h6 became fully
+evaluable on **2026-08-27**.
+
+Classification is **`BACKFILL_REQUIRED` -> `BLOCK`** in PR-7's existing frozen
+vocabulary. No new state or governance semantics were required.
+
+- **The 70 days are permanently excluded from live-forward (L2) evidence.**
+  Never count them as observation days, active days, or coverage; never treat
+  `0` as "h6 was flat". Any h6 forward-return series must start **on or after
+  2026-08-27**.
+- **2026-08-27 onward is legitimate zero-evidence**, not a collection failure --
+  inputs are valid, `funding_regime` is `high`, and h6 requires `low`.
+- **No retroactive recomputation.** Every input needed to recompute the interval
+  now exists, which makes a wrong action available that INC-0005 never offered.
+  Recomputed values are retrospective, therefore **not** `live-forward`; they
+  would be `offline-corpus` at best, and writing them into the forward corpus is
+  the backfill §20 forbids.
+- **No retroactive readiness or evidence receipts** (PR-7 L4; the reserved
+  `NO_RECEIPT` count exists precisely for days nobody evaluated).
+- Causal provenance is preserved independently in
+  `regime_states.funding_regime='unknown'` -- the interval is verifiable from
+  production data, not from assertion.
+- Bounded observability defect: the rows carry no explicit unavailable marker,
+  contrary to the `DegradationSpec` precedent. **No demonstrated
+  trading-decision impact** -- h6 has 0 trades and 0 live-forward ledger runs,
+  and its only declared floor counts trades.
+
+Full record: `docs/governance/fb11_h6_unevaluable_window_provenance.md`.
+
+---
+
 ## Code Generation Standards
 
 These rules apply to all code generated or modified in this repository unless explicitly overridden by the user.
