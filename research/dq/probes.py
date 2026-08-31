@@ -290,3 +290,194 @@ def _sqlite_history(
 
 
 register_probe("sqlite", sqlite_probe)
+
+
+# ---------------------------------------------------------------------------
+# parquet — the addition this module's own header anticipated.
+# ---------------------------------------------------------------------------
+
+def _parquet_partitions(dataset_dir: Path) -> list[Path]:
+    return sorted(dataset_dir.glob("year=*/month=*/*.parquet"))
+
+
+def _parquet_history(
+    day_counts: dict[str, int], period_start: datetime, window_days: int,
+    min_records_per_day: int,
+) -> tuple[int, bool]:
+    """
+    Distinct UTC days that are PRESENT in the trailing `window_days` window
+    ending at (and including) the period.
+
+    Semantics are deliberately identical to `_sqlite_history`, with one
+    generalisation the sqlite probe never needed: a day counts as present only
+    if it carries at least `min_records_per_day` records. A source that
+    publishes N events per day (funding: 3) can have a day that physically
+    exists yet is too thin to derive from, and counting it would reproduce the
+    exact confusion — a partial day consumed as a whole one — that this
+    framework exists to end.
+    """
+    window_start = (period_start - timedelta(days=window_days - 1)).date()
+    period_day = period_start.date()
+    days = sorted(
+        d for d, n in day_counts.items()
+        if n >= min_records_per_day
+        and window_start.isoformat() <= d <= period_day.isoformat()
+    )
+    if not days:
+        return 0, True
+
+    first = datetime.strptime(days[0], "%Y-%m-%d")
+    last = datetime.strptime(days[-1], "%Y-%m-%d")
+    span = (last - first).days + 1
+    return len(days), len(days) < span
+
+
+def parquet_probe(
+    spec: InputSpec, period_start: datetime, period_end: datetime, as_of: datetime
+) -> InputObservation:
+    """
+    source:
+      type: parquet
+      root: research/data/raw       # lake root
+      dataset: funding              # funding | spot | perp | dvol | ...
+      symbol: BTCUSDT
+      ts_column: timestamp_ms
+      ts_unit: ms | s | us | iso
+      min_records_per_day: 2        # optional (default 1); see _parquet_history
+      window_days: 273              # optional; defaults to continuity.min_rows
+
+    `window_days` exists because a lookback window and a sufficiency floor are
+    not always the same number. The contract-level `history_window` sugar models
+    them as one (N rows in an N-day window, i.e. a fully dense window), which is
+    right for a rolling statistic that tolerates no holes. A derivation that
+    requires "252 valid days within a 273-day lookback" cannot be expressed that
+    way, and approximating it by tightening the window to 252 would create a
+    SECOND, divergent definition of that derivation's own sufficiency rule --
+    the precise disease this framework exists to cure. `ContinuitySpec.min_rows`
+    keeps its exact meaning (the floor); only the lookback length is declared
+    here, and it defaults to `min_rows` so every existing contract is unchanged.
+
+    Only the timestamp column is ever read -- never a full table. That is a
+    column projection over a handful of monthly partitions, orders of magnitude
+    cheaper than the derivation it gates (L3).
+
+    Point-in-time correctness: a partition whose file mtime is later than
+    `as_of` is invisible, mirroring the sqlite probe's `arrival_column`. Without
+    it a backfill silently grants look-ahead to every historical replay.
+    """
+    try:
+        source = spec.source
+        for key in ("root", "dataset", "symbol", "ts_column"):
+            if key not in source:
+                return InputObservation(
+                    input_id=spec.id,
+                    probe_error=f"source type 'parquet' requires '{key}' in source",
+                )
+        ts_unit = source.get("ts_unit", "ms")
+        if ts_unit not in ("s", "ms", "us", "iso"):
+            return InputObservation(input_id=spec.id, probe_error=f"unknown ts_unit '{ts_unit}'")
+
+        min_per_day = int(source.get("min_records_per_day", 1))
+        ts_col = source["ts_column"]
+        dataset_dir = Path(source["root"]) / source["dataset"] / source["symbol"]
+        if not dataset_dir.is_dir():
+            return InputObservation(
+                input_id=spec.id, probe_error=f"parquet dataset not found: {dataset_dir}")
+
+        window_days = int(source.get(
+            "window_days",
+            spec.continuity.min_rows if spec.continuity else 0,
+        ))
+
+        parts = _parquet_partitions(dataset_dir)
+        # Arrival filtering is OPT-IN, mirroring the sqlite probe, which filters
+        # only when an `arrival_column` is declared. A parquet lake has no
+        # arrival column, and file mtime is a poor substitute for a *hard*
+        # filter: restoring the corpus from backup rewrites every mtime, which
+        # would make a complete lake look like it had not arrived yet. Declare
+        # `arrival_from_mtime: true` where replay at a historical `as_of` is
+        # actually reachable; `newest_arrival_ts` is reported either way, so
+        # the audit trail is unaffected by the choice.
+        if bool(source.get("arrival_from_mtime", False)):
+            visible = [p for p in parts
+                       if datetime.fromtimestamp(p.stat().st_mtime, timezone.utc) <= as_of]
+            if parts and not visible:
+                return InputObservation(
+                    input_id=spec.id,
+                    probe_error=(
+                        f"no parquet partition in {dataset_dir} had arrived by "
+                        f"{as_of.isoformat()}"
+                    ),
+                )
+        else:
+            visible = parts
+        if not visible:
+            return InputObservation(
+                input_id=spec.id,
+                probe_error=f"no parquet partition found under {dataset_dir}",
+            )
+
+        import pyarrow.parquet as pq  # heavy import, deliberately local
+
+        rows = 0
+        min_ts = max_ts = None
+        day_counts: dict[str, int] = {}
+        newest_arrival = max(
+            datetime.fromtimestamp(p.stat().st_mtime, timezone.utc) for p in visible)
+
+        lo = _to_epoch(period_start, ts_unit)
+        hi = _to_epoch(period_end, ts_unit)
+
+        for part in visible:
+            col = pq.read_table(part, columns=[ts_col]).column(ts_col)
+            for value in col:
+                v = value.as_py()
+                if v is None:
+                    continue
+                if ts_unit == "iso":
+                    day, in_period = str(v)[:10], (str(lo) <= str(v) < str(hi))
+                else:
+                    divisor = {"s": 1, "ms": 1_000, "us": 1_000_000}[ts_unit]
+                    day = datetime.fromtimestamp(int(v) / divisor, timezone.utc).date().isoformat()
+                    in_period = lo <= int(v) < hi
+                day_counts[day] = day_counts.get(day, 0) + 1
+                if in_period:
+                    rows += 1
+                    if min_ts is None or v < min_ts:
+                        min_ts = v
+                    if max_ts is None or v > max_ts:
+                        max_ts = v
+
+        history_rows, has_gaps = None, None
+        if spec.continuity and spec.continuity.min_rows > 0:
+            history_rows, has_gaps = _parquet_history(
+                day_counts, period_start, window_days or spec.continuity.min_rows, min_per_day)
+
+        fingerprint = sha256_lf(canonical_json({
+            "dataset": f"{source['dataset']}/{source['symbol']}",
+            "partitions": sorted(p.name + ":" + str(p.stat().st_size) for p in visible),
+            "rows": rows,
+        }))
+
+        return InputObservation(
+            input_id=spec.id,
+            rows=rows,
+            min_ts=_from_epoch(min_ts, ts_unit) if min_ts is not None else None,
+            max_ts=_from_epoch(max_ts, ts_unit) if max_ts is not None else None,
+            newest_arrival_ts=newest_arrival.isoformat(),
+            coverage_count=rows,
+            history_rows=history_rows,
+            has_interior_gaps=has_gaps,
+            content_hash=fingerprint,
+        )
+    except Exception as exc:                                        # noqa: BLE001
+        # A probe never raises into the engine (module header): a traceback
+        # writes no receipt, and a period with no receipt must never be
+        # indistinguishable from a period that passed.
+        return InputObservation(
+            input_id=spec.id,
+            probe_error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+register_probe("parquet", parquet_probe)
