@@ -309,7 +309,19 @@ def check_backup_freshness(
             check_name, absent_severity,
             f"backup directory does not exist{absent_suffix}", {}
         )
-    backups = sorted(backup_dir.glob(f"{label}_*.db"), reverse=True)
+    # Newest by MTIME, not by name. A name sort silently picks the
+    # lexicographically-last file, and the glob admits more than the scheduled
+    # `{label}_{YYYYmmdd}_{HHMMSS}.db` shape: a manual snapshot such as
+    # `ledger_predeploy_<sha>_<ts>.db` sorts after every timestamped backup
+    # ('p' > '2'), so its age was reported as the backup's age. Observed
+    # 2026-09-01: a healthy 13h-old ledger backup reported as 48.7h stale.
+    # The failure is not symmetric -- the same bug can also report a recent
+    # manual file while the scheduled backups have silently stopped.
+    backups = sorted(
+        backup_dir.glob(f"{label}_*.db"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not backups:
         return CheckResult(
             check_name, absent_severity,

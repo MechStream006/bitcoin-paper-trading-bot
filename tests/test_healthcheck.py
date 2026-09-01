@@ -1148,3 +1148,54 @@ class TestForwardTrades:
     def test_active_signal_is_not_stalled(self, tmp_path):
         db = self._with_signal(tmp_path, "h5_vol_regime", [0.0, 0.0, -1.0])
         assert hc.check_forward_trades(db).detail["stalled"] == []
+
+
+# ---------------------------------------------------------------------------
+# Newest-backup selection (2026-09-01)
+#
+# The glob admits more than the scheduled `{label}_{ts}.db` shape. A manual
+# snapshot named `ledger_predeploy_<sha>_<ts>.db` sorts after every timestamped
+# backup ('p' > '2'), so a name sort reported ITS age as the backup's age: a
+# healthy 13h-old ledger backup was alerted as 48.7h stale.
+# ---------------------------------------------------------------------------
+
+class TestNewestBackupSelection:
+    def test_manual_snapshot_does_not_shadow_a_newer_scheduled_backup(self, tmp_path):
+        bdir = tmp_path / "ledger-backups"
+        # older manual file whose NAME sorts last
+        _touch_backup(bdir, "ledger", "predeploy_4cf0923_20260830T153100Z",
+                      age_hours=48.7)
+        # newer scheduled backup
+        _touch_backup(bdir, "ledger", "20260901_022503", age_hours=13.4)
+        r = hc.check_backup_freshness(bdir, label="ledger", check_name="ledger_backup")
+        assert r.detail["newest_backup"] == "ledger_20260901_022503.db"
+        assert r.severity == hc.OK, r.message
+
+    def test_a_recent_manual_file_cannot_mask_stale_scheduled_backups(self, tmp_path):
+        """The dangerous direction: mtime selection must still pick the newest
+        file, so a fresh manual snapshot legitimately clears the check -- but a
+        name sort could equally have hidden a stale one. Both cases resolve on
+        mtime, which is the only honest ordering."""
+        bdir = tmp_path / "ledger-backups"
+        _touch_backup(bdir, "ledger", "20260825_020000", age_hours=200)
+        _touch_backup(bdir, "ledger", "predeploy_abc_20260901T000000Z", age_hours=1)
+        r = hc.check_backup_freshness(bdir, label="ledger", check_name="ledger_backup")
+        assert r.detail["newest_backup"] == "ledger_predeploy_abc_20260901T000000Z.db"
+        assert r.severity == hc.OK
+
+    def test_all_stale_still_warns(self, tmp_path):
+        bdir = tmp_path / "ledger-backups"
+        _touch_backup(bdir, "ledger", "20260825_020000", age_hours=200)
+        _touch_backup(bdir, "ledger", "predeploy_abc_20260826T000000Z", age_hours=150)
+        r = hc.check_backup_freshness(bdir, label="ledger", check_name="ledger_backup")
+        assert r.severity == hc.WARNING
+        assert r.detail["newest_backup"] == "ledger_predeploy_abc_20260826T000000Z.db"
+
+    def test_timestamped_only_dir_is_unaffected(self, tmp_path):
+        """The pre-existing btc_trading case, where name and mtime agree."""
+        bdir = tmp_path / "backups"
+        _touch_backup(bdir, "btc_trading", "20260831_024000", age_hours=37)
+        _touch_backup(bdir, "btc_trading", "20260901_024340", age_hours=13.5)
+        r = hc.check_backup_freshness(bdir)
+        assert r.detail["newest_backup"] == "btc_trading_20260901_024340.db"
+        assert r.severity == hc.OK
