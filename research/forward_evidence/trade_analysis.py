@@ -255,6 +255,64 @@ def weekday_anchoring(trades: list[Trade]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Accrual state -- whether a family can currently produce a trade at all
+# ---------------------------------------------------------------------------
+
+def accrual_state(forward_db) -> dict[str, dict[str, Any]]:
+    """Per family: is the signal on, and is a trade open?
+
+    Closed-trade counts alone cannot answer "when does this family reach its
+    minimum": a count stays put whether the signal is firing or flat, so a
+    stalled family and a slow one look identical. A 7-day cadence only holds
+    while the signal is continuously non-flat -- `_apply_hold`-style chaining
+    re-enters on the exit day, but only if `position != 0`.
+
+    `trailing_flat_days` is the live figure: how many consecutive days the
+    signal has been flat up to the latest run. With no open trade, that is a
+    stall, and no arrival estimate built on the historical median gap applies.
+    """
+    con = _connect_ro(forward_db)
+    try:
+        fams = [r[0] for r in con.execute(
+            "SELECT DISTINCT signal_id FROM signal_log ORDER BY signal_id")]
+        out: dict[str, dict[str, Any]] = {}
+        for fam in fams:
+            rows = con.execute(
+                "SELECT day, position FROM signal_log WHERE signal_id = ? "
+                "ORDER BY day", (fam,)).fetchall()
+            pos = [r["position"] for r in rows]
+            runs: list[int] = []
+            cur = 0
+            for v in pos:
+                if v == 0:
+                    cur += 1
+                elif cur:
+                    runs.append(cur)
+                    cur = 0
+            trailing = cur
+            if cur:
+                runs.append(cur)
+            open_n = con.execute(
+                "SELECT COUNT(*) FROM trade_entries WHERE signal_id = ? AND open = 1",
+                (fam,)).fetchone()[0]
+            last_active = next((r["day"] for r in reversed(rows) if r["position"] != 0), None)
+            out[fam] = {
+                "days_observed": len(pos),
+                "flat_days": sum(1 for v in pos if v == 0),
+                "flat_fraction": (sum(1 for v in pos if v == 0) / len(pos)) if pos else None,
+                "trailing_flat_days": trailing,
+                "longest_flat_run": max(runs) if runs else 0,
+                "open_trades": open_n,
+                "last_active_day": last_active,
+                "latest_day": rows[-1]["day"] if rows else None,
+                "accruing": bool(open_n) or trailing == 0,
+            }
+        return out
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
 # Concentration and co-movement (descriptive decompositions of THIS sample)
 # ---------------------------------------------------------------------------
 
@@ -462,6 +520,7 @@ def build_report(forward_db, parquet_dir=None, minima: dict[str, int] | None = N
     }
     return {
         "n_trades": len(trades),
+        "accrual": accrual_state(forward_db),
         "excursions_enriched": enriched,
         "declared_gaps": [{"start": a, "end": b} for a, b in gaps],
         "families": families,
@@ -506,6 +565,17 @@ def print_report(rep: dict[str, Any]) -> None:
                   f" {t['exit_date']} ({t['exit_dow']}) {t['direction']:>3}"
                   f"{_fmt(t['net_return']):>10}{_fmt(t['mfe']):>9}"
                   f"{_fmt(t['mae']):>9}{_fmt(cap, '.2f'):>7}  {t['segment']}")
+
+    acc = rep.get("accrual") or {}
+    if acc:
+        print("\nACCRUAL STATE (a count alone cannot distinguish stalled from slow)")
+        print(f"   {'family':<26}{'obs':>5}{'flat%':>7}{'trailing':>10}{'open':>6}  status")
+        for fam, a in sorted(acc.items()):
+            status = "accruing" if a["accruing"] else \
+                     f"STALLED since {a['last_active_day']}"
+            print(f"   {fam:<26}{a['days_observed']:>5}"
+                  f"{_fmt(a['flat_fraction'], '.0%'):>7}"
+                  f"{a['trailing_flat_days']:>10}{a['open_trades']:>6}  {status}")
 
     p = rep.get("pooled") or {}
     if p.get("n"):

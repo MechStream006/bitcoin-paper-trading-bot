@@ -813,6 +813,19 @@ def check_forward_trades(forward_db_path: Path) -> CheckResult:
             "GROUP BY signal_id")}
         latest = con.execute(
             "SELECT MAX(exit_date) FROM trade_returns").fetchone()[0]
+        # A count stays put whether the signal is firing or flat, so a stalled
+        # family and a slow one look identical from `closed` alone. Report the
+        # families that currently have no open trade AND a flat latest signal.
+        stalled = [
+            r[0] for r in con.execute(
+                "SELECT s.signal_id FROM signal_log s "
+                "JOIN (SELECT signal_id, MAX(day) d FROM signal_log "
+                "      GROUP BY signal_id) m "
+                "  ON m.signal_id = s.signal_id AND m.d = s.day "
+                "WHERE s.position = 0 AND s.signal_id NOT IN "
+                "  (SELECT signal_id FROM trade_entries WHERE open = 1) "
+                "ORDER BY s.signal_id")
+        ]
     except Exception as exc:  # noqa: BLE001
         return CheckResult("forward_trades", INFO,
                            f"forward trade tables unreadable: {exc}", {})
@@ -826,8 +839,12 @@ def check_forward_trades(forward_db_path: Path) -> CheckResult:
         "forward_trades", OK,
         f"closed trades: {sum(closed.values())} total"
         + (f" | {summary}" if summary else "")
-        + (f" | latest exit {latest}" if latest else ""),
-        {"closed": closed, "open": open_, "latest_exit_date": latest},
+        + (f" | latest exit {latest}" if latest else "")
+        + (f" | stalled (flat, no open trade): "
+           f"{', '.join(_FWD_SIG_ALIASES.get(f, f) for f in stalled)}"
+           if stalled else ""),
+        {"closed": closed, "open": open_, "latest_exit_date": latest,
+         "stalled": stalled},
     )
 
 

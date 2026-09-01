@@ -1120,3 +1120,31 @@ class TestForwardTrades:
         before = db.read_bytes()
         hc.check_forward_trades(db)
         assert db.read_bytes() == before
+
+    def _with_signal(self, tmp_path, fam, positions, open_trade=False):
+        import sqlite3
+        db = self._db(tmp_path, {}, {fam: 1} if open_trade else {})
+        con = sqlite3.connect(db)
+        for i, pos in enumerate(positions, start=1):
+            con.execute("INSERT INTO run_log (signal_id, run_date, fn_hash, status)"
+                        " VALUES (?,?,?, 'ok')", (fam, f"2026-08-{i:02d}", "h"))
+            rid = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+            con.execute("INSERT INTO signal_log (signal_id, day, position, run_id)"
+                        " VALUES (?,?,?,?)", (fam, f"2026-08-{i:02d}", pos, rid))
+        con.commit(); con.close()
+        return db
+
+    def test_flat_latest_signal_with_no_open_trade_is_reported_stalled(self, tmp_path):
+        db = self._with_signal(tmp_path, "h5_vol_regime", [1.0, 1.0, 0.0])
+        r = hc.check_forward_trades(db)
+        assert r.detail["stalled"] == ["h5_vol_regime"]
+        assert "stalled" in r.message
+        assert r.severity == hc.OK, "a stall is visibility, not a page"
+
+    def test_open_trade_suppresses_the_stalled_label(self, tmp_path):
+        db = self._with_signal(tmp_path, "h5_vol_regime", [1.0, 0.0], open_trade=True)
+        assert hc.check_forward_trades(db).detail["stalled"] == []
+
+    def test_active_signal_is_not_stalled(self, tmp_path):
+        db = self._with_signal(tmp_path, "h5_vol_regime", [0.0, 0.0, -1.0])
+        assert hc.check_forward_trades(db).detail["stalled"] == []

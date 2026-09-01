@@ -353,3 +353,66 @@ class TestConcentrationAndCoMovement:
         assert p["hold_days"] == [7] and p["cost_bps"] == [15.0]
         assert "NOT independent" in p["note"]
         assert "not computed here" in p["co_movement"]["note"]
+
+
+class TestAccrualState:
+    """A closed-trade count cannot distinguish a stalled family from a slow
+    one: it stays put whether the signal is firing or flat."""
+
+    def _with_signals(self, tmp_path, rows, signals):
+        db = _db(tmp_path, rows)
+        con = sqlite3.connect(db)
+        for sig, day, pos in signals:
+            con.execute("INSERT INTO run_log (signal_id, run_date, fn_hash, status)"
+                        " VALUES (?,?,?, 'ok')", (sig, day + "x", "h"))
+            rid = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+            con.execute("INSERT INTO signal_log (signal_id, day, position, run_id)"
+                        " VALUES (?,?,?,?)", (sig, day, pos, rid))
+        con.commit(); con.close()
+        return db
+
+    def test_flat_tail_with_no_open_trade_is_stalled(self, tmp_path):
+        sig = [("f", f"2026-08-{d:02d}", 1.0) for d in range(1, 6)] + \
+              [("f", f"2026-08-{d:02d}", 0.0) for d in range(6, 12)]
+        db = self._with_signals(tmp_path, [], sig)
+        a = TA.accrual_state(db)["f"]
+        assert a["trailing_flat_days"] == 6
+        assert a["open_trades"] == 0
+        assert a["accruing"] is False
+        assert a["last_active_day"] == "2026-08-05"
+
+    def test_active_signal_is_accruing(self, tmp_path):
+        sig = [("f", f"2026-08-{d:02d}", 0.0) for d in range(1, 4)] + \
+              [("f", f"2026-08-{d:02d}", -1.0) for d in range(4, 8)]
+        a = TA.accrual_state(self._with_signals(tmp_path, [], sig))["f"]
+        assert a["trailing_flat_days"] == 0 and a["accruing"] is True
+        assert a["longest_flat_run"] == 3
+
+    def test_open_trade_means_accruing_even_if_signal_just_went_flat(self, tmp_path):
+        """The open trade will still close and can re-enter; a flat day alone
+        is not a stall while a position is live."""
+        db = self._with_signals(
+            tmp_path, [], [("f", "2026-08-01", 1.0), ("f", "2026-08-02", 0.0)])
+        con = sqlite3.connect(db)
+        con.execute("INSERT INTO trade_entries (signal_id, entry_date, direction,"
+                    " entry_close_price, planned_exit_date, open) VALUES"
+                    " ('f','2026-08-01',1,100.0,'2026-08-08',1)")
+        con.commit(); con.close()
+        a = TA.accrual_state(db)["f"]
+        assert a["open_trades"] == 1 and a["accruing"] is True
+
+    def test_flat_fraction_and_longest_run(self, tmp_path):
+        sig = [("f", "2026-08-01", 0.0), ("f", "2026-08-02", 0.0),
+               ("f", "2026-08-03", 1.0), ("f", "2026-08-04", 0.0),
+               ("f", "2026-08-05", 1.0)]
+        a = TA.accrual_state(self._with_signals(tmp_path, [], sig))["f"]
+        assert a["days_observed"] == 5 and a["flat_days"] == 3
+        assert a["flat_fraction"] == pytest.approx(0.6)
+        assert a["longest_flat_run"] == 2 and a["trailing_flat_days"] == 0
+
+    def test_report_carries_accrual(self, tmp_path):
+        db = self._with_signals(
+            tmp_path, [("f", "2026-06-15", "2026-06-22", 1, 100.0, 110.0)],
+            [("f", "2026-08-01", 0.0)])
+        rep = TA.build_report(db, parquet_dir=None)
+        assert rep["accrual"]["f"]["accruing"] is False
