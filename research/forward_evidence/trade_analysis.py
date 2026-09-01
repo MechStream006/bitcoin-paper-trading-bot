@@ -320,10 +320,21 @@ def build_report(forward_db, parquet_dir=None, minima: dict[str, int] | None = N
         try:
             from forward_evidence import runner_base
             latest = max((t.exit_date for t in trades), default=None)
-            if latest:
+            earliest = min((t.entry_date for t in trades), default=None)
+            if latest and earliest:
+                # load_daily_ohlcv treats min_rows as a LOOKBACK
+                # (start = through - min_rows - 32), so it must span the whole
+                # trade history. min_rows=1 silently returns only the last ~33
+                # days and leaves every earlier trade unenriched -- which reads
+                # as "no excursion" rather than "not loaded".
+                span = (date.fromisoformat(latest) - date.fromisoformat(earliest)).days
                 ohlcv = runner_base.load_daily_ohlcv(
-                    pathlib.Path(parquet_dir), latest, min_rows=1)
+                    pathlib.Path(parquet_dir), latest, min_rows=span + 1)
                 enriched = enrich_excursions(trades, ohlcv)
+                if enriched < len(trades):
+                    print(f"  (note: {len(trades) - enriched} trade(s) outside the "
+                          f"loaded price window {ohlcv.index[0]}..{ohlcv.index[-1]})",
+                          file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 -- excursions are optional enrichment
             enriched = -1
             print(f"  (excursions unavailable: {type(exc).__name__}: {exc})",

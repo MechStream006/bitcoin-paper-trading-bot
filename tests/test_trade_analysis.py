@@ -279,3 +279,32 @@ class TestReportAndBoundaries:
         """Windows consoles are cp1252; the report must render on both hosts."""
         src = (_FWD / "trade_analysis.py").read_text(encoding="utf-8")
         assert all(ord(c) < 128 for c in src)
+
+
+class TestExcursionCoverage:
+    def test_every_trade_enriches_when_the_frame_spans_the_history(self, tmp_path):
+        """Regression: min_rows is a LOOKBACK in load_daily_ohlcv, so a report
+        must size it from the trade span. Under-loading reads as 'no excursion'
+        rather than 'not loaded' -- silent, and wrong."""
+        rows, days, hi, lo, cl = [], [], [], [], []
+        d0 = date(2026, 6, 15)
+        for i in range(6):
+            e = (d0 + timedelta(days=7 * i)).isoformat()
+            x = (d0 + timedelta(days=7 * i + 7)).isoformat()
+            rows.append(("f", e, x, 1, 100.0, 101.0))
+        for i in range((date(2026, 7, 27) - d0).days + 1):
+            days.append((d0 + timedelta(days=i)).isoformat())
+            hi.append(110.0); lo.append(90.0); cl.append(100.0)
+        db = _db(tmp_path, rows)
+        ts = TA.load_trades(db)
+        assert TA.enrich_excursions(ts, _ohlcv(days, hi, lo, cl)) == len(ts)
+        assert all(t.mfe is not None for t in ts)
+
+    def test_partially_covering_frame_enriches_only_what_it_covers(self, tmp_path):
+        db = _db(tmp_path, [("f", "2026-06-15", "2026-06-22", 1, 100.0, 101.0),
+                            ("f", "2026-07-06", "2026-07-13", 1, 100.0, 101.0)])
+        ts = TA.load_trades(db)
+        days = [(date(2026, 7, 1) + timedelta(days=i)).isoformat() for i in range(20)]
+        n = TA.enrich_excursions(ts, _ohlcv(days, [110.0]*20, [90.0]*20, [100.0]*20))
+        assert n == 1
+        assert ts[0].mfe is None and ts[1].mfe is not None
