@@ -351,8 +351,14 @@ def check_validated_preconditions(
                 "(governance.bh_fdr()) before Validated promotion"
             )
         elif float(bh_p) > max_bh:
+            # FDB-13: name the convention. The column carries legacy in-sample
+            # raw p-values as well as BH-adjusted q-values, and an explanation
+            # that does not say which one it compared is not an explanation.
+            import bh_convention
             errors.append(
-                f"BH-FDR p {float(bh_p):.4f} > q={max_bh} "
+                f"BH-FDR p {float(bh_p):.4f} "
+                f"[{bh_convention.describe(bh_convention.classify(pinned_run))}] "
+                f"> q={max_bh} "
                 "(thresholds.yaml validated.<role>.max_bh_p)"
             )
 

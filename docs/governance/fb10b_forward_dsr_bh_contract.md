@@ -162,6 +162,74 @@ before any result may exist, and neither is a governance question:
 
 ---
 
+---
+
+## FDB-13 — Convention identification for `bh_p` (APPENDED 2026-09-01, Gate FB-10b-T2)
+
+**Append-only addendum, adopted under explicit human authorization (D-1 = F5,
+D-2 = YES). FDB-1 … FDB-12 above are UNCHANGED and are not reinterpreted by
+this section.**
+
+### FDB-13.1 — What `bh_p` means under this contract
+
+`bh_p` is the **Benjamini-Hochberg adjusted q-value** (OD-4 = D2):
+
+> for ordered `p_(1) <= … <= p_(m)`,
+> `adj_p(i) = min over k >= i of min(1, (m/k) * p_(k))`
+
+with the Validated criterion `bh_p <= q`. This is exactly equivalent to
+`bh_fdr()`'s existing rejection rule for `q < 1`: `adj_p(i) <= q` holds **iff**
+`i <= kmax`. `bh_fdr()` is therefore **cross-checked, never reinterpreted** —
+its `p`, `rank`, `bh_threshold` and `reject` keep their existing meanings.
+
+### FDB-13.2 — The column carries two statistics, permanently
+
+`runs.bh_p` already held values before this contract existed. Those are
+**in-sample raw p-values** (`1 - psr(returns, 0.0)`, `hold_days = 1`) written by
+`compute_dsr_for_registration.py`. A raw p is **not** a BH statistic; it is the
+input BH consumes. Those rows are historical evidence and are **never**
+rewritten, recomputed, converted, backfilled or annotated in storage.
+
+### FDB-13.3 — The discriminator is FDB-9
+
+FDB-9 requires every stored DSR/BH result to record twelve fields and states
+that a result missing any of them "is uninterpretable and invalid". That
+condition is the classifier:
+
+| observed | convention |
+|---|---|
+| `bh_p` is NULL (or NaN) | **uncomputed** |
+| `bh_p` present **and** the complete FDB-9 block is present | **forward BH-adjusted q-value** |
+| `bh_p` present **and** the complete FDB-9 block is absent | **legacy raw p-value** |
+
+No new stored field is created for this purpose, and none may be. Convention is
+**derived** from what FDB-9 already mandates — never from lane,
+`engine_version`, `run_ts` or any other correlate, each of which a future row
+could break.
+
+The FDB-9 block must be **complete**. A partial block is not a weaker valid
+result: FDB-9 already makes it invalid, so no row may legitimately be written in
+that state.
+
+### FDB-13.4 — Rendering duty (binds all surfaces)
+
+Extending FDB-7's existing reach over reporting ("computed, stored **or
+reported**"): **any artifact, report, CLI output, API response or other surface
+that renders a `bh_p` value MUST identify, at that surface, which of FDB-13.3's
+three conventions it is.** A `bh_p` presented without its convention is
+uninterpretable in the sense of FDB-9 and must never be compared with a value of
+the other convention.
+
+The numeric value is always preserved exactly as stored. Identification is
+additive: it never suppresses, rounds, rescales or replaces the number.
+
+### FDB-13.5 — What this section does not do
+
+It authorizes **no** computation, **no** producer, and **no** change to
+`governance.py`. It creates no database field and no schema change. It leaves
+FDB-1 … FDB-12, `thresholds.yaml`, `registry.yaml`, every pre-registration and
+every stored row untouched.
+
 ## 6. Trail
 
 | Gate | Outcome |

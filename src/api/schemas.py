@@ -101,6 +101,12 @@ class PinnedRunModel(BaseModel):
     sharpe: float | None = None
     dsr_prob: float | None = None
     bh_p: float | None = None
+    # FDB-13. Derived at serialisation time from the run already being
+    # returned; NOT a stored column and NOT a ledger schema change. `bh_p`
+    # carries legacy in-sample raw p-values alongside BH-adjusted q-values,
+    # so a consumer receiving the bare float cannot tell which it has.
+    # Additive and optional: existing consumers are unaffected.
+    bh_p_convention: str | None = None
     n_trades: int | None = None
     run_ts: str | None = None
     provenance: str | None = None

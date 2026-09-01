@@ -33,6 +33,7 @@ sys.path.insert(0, str(_THIS_DIR))
 import record
 import lifecycle
 import governance_verification
+import bh_convention
 
 # ---------------------------------------------------------------------------
 # Constants (evidence_reporting_architecture.md §5.4)
@@ -330,11 +331,21 @@ def _fmt_pinned_sharpe(pinned_run: dict | None) -> str:
 
 def _fmt_pinned_stat(pinned_run: dict | None, key: str) -> str:
     """DSR / BH-p on the decision anchor: never computable by a cron
-    (deliberately NULL on every bridge-written run) -> 'not-computed', not '-'."""
+    (deliberately NULL on every bridge-written run) -> 'not-computed', not '-'.
+
+    FDB-13: a rendered `bh_p` carries its statistical convention, because the
+    column holds legacy in-sample raw p-values alongside BH-adjusted q-values
+    and the two are not comparable. The numeric value is rendered unchanged --
+    only a marker is appended.
+    """
     if pinned_run is None:
         return NO_RUN
     v = pinned_run.get(key)
-    return _fmt_signed(v, "not-computed", fmt=".3f" if key == "dsr_prob" else ".4f")
+    text = _fmt_signed(v, "not-computed", fmt=".3f" if key == "dsr_prob" else ".4f")
+    if key != "bh_p":
+        return text
+    marker = bh_convention.short_label(bh_convention.classify(pinned_run))
+    return f"{text} ({marker})" if marker else text
 
 
 def _role_str(fam: dict) -> str:

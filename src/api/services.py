@@ -255,6 +255,7 @@ def _family_to_dict(row, report_mod) -> dict:
             "sharpe": pinned.get("sharpe"),
             "dsr_prob": pinned.get("dsr_prob"),
             "bh_p": pinned.get("bh_p"),
+            "bh_p_convention": report_mod.bh_convention.classify(pinned),
             "n_trades": pinned.get("n_trades"),
             "run_ts": pinned.get("run_ts"),
             "provenance": pinned.get("provenance"),
