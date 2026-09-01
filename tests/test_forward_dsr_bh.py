@@ -138,7 +138,10 @@ class TestPopulation:
         assert {s.name for s in P.library_specs()} == set(json.loads(raw))
 
     def test_dvol_family_is_excluded(self):
-        import signals as S
+        # via the D-3 boundary: a bare `import signals` here would resolve
+        # through sys.modules["engine"] and inherit the very collision the
+        # boundary exists to avoid.
+        S = P._load_evidence_module("signals")
         dvol = {s.name for s in S.REGISTRY["dvol"]}
         assert dvol and not (dvol & {s.name for s in P.library_specs()})
 
@@ -481,11 +484,13 @@ def computed(tmp_path):
     counts["h5_vol_regime"] = 16
     db = _forward_db(tmp_path, counts)
 
-    n = 400
-    d0 = date(2021, 1, 1)
+    # D-5: the frame must cover the frozen window exactly, or compute_battery
+    # refuses as corpus_incomplete before any statistic is formed.
+    days = P.expected_train_days()
+    n = len(days)
     rng = random.Random(3)
     master = pd.DataFrame({
-        "dt": [d0 + timedelta(days=i) for i in range(n)],
+        "dt": [date.fromisoformat(d) for d in days],
         "close": [100.0 * (1.0 + 0.002 * rng.gauss(0, 1)) ** i for i in range(n)],
     })
 

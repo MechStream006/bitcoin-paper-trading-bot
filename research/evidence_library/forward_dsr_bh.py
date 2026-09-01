@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -76,6 +77,55 @@ for _p in (_RESEARCH_ROOT, _RESEARCH_ROOT / "evidence", _RESEARCH_ROOT / "forwar
         sys.path.insert(0, str(_p))
 
 log = logging.getLogger(__name__)
+
+_EVIDENCE_DIR = _RESEARCH_ROOT / "evidence"
+_BINDING_KEY = "research.evidence.%s (forward_dsr_bh binding)"
+_ABSENT = object()
+
+
+def _load_evidence_module(name: str):
+    """Load `research/evidence/<name>.py` under a process-unique sys.modules key.
+
+    `sys.modules` is process-global and `research/dq/engine.py` (PR-7) registers
+    under the same bare name `engine` as `research/evidence/engine.py`. Whichever
+    imports first shadows the other, and `signals.py:16`'s bare
+    `from engine import SignalSpec` then resolves to the wrong module -- observed
+    as `ImportError: cannot import name 'SignalSpec'`.
+
+    Same remedy as `research/feature_store/evidence_engine_bindings.py`, which
+    documents this collision by name. One extension is needed that the precedent
+    did not require: `signals` cannot be loaded by path alone, because its own
+    bare import still goes through `sys.modules["engine"]`. So the correct
+    engine is bound to the bare name **only while the module executes**, and the
+    previous binding -- including its absence -- is restored in a `finally`,
+    so a caller's interpreter state survives unchanged either way.
+
+    Neither `research/dq/engine.py`, `research/evidence/engine.py` nor
+    `signals.py` is modified, and no global import hook is installed.
+    """
+    key = _BINDING_KEY % name
+    cached = sys.modules.get(key)
+    if cached is not None:
+        return cached
+
+    engine_mod = _load_evidence_module("engine") if name != "engine" else None
+    spec = importlib.util.spec_from_file_location(key, _EVIDENCE_DIR / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+
+    saved = sys.modules.get("engine", _ABSENT)
+    sys.modules["engine"] = module if engine_mod is None else engine_mod
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(key, None)
+        raise
+    finally:
+        if saved is _ABSENT:
+            sys.modules.pop("engine", None)
+        else:
+            sys.modules["engine"] = saved
+    return module
 
 # --- Frozen constants -------------------------------------------------------
 
@@ -137,7 +187,7 @@ class ActorRefusedError(RuntimeError):
 
 def library_specs() -> list:
     """The frozen 34 Phase B library SignalSpecs, in REGISTRY order."""
-    import signals as S
+    S = _load_evidence_module("signals")
 
     specs = [sp for g in LIBRARY_GROUPS for sp in S.REGISTRY[g]]
     if len(specs) != N_TRIALS:
@@ -251,13 +301,85 @@ def _train_slice_master():
     *existence*, not *spending* (FB-10b-J), and follows run_harmonization.py's
     established convention.
     """
-    import engine as E
+    E = _load_evidence_module("engine")
 
     m_full = E.load_master()
     m = m_full[m_full["day_ts"] < LOCKBOX_START_MS].reset_index(drop=True)
     if m.empty:
         raise BatteryRefused("empty_train_slice", "the train slice contains no rows")
     return m
+
+
+def expected_train_days() -> list[str]:
+    """Every calendar day the frozen train slice must contain.
+
+    Derived from FDB-2a's two dates, never hardcoded. It comes to 1612, which
+    is exactly the row count the pre-registrations record for this window
+    ("train only, 1612 rows, 2021-01-01..2025-05-31; 365 lockbox rows
+    excluded") -- a test asserts that agreement, so a drift in either direction
+    is caught rather than absorbed.
+    """
+    start = date.fromisoformat(TRAIN_START)
+    end = date.fromisoformat(TRAIN_END)
+    return [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+
+
+def validate_train_slice(master) -> None:
+    """Refuse a corpus that does not cover the frozen window, BEFORE any
+    statistic is formed (D-5).
+
+    Without this, an under-provisioned host proceeds on whatever months it
+    happens to hold and fails later inside `member_sharpes` as
+    `member_sharpe_uncomputable` -- naming a signal, when the real fault is a
+    missing corpus. Both refusals are fail-closed, but only one of them is
+    true, and an operator acting on the wrong one would go looking at the
+    statistics instead of the provisioning.
+
+    This never truncates the window to what is available, never substitutes a
+    later end date, and never reaches past `TRAIN_END`: it is handed the
+    already-sliced frame, so the sealed window is not present to be read.
+    """
+    if master is None or len(master) == 0:
+        raise BatteryRefused(
+            "corpus_incomplete",
+            f"the frozen train slice {TRAIN_START}..{TRAIN_END} is empty. The "
+            "producer does not truncate the window to whatever is available.",
+            {"expected_days": len(expected_train_days()), "observed_days": 0},
+        )
+    for column in ("dt", "close"):
+        if column not in master:
+            raise BatteryRefused(
+                "corpus_incomplete",
+                f"the train-slice frame has no {column!r} column; it is not a "
+                "master frame this producer can read.",
+            )
+
+    observed = {d.strftime("%Y-%m-%d") for d in master["dt"]}
+    beyond = sorted(d for d in observed if d > TRAIN_END)
+    if beyond:
+        raise BatteryRefused(
+            "corpus_beyond_train_slice",
+            f"{len(beyond)} day(s) after {TRAIN_END} reached the statistical path, "
+            f"earliest {beyond[0]}. FDB-2a's window is closed and the sealed "
+            "lockbox begins the next day; this frame was not sliced.",
+            {"beyond": beyond[:5]},
+        )
+
+    expected = expected_train_days()
+    missing = [d for d in expected if d not in observed]
+    if missing:
+        raise BatteryRefused(
+            "corpus_incomplete",
+            f"the frozen train slice {TRAIN_START}..{TRAIN_END} is missing "
+            f"{len(missing)} of {len(expected)} day(s), earliest {missing[0]}, "
+            f"latest {missing[-1]}. This is a PROVISIONING fault, not a "
+            "statistical one: no DSR/BH is attempted and no member Sharpe is "
+            "blamed. Provision the missing partitions, or run the battery where "
+            "the frozen corpus is complete.",
+            {"expected_days": len(expected), "observed_days": len(observed),
+             "missing_days": len(missing), "first_missing": missing[0],
+             "last_missing": missing[-1]},
+        )
 
 
 def member_sharpes(master, specs) -> dict[str, float]:
@@ -413,6 +535,9 @@ def compute_battery(
     try:
         specs = library_specs()
         m = master if master is not None else _train_slice_master()
+        # D-5: corpus completeness is established BEFORE any statistic, and for
+        # an injected frame too -- an off-host caller must clear the same bar.
+        validate_train_slice(m)
         sharpes = member_sharpes(m, specs)
         sr_trials_std = dispersion(sharpes)
     except BatteryRefused as exc:
@@ -527,6 +652,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--minimum", action="append", metavar="family=N",
                    help="REQUIRED, once per forward family. No defaults exist: "
                         "FDB-8 forbids borrowing or defaulting a minimum.")
+    p.add_argument("--out", type=pathlib.Path, default=None,
+                   help="write the full battery result, payloads included, to "
+                        "this JSON file for forward_snapshot --dsr-payload. "
+                        "Writes a FILE only -- never the ledger.")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)sZ %(levelname)s %(message)s")
@@ -538,14 +667,21 @@ def main(argv: list[str] | None = None) -> int:
             "and must never run from an unattended process (FDB-11)")
 
     result = compute_battery(args.forward_db, args.as_of, _parse_minima(args.minimum))
-    print(json.dumps({
+    summary = {
         "status": result.status,
         "as_of": result.as_of,
         "reason": result.reason,
         "detail": result.detail,
         "members": result.members,
         "excluded": result.excluded,
-    }, indent=2, sort_keys=True))
+    }
+    if args.out is not None:
+        pathlib.Path(args.out).write_text(
+            json.dumps({**summary, "payloads": result.payloads},
+                       indent=2, sort_keys=True, default=str),
+            encoding="utf-8")
+        print(f"battery written to {args.out}")
+    print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
 

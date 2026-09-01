@@ -33,12 +33,18 @@ undeclared day aborts the snapshot before the row is written.
 
 WHAT IT DELIBERATELY DOES NOT DO
 --------------------------------
-- **No DSR / BH-p.** `governance=None` always, so both stay NULL. Computing them
-  is a different authority and a different gate.
+- **No DSR / BH-p COMPUTED HERE.** `governance` defaults to None, so both stay
+  NULL unless an operator hands in a battery result from `forward_dsr_bh`
+  (OD-5 = C2: three enforcement points each resolve ONE run, so the statistics,
+  the readiness block and the floors payload must share it). This module never
+  computes a statistic and never names one in executable code.
 - **No admission, re-pin, transition, gate_result, receipt or promotion.** This
   module appends a run row and nothing else.
 - **No modification of any existing row.** The ledger is append-only; a snapshot
-  is always a *new* `(family_id, provenance, window_end)`.
+  is always a *new* row, and the identity that makes it new is
+  `(family_id, provenance, window_end, engine_version)` -- engine-scoped, so the
+  nightly collector's row at the same `window_end` is not mistaken for ours and
+  is never overwritten.
 
 OPERATOR-INVOKED, STRUCTURALLY
 ------------------------------
@@ -282,6 +288,34 @@ def _load_registry(path: pathlib.Path) -> dict:
     return yaml.safe_load(pathlib.Path(path).read_text(encoding="utf-8"))
 
 
+def _load_dsr_payload(
+    path: pathlib.Path | None, family_id: str, as_of: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """This family's block from a `forward_dsr_bh --out` file, or (None, None).
+
+    Refuses rather than guesses. A file for a different `as_of` is a different
+    battery -- FDB-5 membership is fixed per as_of, so silently accepting one
+    would attach statistics to the wrong evidence window. A family absent from
+    `payloads` was not a battery member, and inventing a block for it is
+    exactly what FDB-7 forbids.
+    """
+    if path is None:
+        return None, None
+    doc = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    if doc.get("as_of") != as_of:
+        raise SystemExit(
+            f"--dsr-payload is for as_of={doc.get('as_of')!r} but --as-of is "
+            f"{as_of!r}; a battery belongs to exactly one as_of (FDB-5)")
+    payloads = doc.get("payloads") or {}
+    entry = payloads.get(family_id)
+    if entry is None:
+        raise SystemExit(
+            f"--dsr-payload carries no result for {family_id!r} (members: "
+            f"{sorted(payloads)}). It was not a battery member at this as_of, "
+            "and no block may be invented for it (FDB-7).")
+    return entry["block"], entry["governance"]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Append one operator-invoked forward evidence snapshot.")
@@ -296,6 +330,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ledger-db", type=pathlib.Path, default=ls.DEFAULT_LEDGER_PATH)
     parser.add_argument("--registry", type=pathlib.Path,
                         default=_RESEARCH_ROOT / "evidence_library" / "registry.yaml")
+    parser.add_argument("--dsr-payload", type=pathlib.Path, default=None,
+                        help="JSON file written by forward_dsr_bh --out. Supplies "
+                             "this family's frozen statistics block. Omitted, both "
+                             "governance columns stay NULL. This module never "
+                             "computes a statistic.")
     parser.add_argument("--dry-run", action="store_true",
                         help="build and print the payload; write nothing")
     args = parser.parse_args(argv)
@@ -303,10 +342,16 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)sZ %(levelname)s %(message)s")
 
     registry = _load_registry(args.registry)
+    dsr_block, governance = _load_dsr_payload(args.dsr_payload, args.family, args.as_of)
+
     if args.dry_run:
+        # Same arguments the write path passes below, so the two branches build
+        # one payload from one code path. A dry run that omitted the DSR block
+        # would display something a write would never persist -- the FB-12i
+        # defect, which is not repeated here.
         metrics = build_snapshot_metrics(
             args.family, args.signal_id or args.family, registry,
-            args.forward_db, args.as_of)
+            args.forward_db, args.as_of, dsr_block=dsr_block)
         print(json.dumps(metrics, indent=2, sort_keys=True, default=str)
               if metrics else "no closed forward trades as of %s" % args.as_of)
         return 0
@@ -315,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         args.family, args.signal_id or args.family, registry,
         args.forward_db, args.ledger_db, args.as_of,
         actor=args.actor, actor_type=args.actor_type,
+        dsr_block=dsr_block, governance=governance,
     )
     print(f"{outcome}  {run_id or ''}".strip())
     return 0
