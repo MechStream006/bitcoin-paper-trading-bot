@@ -59,6 +59,7 @@ import argparse
 import json
 import logging
 import pathlib
+import sqlite3
 import sys
 from typing import Any
 
@@ -79,6 +80,10 @@ log = logging.getLogger(__name__)
 #: collector's "forward-collect-v1", so the two are separable in the ledger.
 ENGINE_VERSION = "forward-snapshot-v1"
 
+#: Where a computed DSR/BH result is embedded in the run's metrics. Reading it
+#: is `bh_convention`'s job (FDB-13/F5); producing it is `forward_dsr_bh`'s.
+DSR_BH_KEY = "forward_dsr_bh"
+
 #: Refused outright. A snapshot is an operator act.
 _REFUSED_ACTOR_TYPES = frozenset({"service", "cron", "system"})
 
@@ -89,6 +94,40 @@ class ActorRefusedError(RuntimeError):
     """A non-human actor attempted a snapshot."""
 
 
+def _existing_snapshot_run(
+    ledger_db: pathlib.Path, family_id: str, as_of: str
+) -> str | None:
+    """run_id of an existing run written by THIS engine for this (family, as_of).
+
+    OD-5/C2. `ledger_sync._existing_live_forward_run()` matches on
+    `(family_id, provenance, window_end)` and ignores `engine_version`, so it
+    treats the nightly collector's row as ours. The collector writes every night
+    for exactly the families that have closed trades -- i.e. the only families
+    that could ever be battery members -- which made every recent `as_of`
+    unavailable to a snapshot.
+
+    Scoping the probe to `engine_version` fixes that HERE, leaving
+    `ledger_sync` and the collector's own idempotency untouched. This module's
+    idempotency is unchanged in kind: a second snapshot at the same `as_of` is
+    still a no-op, and an existing row is still never overwritten -- the ledger
+    is append-only and a duplicate is prevented by not writing it.
+    """
+    p = pathlib.Path(ledger_db)
+    if not p.exists():
+        return None
+    con = sqlite3.connect(f"{p.resolve().as_uri()}?mode=ro", uri=True, timeout=10.0)
+    try:
+        row = con.execute(
+            "SELECT run_id FROM runs "
+            "WHERE family_id = ? AND provenance = ? AND window_end = ? "
+            "AND engine_version = ? LIMIT 1",
+            (family_id, ls.PROVENANCE, as_of, ENGINE_VERSION),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        con.close()
+
+
 def build_snapshot_metrics(
     family_id: str,
     signal_id: str,
@@ -96,6 +135,7 @@ def build_snapshot_metrics(
     forward_db: pathlib.Path,
     as_of: str,
     repo_root: pathlib.Path | None = None,
+    dsr_block: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The COMPLETE payload for one snapshot, or None when there is no
     closed-trade evidence.
@@ -147,6 +187,12 @@ def build_snapshot_metrics(
         family_id, window_start, as_of, forward_db=forward_db, signal_id=signal_id)
     fr.assert_exclusions_declared(readiness)
     metrics[fr.READINESS_KEY] = readiness
+    # FDB-9's twelve fields live inside this block, which is also what
+    # `bh_convention` reads to tell a forward BH-adjusted q from a legacy raw p
+    # (FDB-13/F5). It is attached HERE, like readiness, so --dry-run renders the
+    # exact bytes a write persists.
+    if dsr_block is not None:
+        metrics[DSR_BH_KEY] = dsr_block
     return metrics
 
 
@@ -161,6 +207,8 @@ def write_snapshot(
     actor_type: str = "human",
     dry_run: bool = False,
     repo_root: pathlib.Path | None = None,
+    dsr_block: dict[str, Any] | None = None,
+    governance: dict[str, Any] | None = None,
 ) -> tuple[str | None, str]:
     """Append one L2 snapshot run. Returns (run_id | None, outcome).
 
@@ -181,14 +229,15 @@ def write_snapshot(
     ls.assert_ledger_schema(ledger_db)
     ls.assert_forward_schema(forward_db)
 
-    existing = ls._existing_live_forward_run(ledger_db, family_id, as_of)
+    existing = _existing_snapshot_run(ledger_db, family_id, as_of)
     if existing:
-        log.info("[snapshot] %s: live-forward run already present for %s (skip)",
-                 family_id, as_of)
+        log.info("[snapshot] %s: %s run already present for %s (skip)",
+                 family_id, ENGINE_VERSION, as_of)
         return existing, "skipped"
 
     metrics = build_snapshot_metrics(
-        family_id, signal_id, registry, forward_db, as_of, repo_root=repo_root)
+        family_id, signal_id, registry, forward_db, as_of, repo_root=repo_root,
+        dsr_block=dsr_block)
     if metrics is None:
         log.info("[snapshot] %s: no closed forward trades as of %s (nothing written)",
                  family_id, as_of)
@@ -215,9 +264,11 @@ def write_snapshot(
         fn_hash=ls._fn_hash(forward_db, signal_id, as_of),
         engine_version=ENGINE_VERSION,
         n_trials=ls.N_TRIALS,
-        # governance omitted on purpose -> dsr_prob / bh_p stay NULL. Computing
-        # them is a separate gate with a separate authority.
-        governance=None,
+        # None unless an operator supplied a computed battery result. Left
+        # None, dsr_prob / bh_p stay NULL -- the safe value, since
+        # check_validated_preconditions() hard-fails on NULL. This module never
+        # computes them; `forward_dsr_bh` does, and hands the result in.
+        governance=governance,
     )
     payload = metrics[fa.FORWARD_ADMISSIBILITY_KEY]
     blocking = [f["name"] for f in payload["floors"] if f["status"] != "MET"]

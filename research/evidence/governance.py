@@ -116,6 +116,36 @@ def deflated_sr(returns: np.ndarray, sr_trials_std: float, n_trials: int
 # Benjamini-Hochberg FDR
 # ---------------------------------------------------------------------------
 
+def bh_adjusted_p(pvals: dict[str, float]) -> dict[str, float]:
+    """Benjamini-Hochberg ADJUSTED p-values (q-values).
+
+    For ascending p_(1) <= ... <= p_(m):
+
+        adj_(i) = min over k >= i of min(1, (m/k) * p_(k))
+
+    computed as a reverse cumulative minimum, which is what makes the result
+    monotone non-decreasing in rank.
+
+    `adj_(i) <= q` is EXACTLY equivalent to bh_fdr()'s rejection rule for
+    q < 1, so this function refines bh_fdr() rather than reinterpreting it:
+    bh_fdr says WHERE the rejection boundary falls at one chosen q, this says
+    how far inside or outside it each hypothesis sits. Both are kept, and
+    tests assert their agreement.
+
+    Added for FDB-13 (docs/governance/fb10b_forward_dsr_bh_contract.md), which
+    fixes `runs.bh_p` as the adjusted q-value. bh_fdr() is unchanged.
+    """
+    items = sorted(pvals.items(), key=lambda kv: kv[1])
+    m = len(items)
+    out: dict[str, float] = {}
+    running = 1.0
+    for i in range(m, 0, -1):
+        name, p = items[i - 1]
+        running = min(running, min(1.0, (m / i) * float(p)))
+        out[name] = float(running)
+    return out
+
+
 def bh_fdr(pvals: dict[str, float], q: float = 0.10) -> dict[str, dict]:
     """Benjamini-Hochberg step-up. Returns per-name {p, rank, bh_threshold, reject}."""
     items = sorted(pvals.items(), key=lambda kv: kv[1])

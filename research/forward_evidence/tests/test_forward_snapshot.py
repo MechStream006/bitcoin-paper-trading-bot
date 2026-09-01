@@ -379,8 +379,10 @@ class TestNoSideEffects:
                        "repin_evidence", "append_transition", "append_gate_result",
                        "append_receipt", "promote", "UPDATE", "DELETE",
                        # "readiness" was banned here until FB-12g; the block is
-                       # now written deliberately. Every other token stands,
-                       # dsr_prob and bh_p emphatically included.
+                       # now written deliberately. dsr_prob and bh_p still stand:
+                       # FB-10b-U routes a computed battery THROUGH this module
+                       # as an opaque payload, so neither statistic is ever named
+                       # -- let alone computed -- in executable code here.
                        "dsr_prob", "bh_p"):
             assert banned not in code, f"{banned} must not appear in executable code"
 
@@ -389,7 +391,26 @@ class TestNoSideEffects:
             src = (_FWD / mod).read_text(encoding="utf-8")
             assert "forward_snapshot" not in src, mod
 
-    def test_governance_is_never_passed_to_append_run(self):
+    def test_governance_defaults_to_none_and_is_never_built_here(self):
+        """SUPERSEDED IN PART by FB-10b-U (OD-5 = C2).
+
+        Until this gate, `forward_snapshot` passed a literal `governance=None`
+        and this test asserted that string, because DSR/BH belonged to no
+        producer yet. OD-5 places DSR/BH on THIS row -- three enforcement points
+        (check_validated_preconditions, TG-RDY, ForwardAdmissibilityRule) each
+        resolve ONE run, so the statistics, the readiness block and the floors
+        payload must share it.
+
+        What still stands, and is what the original guard was protecting:
+        this module never COMPUTES a governance statistic. The parameter
+        defaults to None, and a value can only arrive from an operator-invoked
+        `forward_dsr_bh` battery.
+        """
+        import inspect
         src = pathlib.Path(FS.__file__).read_text(encoding="utf-8")
-        assert "governance=None," in src
+        assert "governance=governance," in src
+        # no literal governance dict is constructed in this module
         assert "governance={" not in src
+        # and the default is still None on both public entry points
+        assert inspect.signature(FS.write_snapshot).parameters["governance"].default is None
+        assert inspect.signature(FS.build_snapshot_metrics).parameters["dsr_block"].default is None
