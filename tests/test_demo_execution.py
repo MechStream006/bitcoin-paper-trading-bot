@@ -5966,17 +5966,73 @@ class TestGovernanceBoundariesUnchanged:
         assert bridge.SIGNAL_ID == "g3_momentum_tsmom"
         assert bridge.STOP_DISTANCE_PCT == 1.4
 
-    def test_no_automated_entry_scheduler_exists(self):
-        """latest_direction must remain unwired from execution."""
+    def test_automated_entry_cannot_submit_without_the_explicit_controls(self):
+        """SUPERSEDES the original Gate 5C.23 guard.
+
+        The old assertion was that no automated entry scheduler may EXIST --
+        `latest_direction` had to stay unwired from execution, and
+        `src/runtime/lifecycle.py` could not import `src.strategies` at all.
+        That prohibition is retired deliberately: the paper-trading strategy
+        path is now wired on purpose, by operator decision.
+
+        What replaces it is narrower and stronger. Scheduling may exist; what
+        may NOT exist is a path from an automated entry to a real submission
+        that does not pass every explicit control. Concretely:
+
+          * a disabled strategy registers NO job at all;
+          * a dry-run pass cannot reach `executor.submit()`;
+          * the dry-run default is the refusing value, so an absent
+            environment variable is safe rather than silently live;
+          * the job stands down when the reconciler is not permitting trading,
+            and never clears a halt itself.
+
+        The risk limits, sizing and bridge identity assertions in this class
+        are unchanged and still bound the order that would eventually be sent.
+        """
         import ast
         import inspect
-        import src.runtime.lifecycle as lc
-        src = inspect.getsource(lc)
-        assert "latest_direction" not in src
-        assert "build_intent" not in src
+        import os
+        import config.settings as cfg
+        from src.strategies import strategy_jobs as sj
+
+        # 1. Disabled strategy registers nothing.
+        class _Sched:
+            def __init__(self):
+                self.jobs = {}
+
+            def has_job(self, job_id):
+                return job_id in self.jobs
+
+            def register(self, name, fn, trigger, job_id=None, **kw):
+                self.jobs[job_id or name] = fn
+
+        sched = _Sched()
+        assert sj.register_strategy_job(
+            sched, forward_db_path="x", conn=None, client=None,
+            risk_manager=None, executor=None, reconciler=None,
+            strategy_enabled=False) is False
+        assert sched.jobs == {}, "a disabled strategy must schedule no work"
+
+        # 2. The dry-run branch returns before submit() on every path.
+        src = inspect.getsource(sj)
         tree = ast.parse(src)
-        imported = set()
-        for n in ast.walk(tree):
-            if isinstance(n, ast.ImportFrom) and n.module:
-                imported.add(n.module)
-        assert not any(m.startswith("src.strategies") for m in imported)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "evaluate_once")
+        submits = [n for n in ast.walk(fn)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "submit"]
+        assert len(submits) == 1, "exactly one submit call site"
+        dry_guard = [n for n in ast.walk(fn)
+                     if isinstance(n, ast.If) and "dry_run" in ast.unparse(n.test)]
+        assert dry_guard, "the submit path must be guarded by dry_run"
+        assert any(isinstance(x, ast.Return) for g in dry_guard for x in ast.walk(g)),             "the dry_run guard must RETURN, not fall through to submit"
+
+        # 3. The refusing default.
+        assert cfg.DEMO_STRATEGY_DRY_RUN is True or             os.getenv("DEMO_STRATEGY_DRY_RUN") in ("0", "false", "False"),             "DEMO_STRATEGY_DRY_RUN must default to the refusing value"
+
+        # 4. The job reads the reconciler gate and never reopens it.
+        called = {n.func.attr for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        for banned in ("clear_halt_if_clean", "halt", "reconcile", "place_order"):
+            assert banned not in called, f"strategy job must not call {banned}"
+        assert "trading_permitted" in src, "the reconciler gate must be consulted"
