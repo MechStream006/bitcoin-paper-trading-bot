@@ -308,3 +308,48 @@ class TestExcursionCoverage:
         n = TA.enrich_excursions(ts, _ohlcv(days, [110.0]*20, [90.0]*20, [100.0]*20))
         assert n == 1
         assert ts[0].mfe is None and ts[1].mfe is not None
+
+
+class TestConcentrationAndCoMovement:
+    def test_concentration_shares_and_worst_exclusion(self):
+        c = TA.concentration([0.10, -0.20, 0.05, -0.01])
+        assert c["worst"] == -0.20 and c["best"] == 0.10
+        assert c["top1_share_of_abs"] == pytest.approx(0.20 / 0.36)
+        assert c["top2_share_of_abs"] == pytest.approx(0.30 / 0.36)
+        assert c["sum_wins"] == pytest.approx(0.15)
+        assert c["sum_losses"] == pytest.approx(-0.21)
+        # (1.10 * 1.05 * 0.99) - 1
+        assert c["cum_excluding_worst"] == pytest.approx(1.10 * 1.05 * 0.99 - 1)
+
+    def test_worst_exclusion_drops_only_one_instance_of_a_tie(self):
+        c = TA.concentration([-0.10, -0.10])
+        assert c["cum_excluding_worst"] == pytest.approx(-0.10)
+
+    def test_concentration_of_empty_is_empty(self):
+        assert TA.concentration([]) == {}
+
+    def test_co_movement_counts_agreement_not_correlation(self, tmp_path):
+        db = _db(tmp_path, [("a", "2026-06-15", "2026-06-22", 1, 100.0, 101.0),
+                            ("b", "2026-06-15", "2026-06-22", 1, 100.0, 101.0),
+                            ("c", "2026-06-15", "2026-06-22", -1, 100.0, 99.0),
+                            ("a", "2026-07-01", "2026-07-08", 1, 100.0, 101.0)])
+        cm = TA.co_movement(TA.load_trades(db))
+        assert cm["shared_entry_dates"] == 1
+        assert cm["split_direction"] == 1 and cm["unanimous_direction"] == 0
+        assert cm["dates"]["2026-06-15"] == ["a", "b", "c"]
+
+    def test_co_movement_unanimous(self, tmp_path):
+        db = _db(tmp_path, [("a", "2026-06-15", "2026-06-22", -1, 100.0, 99.0),
+                            ("b", "2026-06-15", "2026-06-22", -1, 100.0, 99.0)])
+        cm = TA.co_movement(TA.load_trades(db))
+        assert cm["unanimous_direction"] == 1 and cm["split_direction"] == 0
+
+    def test_pooled_block_is_labelled_non_independent(self, tmp_path):
+        db = _db(tmp_path, [("a", "2026-06-15", "2026-06-22", 1, 100.0, 110.0),
+                            ("b", "2026-06-15", "2026-06-22", 1, 100.0, 90.0)])
+        rep = TA.build_report(db, parquet_dir=None)
+        p = rep["pooled"]
+        assert p["n"] == 2 and p["wins"] == 1 and p["losses"] == 1
+        assert p["hold_days"] == [7] and p["cost_bps"] == [15.0]
+        assert "NOT independent" in p["note"]
+        assert "not computed here" in p["co_movement"]["note"]

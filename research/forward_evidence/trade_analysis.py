@@ -255,6 +255,67 @@ def weekday_anchoring(trades: list[Trade]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Concentration and co-movement (descriptive decompositions of THIS sample)
+# ---------------------------------------------------------------------------
+
+def concentration(nets):
+    """How much of a sample's total absolute movement sits in its largest
+    trades, and what the sample looks like without its single worst.
+
+    A decomposition of the observed set, not a robustness claim and not an
+    estimate: with a handful of trades, removing the worst is arithmetic, not
+    evidence. Reported so a large single contributor is visible rather than
+    buried inside a mean.
+    """
+    if not nets:
+        return {}
+    total_abs = sum(abs(x) for x in nets)
+    order = sorted(nets, key=abs, reverse=True)
+    worst = min(nets)
+    cum_ex = 1.0
+    dropped = False
+    for x in nets:
+        if x == worst and not dropped:      # drop one instance only
+            dropped = True
+            continue
+        cum_ex *= (1.0 + x)
+    return {
+        "top1_share_of_abs": (abs(order[0]) / total_abs) if total_abs else None,
+        "top2_share_of_abs": (sum(abs(x) for x in order[:2]) / total_abs) if total_abs else None,
+        "best": max(nets),
+        "worst": worst,
+        "sum_wins": sum(x for x in nets if x > 0),
+        "sum_losses": sum(x for x in nets if x < 0),
+        "cum_excluding_worst": cum_ex - 1.0,
+    }
+
+
+def co_movement(trades):
+    """Where families entered on the same date, and whether they agreed on
+    direction.
+
+    A co-occurrence count only. Pairwise correlation is a Validated-gate
+    statistic under the frozen thresholds and is deliberately NOT computed
+    here -- this says how often families act on the same day, nothing about
+    how their returns relate.
+    """
+    by_date = defaultdict(list)
+    for t in trades:
+        by_date[t.entry_date].append(t)
+    shared = {d: ts for d, ts in by_date.items() if len(ts) > 1}
+    unanimous = sum(1 for ts in shared.values()
+                    if len({t.direction for t in ts}) == 1)
+    return {
+        "shared_entry_dates": len(shared),
+        "unanimous_direction": unanimous,
+        "split_direction": len(shared) - unanimous,
+        "dates": {d: sorted(t.signal_id for t in ts) for d, ts in sorted(shared.items())},
+        "note": ("co-occurrence only; pairwise correlation is a Validated-gate "
+                 "statistic and is not computed here"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Quality findings
 # ---------------------------------------------------------------------------
 
@@ -372,14 +433,39 @@ def build_report(forward_db, parquet_dir=None, minima: dict[str, int] | None = N
             "entry_exit_dow": dict(Counter(f"{t.entry_dow}->{t.exit_dow}" for t in ts)),
             "segments": dict(Counter(t.segment for t in ts)),
             "anchoring": weekday_anchoring(ts),
+            "concentration": concentration(nets),
+            "mfe_over_mae": (statistics.mean(mfes) / abs(statistics.mean(maes))
+                             if mfes and maes and statistics.mean(maes) else None),
+            "entry_gaps_days": [
+                (date.fromisoformat(b.entry_date) - date.fromisoformat(a.entry_date)).days
+                for a, b in zip(ts, ts[1:])],
             "trades": [t.as_dict() for t in ts],
         }
 
+    all_nets = [t.net_return for t in trades]
+    pooled = {
+        "n": len(trades),
+        "wins": sum(1 for x in all_nets if x > 0),
+        "losses": sum(1 for x in all_nets if x < 0),
+        "mean": statistics.mean(all_nets) if all_nets else None,
+        "median": statistics.median(all_nets) if all_nets else None,
+        "stdev": statistics.stdev(all_nets) if len(all_nets) > 1 else None,
+        "n_long": sum(1 for t in trades if t.direction > 0),
+        "n_short": sum(1 for t in trades if t.direction < 0),
+        "entry_weekdays": dict(Counter(t.entry_dow for t in trades)),
+        "hold_days": sorted({t.hold_days for t in trades}),
+        "cost_bps": sorted({t.cost_bps for t in trades}),
+        "concentration": concentration(all_nets),
+        "co_movement": co_movement(trades),
+        "note": ("families trade the same underlying on overlapping days, so "
+                 "these are NOT independent observations -- shape only"),
+    }
     return {
         "n_trades": len(trades),
         "excursions_enriched": enriched,
         "declared_gaps": [{"start": a, "end": b} for a, b in gaps],
         "families": families,
+        "pooled": pooled,
         "quality_findings": quality_findings(forward_db, trades, gaps),
     }
 
@@ -420,6 +506,20 @@ def print_report(rep: dict[str, Any]) -> None:
                   f" {t['exit_date']} ({t['exit_dow']}) {t['direction']:>3}"
                   f"{_fmt(t['net_return']):>10}{_fmt(t['mfe']):>9}"
                   f"{_fmt(t['mae']):>9}{_fmt(cap, '.2f'):>7}  {t['segment']}")
+
+    p = rep.get("pooled") or {}
+    if p.get("n"):
+        c, cm = p["concentration"], p["co_movement"]
+        print("\nPOOLED (not independent observations - shape only)")
+        print(f"   n={p['n']} wins={p['wins']} losses={p['losses']} "
+              f"{p['n_long']}L/{p['n_short']}S  mean={_fmt(p['mean'])} "
+              f"median={_fmt(p['median'])} stdev={_fmt(p['stdev'], '.4f')}")
+        print(f"   best={_fmt(c['best'])} worst={_fmt(c['worst'])} "
+              f"top1={_fmt(c['top1_share_of_abs'], '.0%')} of abs movement")
+        print(f"   hold_days={p['hold_days']} cost_bps={p['cost_bps']} "
+              f"weekdays={p['entry_weekdays']}")
+        print(f"   co-movement: {cm['shared_entry_dates']} shared entry dates, "
+              f"{cm['unanimous_direction']} unanimous / {cm['split_direction']} split")
 
     print("\nDATA-QUALITY FINDINGS:")
     for f in rep["quality_findings"] or ["  none - corpus clean"]:
