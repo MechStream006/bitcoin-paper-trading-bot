@@ -82,3 +82,10 @@ DEMO_STRATEGY_ENABLED = os.getenv("DEMO_STRATEGY_ENABLED", "0") not in ("0", "fa
 # Kill switch. Engaged (blocking) unless explicitly disengaged -- the safe
 # default is the one that refuses to trade.
 DEMO_KILL_SWITCH_ENGAGED = os.getenv("DEMO_KILL_SWITCH", "1") not in ("0", "false", "False", "")
+
+# Strategy dry-run. When true the evaluation job stops after the risk decision
+# and cannot reach executor.submit(). Independent of DEMO_STRATEGY_ENABLED: the
+# strategy may be ON and still be observed without reaching the exchange, which
+# is what a first deployment needs. Defaults to the refusing value, so dropping
+# the variable is safe rather than silently live.
+DEMO_STRATEGY_DRY_RUN = os.getenv("DEMO_STRATEGY_DRY_RUN", "1") not in ("0", "false", "False", "")

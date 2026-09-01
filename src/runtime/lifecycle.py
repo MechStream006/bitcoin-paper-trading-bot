@@ -86,6 +86,7 @@ from src.data.storage import (
 from src.exchange.delta_client import DeltaClient
 from src.execution.reconciler import Reconciler
 from src.execution.reconciliation_jobs import register_reconciliation_jobs
+from src.strategies.strategy_jobs import register_strategy_job
 from src.execution.testnet_executor import TestnetExecutor
 from src.risk.manager import RiskManager
 from src.risk.state import RiskStateStore
@@ -172,6 +173,8 @@ class Runtime:
         metrics_exporter_port: int = 9108,
         demo_trading_enabled: bool = False,
         demo_kill_switch_engaged: bool = True,
+        demo_strategy_enabled: bool = False,
+        demo_strategy_dry_run: bool = True,
         n_strikes: int = 5,
         n_expiries: int = 3,
         snapshot_interval_sec: int = 60,
@@ -200,6 +203,8 @@ class Runtime:
         self._metrics_exporter_enabled = metrics_exporter_enabled
         self._demo_trading_enabled = demo_trading_enabled
         self._demo_kill_switch_engaged = demo_kill_switch_engaged
+        self._demo_strategy_enabled = demo_strategy_enabled
+        self._demo_strategy_dry_run = demo_strategy_dry_run
         self._metrics_exporter_port    = metrics_exporter_port
         self._n_strikes             = n_strikes
         self._n_expiries            = n_expiries
@@ -561,6 +566,22 @@ class Runtime:
 
             reconciler.start()
             register_reconciliation_jobs(scheduler, reconciler)
+
+            # The strategy evaluation job. bridge.build_intent() had no caller
+            # anywhere in src/ before this, so DEMO_STRATEGY_ENABLED gated a
+            # path nothing could reach. Registration is skipped entirely when
+            # the strategy is off, and dry_run stops a pass before the executor.
+            register_strategy_job(
+                scheduler,
+                forward_db_path=self._forward_status_path,
+                conn=reconciler.connection,
+                client=client,
+                risk_manager=risk_manager,
+                executor=executor,
+                reconciler=reconciler,
+                strategy_enabled=self._demo_strategy_enabled,
+                dry_run=self._demo_strategy_dry_run,
+            )
             logger.info("[runtime] reconciliation armed (trading_permitted=%s, "
                         "protection=%s)", reconciler.trading_permitted,
                         reconciler.protection.state.value

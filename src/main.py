@@ -124,6 +124,8 @@ def main() -> int:
         metrics_exporter_enabled=cfg.METRICS_EXPORTER_ENABLED,
         demo_trading_enabled=cfg.DEMO_TRADING_ENABLED,
         demo_kill_switch_engaged=cfg.DEMO_KILL_SWITCH_ENGAGED,
+        demo_strategy_enabled=cfg.DEMO_STRATEGY_ENABLED,
+        demo_strategy_dry_run=cfg.DEMO_STRATEGY_DRY_RUN,
         metrics_exporter_port=cfg.METRICS_EXPORTER_PORT,
     )
 
