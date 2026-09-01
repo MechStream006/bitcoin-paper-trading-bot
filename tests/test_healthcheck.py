@@ -1026,3 +1026,97 @@ def test_runtime_health_still_includes_forward_cycle_check_unchanged(tmp_path: P
     result = services.runtime_health(settings)
     names = [c["name"] for c in result["checks"]]
     assert "forward_cycle" in names
+
+
+# ---------------------------------------------------------------------------
+# check_forward_trades -- visibility-only trade accrual (FB-10b-W follow-up)
+# ---------------------------------------------------------------------------
+
+class TestForwardTrades:
+    """Accrual visibility. `check_forward_cycle` watches whether the daily RUN
+    happened; a family can run cleanly for weeks and open no trade because its
+    signal never fires. This reports counts only and never alerts."""
+
+    def _db(self, tmp_path, closed, open_):
+        import sqlite3
+        from pathlib import Path
+        db = tmp_path / "evidence_forward.db"
+        schema = (Path(__file__).resolve().parents[1] /
+                  "research" / "forward_evidence" / "schema_forward.sql")
+        con = sqlite3.connect(db)
+        con.executescript(schema.read_text(encoding="utf-8"))
+        for fam, n in closed.items():
+            for i in range(n):
+                con.execute(
+                    "INSERT INTO trade_entries (signal_id, entry_date, direction,"
+                    " entry_close_price, planned_exit_date, open) VALUES (?,?,?,?,?,0)",
+                    (fam, f"2026-01-{i+1:02d}", 1, 100.0, f"2026-01-{i+8:02d}"))
+                eid = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+                con.execute(
+                    "INSERT INTO trade_exits (entry_id, exit_date, exit_close_price,"
+                    " cost_bps) VALUES (?,?,?,?)", (eid, f"2026-01-{i+8:02d}", 101.0, 15.0))
+        for fam, n in open_.items():
+            for i in range(n):
+                con.execute(
+                    "INSERT INTO trade_entries (signal_id, entry_date, direction,"
+                    " entry_close_price, planned_exit_date, open) VALUES (?,?,?,?,?,1)",
+                    (fam, "2026-02-01", 1, 100.0, "2026-02-08"))
+        con.commit(); con.close()
+        return db
+
+    def test_reports_closed_and_open_counts(self, tmp_path):
+        db = self._db(tmp_path, {"h5_vol_regime": 7, "g3_momentum_tsmom": 8},
+                      {"g2_funding_level": 1})
+        r = hc.check_forward_trades(db)
+        assert r.severity == hc.OK
+        assert r.detail["closed"] == {"h5_vol_regime": 7, "g3_momentum_tsmom": 8}
+        assert r.detail["open"] == {"g2_funding_level": 1}
+        assert "15 total" in r.message
+
+    def test_never_escalates_above_ok(self, tmp_path):
+        """Paging on a normal trade close would be noise. Any populated corpus
+        must stay OK regardless of the counts."""
+        for i, closed in enumerate(({}, {"h5_vol_regime": 1}, {"h5_vol_regime": 25})):
+            sub = tmp_path / f"case{i}"
+            sub.mkdir()
+            assert hc.check_forward_trades(self._db(sub, closed, {})).severity == hc.OK
+
+    def test_missing_db_is_info_not_a_failure(self, tmp_path):
+        r = hc.check_forward_trades(tmp_path / "absent.db")
+        assert r.severity == hc.INFO
+
+    def test_unreadable_db_is_info_not_a_crash(self, tmp_path):
+        bad = tmp_path / "evidence_forward.db"
+        bad.write_bytes(b"not a database")
+        assert hc.check_forward_trades(bad).severity == hc.INFO
+
+    def test_knows_no_minimum(self):
+        """FDB-8: a DSR minimum is operator-supplied with no default. Hardcoding
+        the seven here would be the second source of truth OD-3 rejected."""
+        import ast
+        tree = ast.parse((_SCRIPTS_DIR / "healthcheck.py").read_text(encoding="utf-8"))
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "check_forward_trades")
+        # strip the docstring: it EXPLAINS why no minimum is known, and naming
+        # the rule in prose is the opposite of encoding a value.
+        if ast.get_docstring(fn):
+            fn.body = fn.body[1:]
+        code = ast.unparse(fn).lower()
+        for token in ("minimum", "dsr", "threshold", "floor"):
+            assert token not in code, f"{token} must not appear in executable code"
+        # and no literal family -> number mapping anywhere in the function
+        families = ("h5_vol_regime", "g1_market_regime_sma200", "g3_momentum_tsmom",
+                    "g1_trend_regime_ma_cross", "ivrv_vrp_spread",
+                    "g2_funding_level", "g3_atr_expansion")
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Dict):
+                keys = [k.value for k in node.keys
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+                assert not set(keys) & set(families), "no family->value table here"
+        assert not any(f in code for f in families), "no family id is named"
+
+    def test_opens_the_db_read_only(self, tmp_path):
+        db = self._db(tmp_path, {"h5_vol_regime": 2}, {})
+        before = db.read_bytes()
+        hc.check_forward_trades(db)
+        assert db.read_bytes() == before

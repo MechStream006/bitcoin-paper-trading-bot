@@ -779,6 +779,58 @@ def _h6_expected_date(now: Optional[datetime] = None) -> date:
     return d.date() if d.hour >= H6_GRACE_HOUR_UTC else (d.date() - timedelta(days=1))
 
 
+def check_forward_trades(forward_db_path: Path) -> CheckResult:
+    """Per-family CLOSED-trade accrual. Visibility only -- never alerts.
+
+    Trade accrual is what moves a family toward its frozen DSR minimum, and
+    nothing else on this host reports it: `check_forward_cycle` watches whether
+    the daily RUN happened, which is a different thing -- a family can collect
+    cleanly for weeks and open no trade at all because its signal never fires.
+
+    Severity is always OK, deliberately. It appears in the periodic report and
+    never in a Telegram alert, because a trade closing is normal operation and
+    paging on it would be noise.
+
+    It reports counts ONLY, and knows no minimum. FDB-8 makes a family's DSR
+    minimum operator-supplied at invocation with no default, so hardcoding the
+    seven here would create exactly the second source of truth OD-3 rejected.
+    The operator compares the count against the pre-registration.
+    """
+    if not forward_db_path.exists():
+        return CheckResult("forward_trades", INFO,
+                           f"forward DB not present at {forward_db_path}", {})
+    try:
+        con = sqlite3.connect(
+            f"{forward_db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=10.0)
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult("forward_trades", INFO,
+                           f"forward DB unreadable: {exc}", {})
+    try:
+        closed = {r[0]: r[1] for r in con.execute(
+            "SELECT signal_id, COUNT(*) FROM trade_returns GROUP BY signal_id")}
+        open_ = {r[0]: r[1] for r in con.execute(
+            "SELECT signal_id, COUNT(*) FROM trade_entries WHERE open=1 "
+            "GROUP BY signal_id")}
+        latest = con.execute(
+            "SELECT MAX(exit_date) FROM trade_returns").fetchone()[0]
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult("forward_trades", INFO,
+                           f"forward trade tables unreadable: {exc}", {})
+    finally:
+        con.close()
+
+    families = sorted(set(closed) | set(open_))
+    summary = " ".join(
+        f"{_FWD_SIG_ALIASES.get(f, f)}={closed.get(f, 0)}" for f in families)
+    return CheckResult(
+        "forward_trades", OK,
+        f"closed trades: {sum(closed.values())} total"
+        + (f" | {summary}" if summary else "")
+        + (f" | latest exit {latest}" if latest else ""),
+        {"closed": closed, "open": open_, "latest_exit_date": latest},
+    )
+
+
 def check_h6_cycle(h6_db_path: Path, now: Optional[datetime] = None) -> CheckResult:
     """Dead-man / continuity check for the H6 daily corpus-refresh cycle
     (daily_job.py -> forward_evidence.db run_log).
@@ -1002,6 +1054,7 @@ def main() -> int:
     if not args.no_forward_check:
         results.append(check_forward_cycle(args.forward_db_path))
     if not args.no_h6_check:
+        results.append(check_forward_trades(args.forward_db_path))
         results.append(check_h6_cycle(args.h6_db_path))
     if args.full_integrity:
         results.append(check_integrity(db_path))
