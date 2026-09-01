@@ -630,3 +630,64 @@ class TestEvidenceBackCompat:
         hb = _make_hb(forward_status_path=str(ev))
         text = hb._compose_heartbeat()
         assert f"fwd-evid     : {_fresh_run_date()}  ok=5/5  fn_hash=ok  gov=ok" in text
+
+
+# ---------------------------------------------------------------------------
+# Reconciler visibility (2026-09-01)
+#
+# A halted execution stack reports fatal=True, but the reconciler was absent
+# from BOTH of _collect_degraded()'s / _health_rollup()'s component lists. The
+# halt that latched 2026-08-27 12:34 UTC on a three-minute Delta 502 burst ran
+# silently for five days while heartbeats went out every 30 minutes.
+# ---------------------------------------------------------------------------
+
+class _StubHealth:
+    def __init__(self, healthy, fatal, name, details):
+        self.healthy, self.fatal, self.name, self.details = healthy, fatal, name, details
+
+
+class _StubReconciler:
+    def __init__(self, healthy, fatal=False, details="halted: 3 consecutive failures"):
+        self._h = _StubHealth(healthy, fatal, "reconciler", details)
+
+    def health(self):
+        return self._h
+
+
+def test_reconciler_absent_by_default():
+    """A research-only runtime may omit it; nothing must break."""
+    hb = _make_hb()
+    assert hb._reconciler is None
+    assert isinstance(hb._collect_degraded(), list)
+
+
+def test_healthy_reconciler_adds_no_line():
+    hb = _make_hb()
+    hb.set_reconciler(_StubReconciler(healthy=True))
+    assert not [d for d in hb._collect_degraded() if "reconciler" in d]
+
+
+def test_halted_reconciler_is_reported():
+    hb = _make_hb()
+    hb.set_reconciler(_StubReconciler(healthy=False, fatal=True))
+    lines = hb._collect_degraded()
+    assert any("reconciler" in d and "halted" in d for d in lines), lines
+
+
+def test_halted_reconciler_reaches_the_rendered_message():
+    hb = _make_hb()
+    hb.set_reconciler(_StubReconciler(healthy=False, fatal=True))
+    assert "reconciler" in hb._compose_heartbeat()
+
+
+def test_heartbeat_never_drives_or_clears_reconciliation():
+    """Observability only: health() may be called, nothing else."""
+    import ast
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "src" / "alerts" / "heartbeat.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    called = {n.func.attr for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    for banned in ("reconcile", "clear_halt_if_clean", "halt",
+                   "place_order", "cancel_order", "set_executor"):
+        assert banned not in called, f"heartbeat must not call {banned}"

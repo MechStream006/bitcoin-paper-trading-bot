@@ -594,6 +594,11 @@ class Runtime:
         else:
             logger.info("[runtime] reconciliation not armed (DEMO_TRADING_ENABLED off)")
         self._reconciler = reconciler
+        if reconciler is not None:
+            # Late-bound like the scheduler: the heartbeat is built before
+            # the execution stack, and a halted reconciler must be visible
+            # in the periodic message rather than only in journald.
+            heartbeat.set_reconciler(reconciler)
 
         # 10. Supervisor
         supervisor = Supervisor(

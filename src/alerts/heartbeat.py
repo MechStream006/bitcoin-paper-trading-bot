@@ -198,6 +198,7 @@ class HeartbeatService:
         self._started_at = started_at
         self._heartbeat_category = heartbeat_category
         self._expiry_context = expiry_context
+        self._reconciler = None
         # Optional: path to evidence_forward.db.  When set, the heartbeat reads
         # the daily forward-evidence cycle READ-ONLY (see alerts.forward_status).
         # When None, the forward section is omitted entirely (backward compatible).
@@ -244,6 +245,24 @@ class HeartbeatService:
     def stop(self) -> None:
         """Mark the component as inactive."""
         logger.info("[heartbeat] stopped")
+
+    def set_reconciler(self, reconciler: object) -> None:
+        """Late-bind the execution Reconciler for the degraded-component scan.
+
+        The reconciler is constructed after the heartbeat in the runtime
+        bootstrap, so it is injected here rather than via the constructor --
+        the same reason set_scheduler() exists. Only ``health()`` is called
+        (read-only); the heartbeat never drives reconciliation and never
+        clears a halt.
+
+        Before this existed the reconciler was absent from both component
+        scans below, so a halted execution stack -- which reports
+        ``fatal=True`` -- produced a normal-looking heartbeat. Observed in
+        production: the halt latched 2026-08-27 12:34 UTC on a three-minute
+        Delta 502 burst and ran silently for five days while heartbeats kept
+        going out every 30 minutes.
+        """
+        self._reconciler = reconciler
 
     def set_scheduler(self, scheduler: object) -> None:
         """Late-bind the SchedulerService for the D2 per-job-age line.
@@ -678,6 +697,8 @@ class HeartbeatService:
         ]
         if self._expiry_context is not None:
             components.append(self._expiry_context)
+        if self._reconciler is not None:
+            components.append(self._reconciler)
         for comp in components:
             try:
                 h = comp.health()
@@ -991,6 +1012,8 @@ class HeartbeatService:
         ]
         if self._expiry_context is not None:
             components.append(self._expiry_context)
+        if self._reconciler is not None:
+            components.append(self._reconciler)
         for comp in components:
             try:
                 h = comp.health()
