@@ -578,14 +578,46 @@ class TestAgainstRealCorpus:
                     if i.available_ts is not None:
                         assert i.available_ts <= r.decision_ts
 
-    def test_september_market_bars_stay_unavailable(self):
+    def test_market_bars_resolve_after_the_lake_extension(self):
+        """Superseded assertion.
+
+        This previously asserted market bars stay UNAVAILABLE, which was true
+        only while the lake ended 2026-07-31. Extending it through the live
+        period is what the assertion was waiting on, so it now checks the
+        thing that actually matters: the bar is real, fresh enough, and
+        traceable to the partition it came from. Unavailability itself stays
+        covered by the synthetic stale/missing cases, which do not depend on
+        the state of the corpus.
+        """
         decisions, loads = self._setup()
         specs = FT.starter_features(197889, "g3_momentum_tsmom")
         rows = FT.build_rows(decisions, specs, loads)
         for r in rows:
             f = r.features["market_close_1m"]
-            assert f.available is False
-            assert f.state in (S.STALE_DATA, S.INCOMPLETE_DATA)
+            assert f.state == S.READY, f.inputs[0].detail
+            rec = f.inputs[0]
+            assert rec.age_s <= rec.tolerance_s
+            assert rec.provenance["parquet_sha256"]
+            assert rec.available_ts <= r.decision_ts
+
+    def test_the_lake_holds_no_incomplete_final_day(self):
+        """The corpus invariant B01 depends on: no short day after 2026-06-15.
+
+        An in-progress month fetched via the CCXT fallback ends mid-day, which
+        would put a <1440-bar day into the corpus and trip the collector's
+        guard on an already-collected observation.
+        """
+        import pandas as pd
+        from storage.lake import list_partitions, read_partition
+        base = _RESEARCH / "data" / "raw"
+        for ds in ("spot", "perp"):
+            months = [(p["year"], p["month"]) for p in
+                      list_partitions(base, ds, "BTCUSDT")][-2:]
+            df = pd.concat([read_partition(base, ds, "BTCUSDT", y, m)
+                            for y, m in months])
+            counts = pd.to_datetime(df["open_time"], unit="ms", utc=True)                 .dt.strftime("%Y-%m-%d").value_counts()
+            short = sorted(d for d, c in counts.items() if c < 1440)
+            assert [d for d in short if d >= "2026-06-15"] == [], short
 
     def test_lake_inputs_carry_a_partition_sha(self):
         obs = AL.load_lake_source("dvol_1d", payload_fields=("close",))
