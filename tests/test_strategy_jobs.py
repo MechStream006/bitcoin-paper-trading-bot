@@ -7,6 +7,7 @@ TestnetExecutor.submit(), and these tests fix the wiring around them.
 from __future__ import annotations
 
 import ast
+import pathlib
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -289,6 +290,116 @@ class TestIdempotency:
 
 
 # --------------------------------------------------------------------------- registration
+
+class TestSignalContextCapture:
+    """The submit path must pin the signal state that motivated the entry.
+
+    `bridge.capture_signal_context` existed with no caller anywhere, which left
+    `trade_signal_context` empty and forced research to attribute strategy from
+    `positions.strategy` -- a projection that was wrong for four trades.
+    """
+
+    def test_a_successful_submission_writes_exactly_one_context_row(self, fwd, conn):
+        res = _run(fwd, conn, dry_run=False)
+        assert res.outcome == SJ.SUBMITTED and res.submitted is True
+        rows = conn.execute("SELECT * FROM trade_signal_context").fetchall()
+        assert len(rows) == 1
+
+    def test_the_stored_linkage_is_correct(self, fwd, conn):
+        res = _run(fwd, conn, dry_run=False)
+        ctx = storage.get_trade_signal_context(conn, res.intent.client_order_id)
+        assert ctx is not None
+        assert ctx["client_order_id"] == res.intent.client_order_id
+        assert ctx["signal_id"] == bridge.SIGNAL_ID
+        assert ctx["signal_id"] == res.intent.strategy,             "context must key to the same strategy the order carries"
+        assert ctx["direction"] == -1, "the open forward trade is short"
+        assert ctx["captured_ts"]
+
+    def test_repeated_execution_does_not_duplicate_context(self, fwd, conn):
+        """The executor must persist its order for the duplicate guard to see
+        it, exactly as the real one does -- FakeExecutor does not."""
+        ex = FakeExecutor()
+        real_submit = ex.submit
+
+        def submit_and_record(intent, account, now=None):
+            _insert_order(conn, intent.client_order_id, intent.side)
+            return real_submit(intent, account, now=now)
+
+        ex.submit = submit_and_record
+        first = _run(fwd, conn, executor=ex, dry_run=False)
+        second = _run(fwd, conn, executor=ex, dry_run=False)
+        assert first.outcome == SJ.SUBMITTED
+        assert second.outcome == SJ.DUPLICATE
+        assert len(ex.submits) == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM trade_signal_context").fetchone()[0] == 1
+
+    def test_capture_is_idempotent_if_called_twice_for_one_order(self, fwd, conn):
+        """write_trade_signal_context upserts on client_order_id."""
+        res = _run(fwd, conn, dry_run=False)
+        bridge.capture_signal_context(conn, res.intent.client_order_id, fwd,
+                                      bridge.SIGNAL_ID)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM trade_signal_context").fetchone()[0] == 1
+
+    def test_a_capture_failure_does_not_fail_the_order(self, fwd, conn, monkeypatch):
+        """A research record must never turn a filled order into a failure."""
+        def boom(*a, **k):
+            raise RuntimeError("context store exploded")
+
+        monkeypatch.setattr(bridge, "capture_signal_context", boom)
+        ex = FakeExecutor()
+        res = _run(fwd, conn, dry_run=False, executor=ex)
+        assert res.outcome == SJ.SUBMITTED and res.submitted is True
+        assert len(ex.submits) == 1, "the order still went out"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM trade_signal_context").fetchone()[0] == 0
+
+    def test_a_missing_forward_db_does_not_fail_the_order(self, tmp_path, conn):
+        """capture_signal_context's own best-effort path, exercised live."""
+        fwd = _forward_db(tmp_path, -1)
+        res = _run(fwd, conn, dry_run=False)
+        assert res.outcome == SJ.SUBMITTED
+        pathlib.Path(fwd).unlink()
+        conn.execute("DELETE FROM orders")
+        conn.execute("DELETE FROM trade_signal_context")
+        conn.commit()
+        assert _run(fwd, conn, dry_run=False).outcome == SJ.NO_SIGNAL
+
+    def test_no_context_when_the_pass_does_not_submit(self, fwd, conn):
+        for kwargs in ({"dry_run": True},
+                       {"enabled": False, "dry_run": False}):
+            conn.execute("DELETE FROM trade_signal_context")
+            conn.commit()
+            res = _run(fwd, conn, **kwargs)
+            assert res.submitted is False
+            assert conn.execute(
+                "SELECT COUNT(*) FROM trade_signal_context").fetchone()[0] == 0,                 f"context written without a submission ({kwargs})"
+
+    def test_no_context_when_risk_rejects(self, fwd, conn):
+        res = _run(fwd, conn, dry_run=False, risk=FakeRisk(Decision.reject("blocked")))
+        assert res.outcome == SJ.REJECTED and res.submitted is False
+        assert conn.execute(
+            "SELECT COUNT(*) FROM trade_signal_context").fetchone()[0] == 0
+
+    def test_capture_happens_only_after_a_successful_submit(self):
+        """Structural: the call must sit after submit(), not before it."""
+        src = (ROOT / "src" / "strategies" / "strategy_jobs.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "evaluate_once")
+        submit_line = capture_line = None
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                label = getattr(node.func, "attr", None)
+                if label == "submit":
+                    submit_line = node.lineno
+                if label == "capture_signal_context":
+                    capture_line = node.lineno
+        assert submit_line and capture_line
+        assert capture_line > submit_line
+
 
 class TestRegistration:
     def _register(self, sched, enabled, fwd, conn, dry_run=True):

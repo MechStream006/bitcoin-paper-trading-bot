@@ -12,6 +12,7 @@ One pass, on an interval::
     bridge.latest_direction()  ->  bridge.build_intent()
                                ->  RiskManager.validate()
                                ->  [dry-run: STOP]  |  executor.submit()
+                                                    -> capture_signal_context
 
 Every step delegates. No signal is recomputed, no price is invented, no size is
 chosen here: sizing is ``limits.MAX_CONTRACTS_PER_ORDER`` inside `build_intent`,
@@ -191,6 +192,27 @@ def evaluate_once(
         return EvaluationResult(ERROR, f"submit: {type(exc).__name__}: {exc}",
                                 intent, decision)
     log.warning("[strategy] SUBMITTED %s", intent.client_order_id)
+
+    # Pin the signal state that motivated this entry, at submit time. The
+    # forward database moves on, so a reader months later can recover what the
+    # signal says now but not what it said when the order went out --
+    # `capture_signal_context` exists precisely for that and, until this call,
+    # had no caller anywhere (its own docstring said so), which is why
+    # `trade_signal_context` was empty and research had to attribute strategy
+    # from `positions.strategy`, a projection that was wrong for four trades.
+    #
+    # Strictly after a successful submit, and strictly best-effort: the helper
+    # already swallows its own failures, and this guard covers the argument
+    # handling outside its try block. A research record must never be able to
+    # turn a filled order into a reported failure, so nothing here touches the
+    # returned result.
+    try:
+        bridge.capture_signal_context(
+            conn, intent.client_order_id, forward_db_path, bridge.SIGNAL_ID)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[strategy] signal context not captured for %s: %s: %s",
+                    intent.client_order_id, type(exc).__name__, exc)
+
     return EvaluationResult(SUBMITTED, "submitted", intent, decision, submitted=True)
 
 
