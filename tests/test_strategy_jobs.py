@@ -382,6 +382,17 @@ class TestSignalContextCapture:
         assert conn.execute(
             "SELECT COUNT(*) FROM trade_signal_context").fetchone()[0] == 0
 
+    def test_no_context_when_the_submission_itself_fails(self, fwd, conn):
+        """A rejected or erroring submit never reaches the capture call."""
+        class Exploding:
+            def submit(self, intent, account, now=None):
+                raise RuntimeError("delta said no")
+
+        res = _run(fwd, conn, dry_run=False, executor=Exploding())
+        assert res.outcome == SJ.ERROR and res.submitted is False
+        assert conn.execute(
+            "SELECT COUNT(*) FROM trade_signal_context").fetchone()[0] == 0
+
     def test_capture_happens_only_after_a_successful_submit(self):
         """Structural: the call must sit after submit(), not before it."""
         src = (ROOT / "src" / "strategies" / "strategy_jobs.py").read_text(

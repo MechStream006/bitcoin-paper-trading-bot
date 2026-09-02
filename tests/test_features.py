@@ -482,7 +482,7 @@ class TestDeterminismAndPurity:
 class TestStarterFeatureSet:
     def test_it_is_small_and_every_feature_is_declared(self):
         specs = FT.starter_features(signal_id="g3")
-        assert len(specs) == 4
+        assert len(specs) == 5
         for s in specs:
             assert s.description and s.inputs
             for i in s.inputs:

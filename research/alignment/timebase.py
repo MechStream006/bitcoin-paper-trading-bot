@@ -200,6 +200,27 @@ SOURCES: dict[str, SourceSpec] = {
         notes="The nearest thing to a `signal_evaluations` table; no table of "
               "that name exists.",
     ),
+    "held_direction": SourceSpec(
+        name="held_direction", store="derived (evidence_forward.db trade ledger)",
+        table="trade_entries", grain="1 day (one per successful collector run)",
+        event_field="entry_date", event_unit=DATE,
+        availability_field=None,
+        availability_offset_s=(24 + FORWARD_COLLECTOR_UTC_HOUR) * 3600.0,
+        availability_rule="the completion instant of the run that last restated "
+                          "the ledger: run_date D executes at D+1 at the "
+                          "collector hour, opening and closing trades before "
+                          "anything can read the result",
+        provenance_fields=("signal_id", "run_date", "entry_id", "entry_date",
+                           "planned_exit_date", "closing_run_date"),
+        notes="Direction of the trade HELD at each run, which is what "
+              "bridge.latest_direction() returns and therefore what a live "
+              "decision consumes -- distinct from signal_log.position, the "
+              "latest DAILY signal, which the hold lets it drift from. Closure "
+              "is resolved against run_log, never planned_exit_date, because a "
+              "silenced collector holds a trade past its nominal exit "
+              "(INC-0005). Built by "
+              "alignment.forward_trades.held_direction_observations.",
+    ),
     "forward_trade_entries": SourceSpec(
         name="forward_trade_entries", store="evidence_forward.db",
         table="trade_entries", grain="1 day",

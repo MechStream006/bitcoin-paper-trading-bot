@@ -372,7 +372,7 @@ BAR_TOLERANCE_S = 900.0
 
 
 def starter_features(signal_id: str) -> list[FeatureSpec]:
-    """Four features over sources this project already collects (contract v2).
+    """Five features over sources this project already collects (contract v2).
 
     v1 took an `instrument_id` and keyed three option features to it. That is
     unresolvable across dates -- no option instrument survives more than ~3 days
@@ -396,6 +396,15 @@ def starter_features(signal_id: str) -> list[FeatureSpec]:
 
     Re-adding either is a new feature needing its own justification, not a
     restoration; `REMOVED_IN_V2` records that so it cannot happen silently.
+
+    `consumed_direction` is the fifth, added later and alongside
+    `signal_position` rather than in place of it. `signal_position` is the
+    latest DAILY signal; the live path consumes the direction currently HELD,
+    and the collector's no-early-exit hold lets the two drift apart on 10.6% of
+    held-days. Both are correct answers to different questions, so both are
+    carried; `alignment.forward_trades` explains the reduction and why closure
+    is resolved from `run_log`. `signal_position`'s contract is untouched, so
+    its hash and every row already persisted under it stand unchanged.
     """
     return [
         FeatureSpec(
@@ -424,6 +433,17 @@ def starter_features(signal_id: str) -> list[FeatureSpec]:
                 tolerance_s=SIGNAL_TOLERANCE_S),),
             compute=_identity("pos"),
             description="The signal family's position as of the decision.",
+        ),
+        FeatureSpec(
+            name="consumed_direction",
+            inputs=(InputRequirement(
+                name="held", source="held_direction", field="direction",
+                key_field="signal_id", key=signal_id,
+                tolerance_s=SIGNAL_TOLERANCE_S),),
+            compute=_identity("held"),
+            description="The direction actually held at the decision instant, "
+                        "i.e. what bridge.latest_direction() returns. 0.0 means "
+                        "flat, which is a state, not a gap.",
         ),
         FeatureSpec(
             name="market_close_1m",

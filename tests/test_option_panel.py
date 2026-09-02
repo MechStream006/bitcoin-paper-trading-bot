@@ -292,10 +292,11 @@ class TestNoLookAhead:
 
 
 class TestContractV2:
-    def test_four_features_and_no_instrument_id(self):
+    def test_feature_set_is_pinned_and_carries_no_instrument_id(self):
         specs = FT.starter_features("g3")
         assert [s.name for s in specs] == [
-            "spot_price", "option_atm_iv", "signal_position", "market_close_1m"]
+            "spot_price", "option_atm_iv", "signal_position",
+            "consumed_direction", "market_close_1m"]
 
     def test_removed_features_cannot_silently_reappear(self):
         names = {s.name for s in FT.starter_features("g3")}
