@@ -12,7 +12,8 @@ One pass, on an interval::
     bridge.latest_direction()  ->  bridge.build_intent()
                                ->  RiskManager.validate()
                                ->  [dry-run: STOP]  |  executor.submit()
-                                                    -> capture_signal_context
+                                                    -> [ACKED only]
+                                                       capture_signal_context
 
 Every step delegates. No signal is recomputed, no price is invented, no size is
 chosen here: sizing is ``limits.MAX_CONTRACTS_PER_ORDER`` inside `build_intent`,
@@ -54,6 +55,7 @@ from typing import Any, Optional
 
 from src.data import storage
 from src.execution import fills as fills_mod
+from src.execution.order_state import OrderState
 from src.risk.manager import AccountSnapshot, Decision, OrderIntent
 from src.strategies import bridge
 
@@ -75,6 +77,9 @@ class EvaluationResult:
     intent: Optional[OrderIntent] = None
     decision: Optional[Decision] = None
     submitted: bool = False
+    #: The state `executor.submit()` reported, verbatim, when it was reached.
+    #: None on every path that never got that far.
+    order_state: Optional[str] = None
 
 
 # outcomes
@@ -85,8 +90,19 @@ NOT_PERMITTED = "not_permitted"       # reconciler halted / trading closed
 QUOTE_UNAVAILABLE = "quote_unavailable"
 REJECTED = "rejected"                 # risk said no
 DRY_RUN = "dry_run"                   # approved, but not submitted by design
-SUBMITTED = "submitted"
+SUBMITTED = "submitted"               # the exchange ACKED it
+NOT_ACKED = "not_acked"               # submit() returned without an ACK
 ERROR = "error"
+
+#: The one state that means the exchange accepted the order.
+#:
+#: `TestnetExecutor.submit` RETURNS rather than raises for every failure it
+#: understands -- BLOCKED by its own risk re-validation, REJECTED on an HTTP
+#: 4xx, and UNKNOWN on a timeout, a 5xx, a transport error or an
+#: uninterpretable 200. Only `InstrumentMissing` escapes as an exception. So
+#: "submit() did not raise" is not "the order was submitted", and treating it
+#: as such reported five distinct failures as SUBMITTED.
+ACCEPTED_STATE = OrderState.ACKED
 
 
 def evaluate_once(
@@ -186,11 +202,22 @@ def evaluate_once(
         return EvaluationResult(DRY_RUN, "approved; dry_run=True", intent, decision)
 
     try:
-        executor.submit(intent, account, now=now)
+        outcome = executor.submit(intent, account, now=now)
     except Exception as exc:  # noqa: BLE001
         log.error("[strategy] submit failed: %s: %s", type(exc).__name__, exc)
         return EvaluationResult(ERROR, f"submit: {type(exc).__name__}: {exc}",
                                 intent, decision)
+
+    state = _submitted_state(outcome)
+    if state != ACCEPTED_STATE:
+        # Reported as what it was. The order row the executor already wrote is
+        # the record of the attempt; nothing here retries, cancels or otherwise
+        # acts on it -- reconciliation owns an ambiguous order, exactly as before.
+        log.error("[strategy] NOT ACKED %s: executor returned %s",
+                  intent.client_order_id, state)
+        return EvaluationResult(NOT_ACKED, f"executor returned {state}",
+                                intent, decision, order_state=state)
+
     log.warning("[strategy] SUBMITTED %s", intent.client_order_id)
 
     # Pin the signal state that motivated this entry, at submit time. The
@@ -206,14 +233,47 @@ def evaluate_once(
     # handling outside its try block. A research record must never be able to
     # turn a filled order into a reported failure, so nothing here touches the
     # returned result.
+    #
+    # The direction is taken from the SUBMITTED INTENT, not re-read. This call
+    # happens after the quote, the wallet read, risk validation and an HTTP
+    # round-trip, and the 01:00 UTC collector can close or open a forward trade
+    # inside that window -- so a re-read can pin a direction the order never
+    # carried. `intent.side` is the artefact that actually went to Delta.
     try:
         bridge.capture_signal_context(
-            conn, intent.client_order_id, forward_db_path, bridge.SIGNAL_ID)
+            conn, intent.client_order_id, forward_db_path, bridge.SIGNAL_ID,
+            direction=_intent_direction(intent))
     except Exception as exc:  # noqa: BLE001
         log.warning("[strategy] signal context not captured for %s: %s: %s",
                     intent.client_order_id, type(exc).__name__, exc)
 
-    return EvaluationResult(SUBMITTED, "submitted", intent, decision, submitted=True)
+    return EvaluationResult(SUBMITTED, "submitted", intent, decision,
+                            submitted=True, order_state=state)
+
+
+def _submitted_state(outcome: Any) -> str:
+    """The order state `submit()` reported, as its plain string value.
+
+    `TestnetExecutor.submit` returns ``(OrderState, Decision)``. Anything this
+    cannot read as a known state -- a differently shaped return from another
+    executor, or None -- resolves to UNKNOWN rather than being assumed
+    accepted. This predicate gates a durable research record and the
+    operator-facing outcome, so it fails closed.
+    """
+    state = outcome[0] if isinstance(outcome, tuple) and outcome else outcome
+    try:
+        return OrderState(getattr(state, "value", state)).value
+    except (ValueError, TypeError):
+        return OrderState.UNKNOWN.value
+
+
+def _intent_direction(intent: OrderIntent) -> int:
+    """+1 / -1 for the side actually submitted.
+
+    Read off the intent rather than the signal, so the recorded direction is
+    the one the order carried even if the ledger moves underneath.
+    """
+    return 1 if intent.side == "buy" else -1
 
 
 def _quote(client) -> tuple[float, float, float] | None:

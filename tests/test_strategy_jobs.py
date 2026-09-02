@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data import storage  # noqa: E402
+from src.execution.order_state import OrderState  # noqa: E402
 from src.risk.manager import AccountSnapshot, Decision, OrderIntent  # noqa: E402
 from src.strategies import bridge, strategy_jobs as SJ  # noqa: E402
 
@@ -51,12 +52,22 @@ class FakeClient:
 
 
 class FakeExecutor:
-    def __init__(self):
+    """Stands in for TestnetExecutor, and returns what it really returns.
+
+    `submit` yields ``(OrderState, Decision)`` and RAISES only for
+    InstrumentMissing -- every failure it understands comes back as a state.
+    The earlier stub returned the string "state", which no caller could
+    distinguish from success, so no test could see a non-ACKED submission.
+    """
+
+    def __init__(self, state=OrderState.ACKED, decision=None):
         self.submits = []
+        self.state = state
+        self.decision = decision or Decision.approve(1.0, 0.1)
 
     def submit(self, intent, account, now=None):
         self.submits.append((intent, account))
-        return ("state", Decision.approve(1.0, 0.1))
+        return (self.state, self.decision)
 
 
 class FakeRisk:
@@ -410,6 +421,148 @@ class TestSignalContextCapture:
                     capture_line = node.lineno
         assert submit_line and capture_line
         assert capture_line > submit_line
+
+
+class TestOnlyAnAckedSubmissionCounts:
+    """`submit()` returns for every failure it understands.
+
+    BLOCKED (its own risk re-validation), REJECTED (HTTP 4xx) and UNKNOWN (a
+    timeout, a 5xx, a transport error, an uninterpretable 200) all come back as
+    states, not exceptions. Treating "did not raise" as success reported five
+    distinct failures as SUBMITTED and wrote a durable context row for each.
+    """
+
+    NOT_ACCEPTED = [OrderState.BLOCKED, OrderState.REJECTED, OrderState.UNKNOWN]
+
+    def _context_rows(self, conn):
+        return conn.execute("SELECT COUNT(*) FROM trade_signal_context").fetchone()[0]
+
+    def test_acked_is_the_only_accepted_state(self):
+        assert SJ.ACCEPTED_STATE is OrderState.ACKED
+
+    def test_an_acked_submission_is_reported_and_captured(self, fwd, conn):
+        res = _run(fwd, conn, dry_run=False,
+                   executor=FakeExecutor(state=OrderState.ACKED))
+        assert res.outcome == SJ.SUBMITTED and res.submitted is True
+        assert res.order_state == OrderState.ACKED.value
+        assert self._context_rows(conn) == 1
+
+    @pytest.mark.parametrize("state", NOT_ACCEPTED)
+    def test_a_non_acked_state_writes_no_context(self, fwd, conn, state):
+        res = _run(fwd, conn, dry_run=False, executor=FakeExecutor(state=state))
+        assert self._context_rows(conn) == 0, f"context written for {state}"
+
+    @pytest.mark.parametrize("state", NOT_ACCEPTED)
+    def test_a_non_acked_state_is_not_relabelled_as_submitted(self, fwd, conn, state):
+        res = _run(fwd, conn, dry_run=False, executor=FakeExecutor(state=state))
+        assert res.outcome == SJ.NOT_ACKED and res.submitted is False
+        assert res.order_state == state.value
+        assert state.value in res.detail
+
+    def test_an_exception_still_writes_no_context(self, fwd, conn):
+        class Exploding:
+            def submit(self, intent, account, now=None):
+                raise RuntimeError("delta said no")
+
+        res = _run(fwd, conn, dry_run=False, executor=Exploding())
+        assert res.outcome == SJ.ERROR and res.submitted is False
+        assert res.order_state is None
+        assert self._context_rows(conn) == 0
+
+    def test_an_unreadable_return_fails_closed(self, fwd, conn):
+        """A differently shaped return must not be assumed successful."""
+        class Vague:
+            def submit(self, intent, account, now=None):
+                return None
+
+        res = _run(fwd, conn, dry_run=False, executor=Vague())
+        assert res.outcome == SJ.NOT_ACKED
+        assert res.order_state == OrderState.UNKNOWN.value
+        assert self._context_rows(conn) == 0
+
+    def test_a_non_acked_submission_does_not_disturb_the_order_row(self, fwd, conn):
+        """The executor owns the orders table; this branch only reports."""
+        before = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        _run(fwd, conn, dry_run=False, executor=FakeExecutor(state=OrderState.UNKNOWN))
+        assert conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == before
+
+    def test_every_non_acked_state_is_covered(self):
+        """The parametrisation must not silently miss a failure state."""
+        reachable = {OrderState.BLOCKED, OrderState.REJECTED, OrderState.UNKNOWN,
+                     OrderState.ACKED}
+        assert set(self.NOT_ACCEPTED) | {OrderState.ACKED} == reachable
+
+
+class TestCapturedDirectionIsTheSubmittedOne:
+    """The recorded direction must be the order's, not a later re-read.
+
+    Capture runs after the quote, the wallet read, risk validation and an HTTP
+    round-trip. The 01:00 UTC collector can close or open a forward trade
+    inside that window, so a re-read can pin a direction the order never
+    carried.
+    """
+
+    def test_a_ledger_change_during_submit_cannot_alter_the_record(self, tmp_path, conn):
+        fwd = _forward_db(tmp_path, -1)
+
+        class FlippingExecutor:
+            """Submits, then flips the open forward trade underneath us."""
+
+            def __init__(self):
+                self.submits = []
+
+            def submit(self, intent, account, now=None):
+                self.submits.append(intent)
+                c = sqlite3.connect(fwd)
+                c.execute("UPDATE trade_entries SET open = 0")
+                c.execute(
+                    "INSERT INTO trade_entries (signal_id, entry_date, direction,"
+                    " entry_close_price, planned_exit_date, open)"
+                    " VALUES (?,?,?,?,?,1)",
+                    (bridge.SIGNAL_ID, "2026-09-02", 1, 71000.0, "2026-09-09"))
+                c.commit(); c.close()
+                return (OrderState.ACKED, Decision.approve(1.0, 0.1))
+
+        ex = FlippingExecutor()
+        res = _run(fwd, conn, dry_run=False, executor=ex)
+        assert res.outcome == SJ.SUBMITTED
+        assert ex.submits[0].side == "sell", "the order that went out was a sell"
+
+        row = conn.execute(
+            "SELECT direction FROM trade_signal_context").fetchone()
+        assert row[0] == -1, "recorded the order's direction, not the new ledger state"
+        assert sqlite3.connect(fwd).execute(
+            "SELECT direction FROM trade_entries WHERE open = 1").fetchone()[0] == 1
+
+    def test_the_recorded_direction_matches_the_order_side(self, tmp_path, conn):
+        for direction, side in ((-1, "sell"), (1, "buy")):
+            c = conn
+            c.execute("DELETE FROM trade_signal_context")
+            c.execute("DELETE FROM orders")
+            c.commit()
+            fwd = _forward_db(tmp_path, direction, name=f"fwd{direction}.db")
+            ex = FakeExecutor()
+            res = _run(fwd, c, dry_run=False, executor=ex)
+            assert res.outcome == SJ.SUBMITTED
+            assert ex.submits[0][0].side == side
+            assert c.execute(
+                "SELECT direction FROM trade_signal_context").fetchone()[0] == direction
+
+    def test_the_helper_still_re_reads_when_no_direction_is_given(self, tmp_path, conn):
+        """The original behaviour is preserved for any other caller."""
+        fwd = _forward_db(tmp_path, -1)
+        assert bridge.capture_signal_context(conn, "coid-legacy", fwd) is True
+        assert conn.execute(
+            "SELECT direction FROM trade_signal_context WHERE client_order_id=?",
+            ("coid-legacy",)).fetchone()[0] == -1
+
+    def test_a_pinned_direction_overrides_the_ledger(self, tmp_path, conn):
+        fwd = _forward_db(tmp_path, -1)
+        assert bridge.capture_signal_context(
+            conn, "coid-pinned", fwd, bridge.SIGNAL_ID, direction=1) is True
+        assert conn.execute(
+            "SELECT direction FROM trade_signal_context WHERE client_order_id=?",
+            ("coid-pinned",)).fetchone()[0] == 1
 
 
 class TestRegistration:

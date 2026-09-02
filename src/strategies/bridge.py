@@ -22,6 +22,7 @@ import math
 import pathlib
 import sqlite3
 from datetime import datetime, timezone
+from typing import Any
 
 from src.risk import limits
 from src.risk.manager import (
@@ -117,8 +118,15 @@ def latest_direction(forward_db_path: str, signal_id: str = SIGNAL_ID) -> int | 
                 pass
 
 
+#: `direction` was not supplied, so re-read it from the ledger (the original
+#: behaviour). A distinct sentinel rather than None, because None is a
+#: meaningful direction -- flat -- and a caller must be able to pin that too.
+_REREAD_DIRECTION = object()
+
+
 def capture_signal_context(conn, client_order_id: str, forward_db_path: str,
-                           signal_id: str = SIGNAL_ID) -> bool:
+                           signal_id: str = SIGNAL_ID,
+                           direction: Any = _REREAD_DIRECTION) -> bool:
     """Record the signal state that motivated one live entry, at submit time.
 
     The forward-evidence database moves on: a reader months later cannot
@@ -132,6 +140,13 @@ def capture_signal_context(conn, client_order_id: str, forward_db_path: str,
     never be able to interfere with an order. NOT called from the execution
     path -- there is no automated strategy path to call it (Gate 5C.22), so the
     caller that submits an entry is responsible for invoking it.
+
+    `direction` pins the direction the caller actually consumed. Left unset it
+    is re-read here, which is a DIFFERENT question once time has passed: this
+    runs after the quote, wallet, risk and HTTP round-trips, and the 01:00 UTC
+    collector can close or open a trade inside that window, so a re-read can
+    record a direction the submitted order never carried. A caller holding the
+    submitted intent should pass it.
     """
     p = pathlib.Path(forward_db_path)
     if not p.exists():
@@ -141,10 +156,11 @@ def capture_signal_context(conn, client_order_id: str, forward_db_path: str,
     fwd = None
     try:
         fwd = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
-        row = fwd.execute(
-            "SELECT direction FROM trade_entries WHERE signal_id = ? AND open = 1 "
-            "ORDER BY entry_date DESC LIMIT 1", (signal_id,)).fetchone()
-        direction = int(row[0]) if row else None
+        if direction is _REREAD_DIRECTION:
+            row = fwd.execute(
+                "SELECT direction FROM trade_entries WHERE signal_id = ? AND open = 1 "
+                "ORDER BY entry_date DESC LIMIT 1", (signal_id,)).fetchone()
+            direction = int(row[0]) if row else None
         sig = fwd.execute(
             "SELECT day, position, raw_value FROM signal_log WHERE signal_id = ? "
             "ORDER BY id DESC LIMIT 1", (signal_id,)).fetchone()
