@@ -22,6 +22,7 @@ if str(_RESEARCH) not in sys.path:
 
 from alignment import align as AL  # noqa: E402
 from alignment import features as FT  # noqa: E402
+from alignment import option_panel as OP  # noqa: E402
 from alignment import timebase as TB  # noqa: E402
 
 UTC = timezone.utc
@@ -61,6 +62,16 @@ def one_input_feature(name="f", source="option_quotes", field_name="spot_price",
             degradation_declared=degradation),),
         compute=lambda v: v["x"],
     )
+
+
+def _spread_bps_local(v):
+    """Local multi-input compute. The repo-side helper was removed with
+    quote_spread_bps in contract v2; the multi-input path still needs cover."""
+    bid, ask = v["bid"], v["ask"]
+    mid = (bid + ask) / 2.0
+    if mid <= 0 or ask < bid:
+        return None
+    return (ask - bid) / mid * 10_000.0
 
 
 BASE_TS = "2026-09-01T10:00:00.000000+00:00"
@@ -135,7 +146,7 @@ class TestValidAlignedInput:
                     FT.InputRequirement(name="ask", source="option_quotes",
                                         field="best_ask", tolerance_s=300.0,
                                         key_field="instrument_id", key=84)),
-            compute=FT._spread_bps)
+            compute=_spread_bps_local)
         f = FT.build_row(T(2026, 9, 1, 10, 0, 5), [spec],
                          {"option_quotes": load}).features["spread"]
         assert f.state == S.READY
@@ -470,27 +481,32 @@ class TestDeterminismAndPurity:
 
 class TestStarterFeatureSet:
     def test_it_is_small_and_every_feature_is_declared(self):
-        specs = FT.starter_features(instrument_id=84, signal_id="g3")
-        assert len(specs) == 6
+        specs = FT.starter_features(signal_id="g3")
+        assert len(specs) == 4
         for s in specs:
             assert s.description and s.inputs
             for i in s.inputs:
                 assert i.tolerance_s is not None or i.source == "spot_1m"
 
     def test_market_bar_feature_exists_and_is_expected_to_be_unavailable(self):
-        specs = {s.name: s for s in FT.starter_features(84, "g3")}
+        specs = {s.name: s for s in FT.starter_features("g3")}
         assert "market_close_1m" in specs
         assert specs["market_close_1m"].inputs[0].source == "spot_1m"
 
-    def test_panel_features_all_name_their_member(self):
-        for s in FT.starter_features(instrument_id=84, signal_id="g3"):
+    def test_option_features_no_longer_carry_an_instrument_id(self):
+        """v2 resolves the option series by rule, not by a fixed member."""
+        for s in FT.starter_features(signal_id="g3"):
             for i in s.inputs:
-                if i.source in ("option_quotes", "signal_log"):
+                if i.source in ("spot_index", "atm_iv"):
+                    assert i.key is None and i.key_field is None
+                if i.source == "signal_log":
                     assert i.key is not None
 
-    def test_spread_is_none_on_a_crossed_or_zero_book(self):
-        assert FT._spread_bps({"bid": 101.0, "ask": 99.0}) is None
-        assert FT._spread_bps({"bid": 0.0, "ask": 0.0}) is None
+    def test_removed_v1_features_do_not_reappear(self):
+        """quote_spread_bps and option_oi_contracts were dropped in v2."""
+        names = {s.name for s in FT.starter_features("g3")}
+        assert not (names & set(FT.REMOVED_IN_V2))
+        assert not hasattr(FT, "_spread_bps"), "the v1 helper must not linger"
 
 
 class TestCoverageReport:
@@ -557,19 +573,15 @@ class TestAgainstRealCorpus:
         decisions = [o.available_ts for o in orders
                      if str(o.provenance.get("strategy")) == "g3_momentum_tsmom"
                      and str(o.provenance.get("client_order_id", "")).startswith("g3")]
-        loads = {
-            "option_quotes": _sqlite_load(
-                _OQ, "option_quotes",
-                ("spot_price", "mark_iv", "oi_contracts", "best_bid", "best_ask")),
-            "signal_log": _sqlite_load(_FWD, "signal_log", ("position",)),
-        }
+        loads = dict(OP.load_derived_sources(_OQ))
+        loads["signal_log"] = _sqlite_load(_FWD, "signal_log", ("position",))
         lake = AL.load_lake_source("spot_1m", payload_fields=("close",))
         loads["spot_1m"] = AL.SourceLoad("spot_1m", tuple(lake), len(lake), 0)
         return decisions, loads
 
     def test_real_decisions_produce_rows_with_no_lookahead(self):
         decisions, loads = self._setup()
-        specs = FT.starter_features(197889, "g3_momentum_tsmom")
+        specs = FT.starter_features("g3_momentum_tsmom")
         rows = FT.build_rows(decisions, specs, loads)
         assert len(rows) == len(decisions)
         for r in rows:
@@ -590,7 +602,7 @@ class TestAgainstRealCorpus:
         the state of the corpus.
         """
         decisions, loads = self._setup()
-        specs = FT.starter_features(197889, "g3_momentum_tsmom")
+        specs = FT.starter_features("g3_momentum_tsmom")
         rows = FT.build_rows(decisions, specs, loads)
         for r in rows:
             f = r.features["market_close_1m"]
@@ -624,16 +636,22 @@ class TestAgainstRealCorpus:
         assert obs and obs[-1].provenance["parquet_sha256"]
         assert obs[-1].provenance["dataset"] == "dvol"
 
-    def test_quote_features_resolve_with_sub_second_age(self):
+    def test_quote_features_resolve_at_every_decision(self):
+        """v2: the index is a panel reduction, so it is defined at every cycle.
+
+        v1 keyed this to one instrument and reached 2/8; the age bound is the
+        snapshot cadence (~60s, drifting) rather than the sub-second figure a
+        single hot instrument happened to show.
+        """
         decisions, loads = self._setup()
-        specs = FT.starter_features(197889, "g3_momentum_tsmom")
+        specs = FT.starter_features("g3_momentum_tsmom")
         rows = FT.build_rows(decisions, specs, loads)
         ready = [r for r in rows if r.features["spot_price"].state == S.READY]
-        assert ready, "expected at least one decision inside the quote window"
-        assert all(r.features["spot_price"].inputs[0].age_s < 5.0 for r in ready)
+        assert len(ready) == len(rows), "the index must resolve at every decision"
+        assert all(r.features["spot_price"].inputs[0].age_s < 120.0 for r in ready)
 
     def test_rows_are_deterministic_on_real_data(self):
         decisions, loads = self._setup()
-        specs = FT.starter_features(197889, "g3_momentum_tsmom")
+        specs = FT.starter_features("g3_momentum_tsmom")
         assert FT.build_rows(decisions, specs, loads) == \
                FT.build_rows(decisions, specs, loads)

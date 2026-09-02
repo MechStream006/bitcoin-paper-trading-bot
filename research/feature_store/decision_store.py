@@ -152,6 +152,18 @@ END;
 """
 
 
+#: Columns that describe the ROW (a decision x feature-set), not the feature.
+#: They are stored for convenience but excluded from the idempotency
+#: comparison, for the same reason `written_at` is: they are not properties of
+#: the keyed entity. A feature whose contract is unchanged keeps its version,
+#: yet the row aggregate around it legitimately differs when the feature set
+#: changes -- exactly what happened when contract v2 dropped two features and
+#: `market_close_1m`, itself untouched, saw its row_state move from
+#: INCOMPLETE_DATA to READY. Comparing them would force a spurious version bump
+#: on every unchanged feature whenever its neighbours change.
+_ROW_SCOPED = ("row_state", "row_action")
+
+
 class DecisionStoreError(ValueError):
     """Base error for this store."""
 
@@ -361,8 +373,9 @@ def persist_row(db_path, row: FeatureRow, specs: Sequence[FeatureSpec],
                 "AND contract_version=?", (did, name, version)).fetchone()
             if existing is not None:
                 stored = {k: existing[k] for k in payload}
-                if stored != payload:
-                    diff = sorted(k for k in payload if stored[k] != payload[k])
+                compared = [k for k in payload if k not in _ROW_SCOPED]
+                if {k: stored[k] for k in compared} != {k: payload[k] for k in compared}:
+                    diff = sorted(k for k in compared if stored[k] != payload[k])
                     raise DivergenceError(
                         f"{did}/{name} v{version} already stored with different "
                         f"values in {diff}; bump the contract version rather "

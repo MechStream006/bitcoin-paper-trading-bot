@@ -138,6 +138,34 @@ SOURCES: dict[str, SourceSpec] = {
               "CLAUDE.md sec.11); those rows have event time unknown but "
               "availability time known.",
     ),
+    "spot_index": SourceSpec(
+        name="spot_index", store="derived (option_quotes panel)",
+        table="option_quotes", grain="one value per snapshot cycle",
+        event_field="exch_ts", event_unit=MICROS,
+        availability_field="ts", availability_offset_s=0.0,
+        availability_rule="the cycle's own write instant; the reduction is "
+                          "available exactly when its panel is",
+        provenance_fields=("cycle_ts", "panel_size", "spot_observations"),
+        notes="Median spot_price across the cycle. Instrument-independent, so "
+              "unlike a keyed quote it is defined at every cycle. Built by "
+              "alignment.option_panel.spot_index_observations.",
+    ),
+    "atm_iv": SourceSpec(
+        name="atm_iv", store="derived (option_quotes panel)",
+        table="option_quotes", grain="one value per snapshot cycle",
+        event_field="exch_ts", event_unit=MICROS,
+        availability_field="ts", availability_offset_s=0.0,
+        availability_rule="the cycle's own write instant. Event time is the "
+                          "LATER of the two legs: the pair is not complete "
+                          "until both exist",
+        provenance_fields=("call_id", "put_id", "strike", "spot", "expiry",
+                           "tau_hours", "abs_moneyness", "cycle_ts"),
+        notes="Nearest-expiry ATM call/put mark_iv mid. NOT the vol-state "
+              "feature -- DVOL owns that role (17 governed definitions, none "
+              "from option mark_iv). This is Delta front-end IV at tau ~5-22h, "
+              "a tenor DVOL cannot see. Built by "
+              "alignment.option_panel.atm_iv_observations.",
+    ),
     "oi_snapshots": SourceSpec(
         name="oi_snapshots", store="btc_trading.db", table="oi_snapshots",
         grain="nominally 180s",

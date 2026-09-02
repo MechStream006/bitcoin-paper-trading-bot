@@ -22,6 +22,7 @@ if str(_RESEARCH) not in sys.path:
 
 from alignment import align as AL  # noqa: E402
 from alignment import features as FT  # noqa: E402
+from alignment import option_panel as OP  # noqa: E402
 from alignment import timebase as TB  # noqa: E402
 from feature_store import decision_store as DS  # noqa: E402
 
@@ -42,6 +43,15 @@ def db(tmp_path):
     p = tmp_path / "decision_features.db"
     DS.init_db(p)
     return p
+
+
+def _spread_bps_local(v):
+    """Local multi-input compute; the repo helper went with contract v2."""
+    bid, ask = v["bid"], v["ask"]
+    mid = (bid + ask) / 2.0
+    if mid <= 0 or ask < bid:
+        return None
+    return (ask - bid) / mid * 10_000.0
 
 
 def quote_load(rows):
@@ -227,6 +237,36 @@ class TestDuplicatePreventionAndNoSilentOverwrite:
         assert {r["contract_version"] for r in rows} == {1, 2}
         assert {r["value"] for r in rows} == {100.0, 200.0}
 
+    def test_row_scoped_columns_do_not_force_a_spurious_version_bump(self, db):
+        """row_state describes the feature SET, not the feature.
+
+        Persisting the same unchanged feature inside a different feature set
+        legitimately changes the row aggregate around it. Comparing those
+        columns would demand a version bump on a feature nothing touched --
+        which is exactly what blocked the first real v1/v2 coexistence.
+        """
+        keep = spec("keep")
+        other = spec("other", field_name="mark_iv")
+        load = one_quote()
+        wide = FT.build_row(T(2026, 9, 1, 10, 0, 30), [keep, other],
+                            {"option_quotes": load})
+        narrow = FT.build_row(T(2026, 9, 1, 10, 0, 30), [keep],
+                              {"option_quotes": load})
+        assert wide.state != narrow.state, "the row aggregates must differ"
+        DS.persist_row(db, wide, [keep, other], WRITTEN_AT, decision_id="d1")
+        res = DS.persist_row(db, narrow, [keep], WRITTEN_AT, decision_id="d1")
+        assert res.unchanged == 1 and res.written == 0
+        assert DS.register_contract(db, keep, WRITTEN_AT) == 1, "no version bump"
+
+    def test_a_real_value_change_still_diverges(self, db):
+        """The row-scoped exclusion must not weaken the real guard."""
+        specs = [spec()]
+        a = build(T(2026, 9, 1, 10, 0, 30), specs, one_quote(spot=100.0))
+        b = build(T(2026, 9, 1, 10, 0, 30), specs, one_quote(spot=999.0))
+        DS.persist_row(db, a, specs, WRITTEN_AT, decision_id="d1")
+        with pytest.raises(DS.DivergenceError, match="value_json"):
+            DS.persist_row(db, b, specs, WRITTEN_AT, decision_id="d1")
+
     def test_history_cannot_be_updated_through_the_database(self, db):
         specs = [spec()]
         row = build(T(2026, 9, 1, 10, 0, 30), specs, one_quote())
@@ -311,7 +351,7 @@ class TestProvenancePreservation:
                     FT.InputRequirement(name="ask", source="option_quotes",
                                         field="best_ask", tolerance_s=300.0,
                                         key_field="instrument_id", key=84)),
-            compute=FT._spread_bps)
+            compute=_spread_bps_local)
         row = build(T(2026, 9, 1, 10, 0, 5), [s],
                     one_quote(best_bid=99.0, best_ask=101.0))
         DS.persist_row(db, row, [s], WRITTEN_AT)
@@ -457,7 +497,7 @@ class TestAgainstRealCorpus:
             "signal_log": load(_FWD, "signal_log", ("position",)),
             "spot_1m": AL.SourceLoad("spot_1m", tuple(lake), len(lake), 0),
         }
-        specs = FT.starter_features(197889, "g3_momentum_tsmom")
+        specs = FT.starter_features("g3_momentum_tsmom")
         rows = FT.build_rows([o.available_ts for o in auto], specs, loads)
         return rows, specs, ids
 

@@ -359,54 +359,54 @@ def _identity(key: str) -> Callable[[Mapping[str, Any]], Any]:
     return lambda v: v[key]
 
 
-def _spread_bps(v: Mapping[str, Any]) -> Optional[float]:
-    bid, ask = v["bid"], v["ask"]
-    mid = (bid + ask) / 2.0
-    if mid <= 0 or ask < bid:
-        return None
-    return (ask - bid) / mid * 10_000.0
-
-
 QUOTE_TOLERANCE_S = 300.0
 SIGNAL_TOLERANCE_S = 172_800.0
 BAR_TOLERANCE_S = 900.0
 
 
-def starter_features(instrument_id: int, signal_id: str) -> list[FeatureSpec]:
-    """Six features over sources this project already collects.
+def starter_features(signal_id: str) -> list[FeatureSpec]:
+    """Four features over sources this project already collects (contract v2).
 
-    `instrument_id` and `signal_id` are required because `option_quotes` and
-    `signal_log` are panels; a feature that did not name its member would be
-    reading whichever row sorted last.
+    v1 took an `instrument_id` and keyed three option features to it. That is
+    unresolvable across dates -- no option instrument survives more than ~3 days
+    in a universe that rolls daily -- and the arbitrary pick also misreported
+    open interest by two orders of magnitude (0 against an ATM 1,900-2,510).
+    The option series are now panel reductions resolved per cycle by
+    `alignment.option_panel`, so no instrument id enters the contract.
+
+    Two v1 features are gone rather than re-specified:
+
+    - `option_oi_contracts`. No consumer anywhere in the research tree, and the
+      stated intent (CLAUDE.md sec.6, "OI walls at round strikes") is a
+      concentration measure across strikes, which neither a single instrument
+      nor a chain total expresses. sec.11 also holds that OI-based work cannot
+      be validated on testnet at all.
+    - `quote_spread_bps`. It measured an option's book while the strategy trades
+      the BTCUSD perp, had no consumer, and real execution cost is already
+      measured on the traded instrument by
+      `execution_evidence.completed_trades` as entry/exit slippage against the
+      actual order.
+
+    Re-adding either is a new feature needing its own justification, not a
+    restoration; `REMOVED_IN_V2` records that so it cannot happen silently.
     """
-    q = dict(source="option_quotes", key_field="instrument_id", key=instrument_id,
-             tolerance_s=QUOTE_TOLERANCE_S)
     return [
         FeatureSpec(
             name="spot_price",
-            inputs=(InputRequirement(name="spot", field="spot_price", **q),),
+            inputs=(InputRequirement(
+                name="spot", source="spot_index", field="spot_price",
+                tolerance_s=QUOTE_TOLERANCE_S),),
             compute=_identity("spot"),
-            description="BTC index embedded in every option ticker.",
+            description="BTC index: median spot_price across the snapshot cycle.",
         ),
         FeatureSpec(
-            name="option_mark_iv",
-            inputs=(InputRequirement(name="iv", field="mark_iv", **q),),
+            name="option_atm_iv",
+            inputs=(InputRequirement(
+                name="iv", source="atm_iv", field="atm_iv",
+                tolerance_s=QUOTE_TOLERANCE_S),),
             compute=_identity("iv"),
-            description="Mark IV of the named instrument.",
-        ),
-        FeatureSpec(
-            name="option_oi_contracts",
-            inputs=(InputRequirement(name="oi", field="oi_contracts", **q),),
-            compute=_identity("oi"),
-            description="Open interest. Rides the quote cadence, which drifts; "
-                        "oi_snapshots is empty.",
-        ),
-        FeatureSpec(
-            name="quote_spread_bps",
-            inputs=(InputRequirement(name="bid", field="best_bid", **q),
-                    InputRequirement(name="ask", field="best_ask", **q)),
-            compute=_spread_bps,
-            description="Top-of-book spread in bps. Mechanical, not an indicator.",
+            description="Nearest-expiry ATM call/put mark_iv mid. Front-end "
+                        "implied vol; not the vol-state feature, which is DVOL.",
         ),
         FeatureSpec(
             name="signal_position",
@@ -423,7 +423,11 @@ def starter_features(instrument_id: int, signal_id: str) -> list[FeatureSpec]:
                 name="close", source="spot_1m", field="close",
                 tolerance_s=BAR_TOLERANCE_S),),
             compute=_identity("close"),
-            description="Binance 1m close. Expected INCOMPLETE_DATA at current "
-                        "decision instants: the lake ends 2026-07-31.",
+            description="Binance 1m close from the Parquet lake.",
         ),
     ]
+
+
+#: Features that existed in contract v1 and were deliberately dropped in v2.
+#: A guard test asserts none of these names reappears in `starter_features`.
+REMOVED_IN_V2 = ("option_oi_contracts", "quote_spread_bps")
