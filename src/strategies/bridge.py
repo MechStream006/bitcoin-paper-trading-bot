@@ -137,16 +137,18 @@ def capture_signal_context(conn, client_order_id: str, forward_db_path: str,
 
     Read-only against the forward database and best-effort by construction:
     returns False and logs rather than raising, because a research record must
-    never be able to interfere with an order. NOT called from the execution
-    path -- there is no automated strategy path to call it (Gate 5C.22), so the
-    caller that submits an entry is responsible for invoking it.
+    never be able to interfere with an order. Called by
+    `strategy_jobs.evaluate_once`, and only once `executor.submit()` has
+    returned ACKED -- a BLOCKED, REJECTED or UNKNOWN submission must leave no
+    record of an entry the exchange never accepted. Any other caller that
+    submits an entry is responsible for invoking it on the same condition.
 
-    `direction` pins the direction the caller actually consumed. Left unset it
-    is re-read here, which is a DIFFERENT question once time has passed: this
-    runs after the quote, wallet, risk and HTTP round-trips, and the 01:00 UTC
+    `direction` pins the direction the caller actually consumed, and
+    `strategy_jobs` passes the submitted intent's own side. Left unset it is
+    re-read here, which is a DIFFERENT question once time has passed: this runs
+    after the quote, wallet, risk and HTTP round-trips, and the 01:00 UTC
     collector can close or open a trade inside that window, so a re-read can
-    record a direction the submitted order never carried. A caller holding the
-    submitted intent should pass it.
+    record a direction the submitted order never carried.
     """
     p = pathlib.Path(forward_db_path)
     if not p.exists():

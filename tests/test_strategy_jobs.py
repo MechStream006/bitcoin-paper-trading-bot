@@ -7,8 +7,10 @@ TestnetExecutor.submit(), and these tests fix the wiring around them.
 from __future__ import annotations
 
 import ast
+import hashlib
 import pathlib
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +29,114 @@ from src.strategies import bridge, strategy_jobs as SJ  # noqa: E402
 NOW = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
 DAY = "2026-09-01"
 
+
+
+# --------------------------------------------------------------------- guards
+
+def _code_only(src: str) -> str:
+    """Module source with every docstring removed.
+
+    Prose must be correctable without weakening a guard, so the structural pins
+    below compare code and ignore documentation.
+    """
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)) and ast.get_docstring(node):
+            node.body = node.body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
+
+
+def _content_sha(src: str) -> str:
+    """SHA-256 over the LF-normalised source, the project's own convention.
+
+    NOT a hash of `ast.unparse` output. That was tried and is unusable as a
+    pin: the same bridge.py unparses to 01d27b3b... on CPython 3.13 and
+    a5ad0169... on 3.10, so the guard would fail on whichever interpreter did
+    not mint it. Raw content is byte-identical on both. `\r\n` is folded to
+    `\n` because this checkout converts line endings (pre_reg_guard._sha256_lf
+    and receipts.sha256_lf normalise for exactly the same reason).
+    """
+    return hashlib.sha256(
+        src.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
+def _module_surface(src: str) -> dict:
+    """Top-level names mapped to their declared form: signatures and values."""
+    tree = ast.parse(src)
+    out: dict = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            out[node.name] = f"def({ast.unparse(node.args)})"
+        elif isinstance(node, ast.ClassDef):
+            out[node.name] = "class"
+        elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            out[node.targets[0].id] = ast.unparse(node.value)
+    return out
+
+
+BRIDGE_PY = ROOT / "src" / "strategies" / "bridge.py"
+
+#: Modules this job must never reopen. bridge.py is NOT here: it carries one
+#: authorized change and is pinned by content below instead, because a `git
+#: diff` guard only ever sees UNSTAGED edits and goes blind the moment a change
+#: is committed -- it could not have told an authorized bridge change from any
+#: other one.
+UNTOUCHED_MODULES = (
+    "src/execution/reconciliation_jobs.py",
+    "src/execution/reconciler.py",
+    "src/risk/manager.py",
+    "src/risk/limits.py",
+    "src/execution/testnet_executor.py",
+    "src/execution/protection.py",
+)
+
+#: bridge.py's authorized content identity. Taken at the one change this
+#: workstream was permitted: `capture_signal_context` gained an optional
+#: `direction`, so the caller can pin the direction it actually consumed
+#: instead of re-reading a ledger that may have moved underneath it, and its
+#: docstring was corrected to say that the execution path now calls it.
+#:
+#: This freezes the WHOLE file, prose included. That is the point -- the module
+#: it protects sets stop distance, the order-id bound and the ledger query, and
+#: a guard that argued about which edits were cosmetic would be a guard with a
+#: loophole. Changing bridge.py again means authorizing the change and re-pinning
+#: this deliberately. `BRIDGE_OTHER_SURFACE` below is the structural half, and
+#: says WHAT changed when the change is structural.
+BRIDGE_CONTENT_SHA256 = (
+    "f0450d6745319e073ea71de4bf8c64c33e2282bcd5a9b31774925c39bcaa8b92")
+
+#: The authorized signature, spelled out so a drifting default or a dropped
+#: parameter names itself rather than only moving a hash.
+BRIDGE_CAPTURE_SIGNATURE = (
+    "def(conn, client_order_id: str, forward_db_path: str, "
+    "signal_id: str=SIGNAL_ID, direction: Any=_REREAD_DIRECTION)")
+
+#: Everything else bridge.py declares. Pinned so an added, removed or
+#: re-signatured function is reported by name.
+BRIDGE_OTHER_SURFACE = {
+    "log": "logging.getLogger(__name__)",
+    "SIGNAL_ID": "'g3_momentum_tsmom'",
+    "_MAX_STOP_SHRINK_TICKS": "8",
+    "STOP_DISTANCE_PCT": "1.4",
+    "StrategyDisabled": "class",
+    "_utc_today": "def()",
+    "read_latest_signal": "def(forward_db_path: str, signal_id: str=SIGNAL_ID)",
+    "latest_direction": "def(forward_db_path: str, signal_id: str=SIGNAL_ID)",
+    "_REREAD_DIRECTION": "object()",
+    "CLIENT_ORDER_ID_MAX_LEN": "32",
+    "_SIGNAL_DIGEST_LEN": "6",
+    "_signal_token": "def(signal_id: str, budget: int)",
+    "client_order_id": "def(signal_id: str, utc_day: str, side: str, seq: int)",
+    "executable_limit_price":
+        "def(direction: int, best_bid: float, best_ask: float)",
+    "affordable_stop_distance": "_affordable_stop_distance",
+    "stop_distance": "def(limit_price: float, mark_price: float, size: int=1)",
+    "build_intent": "def(*, direction: int, mark_price: float, enabled: bool, "
+                    "best_bid: float, best_ask: float, utc_day: str | None=None, "
+                    "seq: int=1)",
+}
 
 # --------------------------------------------------------------------------- stubs
 
@@ -646,11 +756,118 @@ class TestExistingBehaviourUntouched:
         assert "kill_switch" not in ast.unparse(tree)
 
     def test_reconciliation_job_registration_is_unchanged(self):
-        import subprocess
+        """The registration itself, pinned by structure rather than by a diff.
+
+        The `git diff` below still catches uncommitted drift in the modules
+        this job never reopens, but it cannot speak for anything already
+        committed -- so what the test claims in its name is asserted directly.
+        """
+        src = (ROOT / "src" / "execution" / "reconciliation_jobs.py").read_text(
+            encoding="utf-8")
+        surface = _module_surface(src)
+        assert surface["register_reconciliation_jobs"] == (
+            "def(scheduler, reconciler, *, "
+            "interval_seconds: int=DEFAULT_RECONCILE_INTERVAL_SEC, "
+            "job_id: str=RECONCILE_JOB_ID)")
+        code = _code_only(src)
+        assert "'execution_reconcile'" in code
+        assert "trigger='interval'" in code
+        assert "scheduler.has_job(job_id)" in code, "idempotency guard removed"
+
         out = subprocess.run(
-            ["git", "diff", "--", "src/execution/reconciliation_jobs.py",
-             "src/execution/reconciler.py", "src/risk/manager.py",
-             "src/risk/limits.py", "src/strategies/bridge.py",
-             "src/execution/testnet_executor.py", "src/execution/protection.py"],
+            ["git", "diff", "--", *UNTOUCHED_MODULES],
             cwd=str(ROOT), capture_output=True, text=True, timeout=30).stdout
         assert out.strip() == "", f"untouched module changed:\n{out[:500]}"
+
+
+class TestBridgeIsPinnedToItsAuthorizedChange:
+    """bridge.py carries exactly one authorized change and no other.
+
+    It used to sit in the `git diff` list above, which compares the working
+    tree against the index: it reported green again the moment a change was
+    committed, so it could neither permit the authorized change nor reject an
+    unrelated one. Content pinning replaces it.
+    """
+
+    def _src(self):
+        return BRIDGE_PY.read_text(encoding="utf-8")
+
+    def test_the_authorized_change_is_present_and_exact(self):
+        assert (_module_surface(self._src())["capture_signal_context"]
+                == BRIDGE_CAPTURE_SIGNATURE)
+
+    def test_the_sentinel_is_not_none(self):
+        """None is a real direction -- flat -- so it cannot mean "unset"."""
+        assert _module_surface(self._src())["_REREAD_DIRECTION"] == "object()"
+        assert bridge._REREAD_DIRECTION is not None
+
+    def test_nothing_else_in_the_module_changed_shape(self):
+        surface = _module_surface(self._src())
+        surface.pop("capture_signal_context")
+        assert surface == BRIDGE_OTHER_SURFACE
+
+    def test_the_module_content_is_pinned(self):
+        assert _content_sha(self._src()) == BRIDGE_CONTENT_SHA256, (
+            "bridge.py changed beyond its authorized change; authorize the "
+            "change and re-pin BRIDGE_CONTENT_SHA256 deliberately")
+
+    def test_the_pin_is_interpreter_independent(self):
+        """It must not matter which Python runs the suite.
+
+        An `ast.unparse` pin was tried first and rejected: the same source
+        unparses differently on 3.10 and 3.13, so the guard would have failed
+        on whichever interpreter did not mint the hash. Content hashing is
+        stable, and folding CRLF keeps it stable across checkouts too.
+        """
+        src = self._src()
+        assert _content_sha(src.replace("\n", "\r\n")) == BRIDGE_CONTENT_SHA256
+
+    def test_even_a_prose_edit_moves_the_pin(self):
+        """Deliberate: the file is frozen whole, so there is no cosmetic-edit
+        loophole. The structural pin is what stays prose-insensitive."""
+        edited = self._src().replace(
+            "Record the signal state that motivated one live entry, at submit time.",
+            "Totally different prose that says nothing useful.")
+        assert edited != self._src(), "the docstring anchor moved"
+        assert _content_sha(edited) != BRIDGE_CONTENT_SHA256
+        surface = _module_surface(edited)
+        surface.pop("capture_signal_context")
+        assert surface == BRIDGE_OTHER_SURFACE, "structure is prose-insensitive"
+
+    def test_the_docstring_no_longer_denies_having_a_caller(self):
+        """It said "NOT called from the execution path"; that stopped being
+        true when strategy_jobs became the caller."""
+        doc = bridge.capture_signal_context.__doc__
+        assert "NOT called from the execution path" not in doc
+        assert "strategy_jobs.evaluate_once" in doc
+        assert "ACKED" in doc
+        assert "direction" in doc
+
+    @pytest.mark.parametrize("old,new,what", [
+        ("STOP_DISTANCE_PCT = 1.4", "STOP_DISTANCE_PCT = 2.0", "a risk constant"),
+        ("CLIENT_ORDER_ID_MAX_LEN = 32", "CLIENT_ORDER_ID_MAX_LEN = 64",
+         "an exchange limit"),
+        ("AND open = 1 ", "AND open = 0 ", "the ledger query"),
+        ('SIGNAL_ID = "g3_momentum_tsmom"', 'SIGNAL_ID = "something_else"',
+         "the signal identity"),
+    ])
+    def test_an_unrelated_bridge_change_is_rejected(self, old, new, what):
+        src = self._src()
+        assert old in src, f"anchor for {what} moved"
+        assert _content_sha(src.replace(old, new, 1)) != BRIDGE_CONTENT_SHA256, (
+            f"changing {what} slipped past the pin")
+
+    def test_a_new_function_is_rejected(self):
+        edited = self._src() + "\n\ndef sneak_in():\n    return 1\n"
+        assert _content_sha(edited) != BRIDGE_CONTENT_SHA256
+        surface = _module_surface(edited)
+        surface.pop("capture_signal_context")
+        assert surface != BRIDGE_OTHER_SURFACE
+
+    def test_dropping_the_direction_parameter_is_rejected(self):
+        """The regression this whole pin exists to prevent."""
+        edited = self._src().replace(
+            ",\n                           direction: Any = _REREAD_DIRECTION", "", 1)
+        assert edited != self._src(), "the signature anchor moved"
+        assert (_module_surface(edited)["capture_signal_context"]
+                != BRIDGE_CAPTURE_SIGNATURE)
