@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import os
 import pathlib
+import inspect
 import sqlite3
 import sys
 
@@ -587,3 +588,128 @@ class TestAgainstProductionSlice:
         assert t.exited_via == "protective_stop"
         assert t.exit_slippage_pts == pytest.approx(-14.0)
         assert t.mae_pts == pytest.approx(-922.5)
+
+
+class TestSignalContextIsBoundedByAvailability:
+    @pytest.fixture(autouse=True)
+    def _tmp(self, tmp_path):
+        self.tmp = tmp_path
+
+    """`signal_log` day D is written at 01:00 UTC on D+1, not at D's close.
+
+    The bound used to be the calendar (`day < entry date`), which leaks for an
+    entry in the 00:00-01:00 UTC hour: day D-1 does not exist yet, so such an
+    entry could only ever have seen D-2. `alignment.timebase` already declares
+    the real delay; this is that rule applied here.
+    """
+
+    SIG = "g3_momentum_tsmom"
+
+    _seq = 0
+
+    def _fwd(self, tmp_path, days):
+        TestSignalContextIsBoundedByAvailability._seq += 1
+        db = tmp_path / f"fwd_sigctx_{self._seq}.db"
+        c = sqlite3.connect(db)
+        c.execute("CREATE TABLE signal_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                  " signal_id TEXT, day TEXT, position REAL, raw_value REAL,"
+                  " run_id INTEGER)")
+        for i, day in enumerate(days):
+            c.execute("INSERT INTO signal_log (signal_id, day, position, raw_value,"
+                      " run_id) VALUES (?,?,?,?,?)",
+                      (self.SIG, day, 1.0, float(i), i))
+        c.commit()
+        con = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        return con
+
+    def _day(self, tmp_path, entry_ts, days=("2026-08-30", "2026-08-31",
+                                             "2026-09-01", "2026-09-02")):
+        fwd = self._fwd(tmp_path, days)
+        try:
+            return CT._signal_context(fwd, self.SIG, entry_ts)[0]
+        finally:
+            fwd.close()
+
+    def test_the_delay_comes_from_the_alignment_layer(self):
+        from alignment.timebase import get_spec
+        assert (CT.SIGNAL_AVAILABILITY_DELAY.total_seconds()
+                == get_spec("signal_log").availability_offset_s == 25 * 3600)
+
+    def test_an_entry_in_the_first_hour_selects_two_days_back(self):
+        """00:30 on 09-02: the 09-01 row is written at 01:00 on 09-02."""
+        assert self._day(tmp_path=self.tmp, entry_ts="2026-09-02T00:30:00+00:00") \
+            == "2026-08-31"
+
+    def test_an_entry_after_the_collector_selects_the_previous_day(self):
+        assert self._day(tmp_path=self.tmp, entry_ts="2026-09-02T01:30:00+00:00") \
+            == "2026-09-01"
+
+    def test_the_availability_boundary_is_inclusive(self):
+        """Available at exactly the entry instant was available."""
+        assert self._day(tmp_path=self.tmp, entry_ts="2026-09-02T01:00:00+00:00") \
+            == "2026-09-01"
+
+    def test_one_microsecond_before_the_boundary_falls_back(self):
+        assert self._day(tmp_path=self.tmp, entry_ts="2026-09-02T00:59:59.999999+00:00") \
+            == "2026-08-31"
+
+    def test_no_future_signal_row_can_be_selected(self):
+        """Every row the corpus holds is later than this entry."""
+        assert self._day(tmp_path=self.tmp, entry_ts="2026-08-30T12:00:00+00:00",
+                         days=("2026-09-01", "2026-09-02")) is None
+
+    def test_the_exit_day_signal_is_never_reached(self):
+        day = self._day(tmp_path=self.tmp, entry_ts="2026-09-01T12:00:00+00:00")
+        assert day == "2026-08-31", "an entry on 09-01 must not see 09-01 or later"
+
+    def test_the_z_spelling_is_handled_like_the_offset_spelling(self):
+        assert (self._day(tmp_path=self.tmp, entry_ts="2026-09-02T00:30:00Z")
+                == self._day(tmp_path=self.tmp,
+                             entry_ts="2026-09-02T00:30:00+00:00"))
+
+    def test_an_unparseable_entry_ts_yields_nothing(self):
+        fwd = self._fwd(self.tmp, ("2026-08-31",))
+        try:
+            assert CT._signal_context(fwd, self.SIG, "not-a-timestamp") == (
+                None, None, None)
+            assert CT._signal_context(fwd, None, "2026-09-02T12:00:00+00:00") == (
+                None, None, None)
+            assert CT._signal_context(None, self.SIG, "2026-09-02T12:00:00+00:00") == (
+                None, None, None)
+        finally:
+            fwd.close()
+
+    def test_afternoon_entries_are_unaffected_by_the_change(self):
+        """The five trades already in the dataset must not move."""
+        for entry_ts, expected in (
+                ("2026-08-20T20:43:24.847514+00:00", "2026-08-19"),
+                ("2026-08-24T14:27:53.740638+00:00", "2026-08-23"),
+                ("2026-08-24T15:59:06.399434+00:00", "2026-08-23"),
+                ("2026-08-25T06:44:52.593135+00:00", "2026-08-24"),
+                ("2026-09-01T17:17:20.409050+00:00", "2026-08-31"),
+        ):
+            days = tuple(f"2026-08-{d:02d}" for d in range(15, 32)) + (
+                "2026-09-01", "2026-09-02")
+            assert self._day(tmp_path=self.tmp, entry_ts=entry_ts,
+                             days=days) == expected, entry_ts
+
+    def test_real_position_6_regression(self):
+        """The order actually placed 2026-09-02T00:01:20Z.
+
+        Its position entry_ts is 00:02:20.539657. Under the old calendar bound
+        this resolved to 2026-09-01, a row written at 01:00 on 09-02 -- 58
+        minutes after the order was submitted.
+        """
+        assert self._day(tmp_path=self.tmp,
+                         entry_ts="2026-09-02T00:02:20.539657+00:00") == "2026-08-31"
+
+    def test_stored_context_still_takes_precedence(self):
+        """The fix touches the fallback only; a stored row still wins."""
+        src = inspect.getsource(CT._build)
+        stored = src.index("_stored_linkage")
+        fallback = src.index("_signal_context")
+        assert stored < fallback, "the stored row must be consulted first"
+        assert "if stored is not None:" in src
+
+

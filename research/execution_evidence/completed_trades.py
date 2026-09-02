@@ -45,10 +45,13 @@ LEAKAGE SAFETY
   The entry and exit fill prices are folded in, because the position really did
   trade at them. No price after the exit fill influences MAE/MFE, and none
   before the entry fill does.
-- Signal context is the most recent observation with `day < entry date`,
-  strictly. The day-D row is produced from day D's close at 01:00 UTC on D+1,
-  so a same-day match would post-date the entry it claims to explain. The
-  exit-day signal is never read either.
+- Signal context is the most recent observation that had become AVAILABLE by
+  the entry instant: `day + 25h <= entry_ts`, the delay declared for
+  `signal_log` in `alignment.timebase`. The day-D row is produced from day D's
+  close at 01:00 UTC on D+1, so the admissible day is
+  `(entry_ts - 25h).date()`. A calendar bound of `day < entry date` was used
+  first and leaks for entries in the 00:00-01:00 UTC hour, where day D-1 has
+  not been written yet. The exit-day signal is never read either.
 - Open positions are excluded from the dataset entirely and reported only as
   coverage. An open trade has no outcome to describe.
 
@@ -64,14 +67,28 @@ import argparse
 import json
 import pathlib
 import sqlite3
+import sys
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _RESEARCH_ROOT = _HERE.parent
+if str(_RESEARCH_ROOT) not in sys.path:
+    sys.path.insert(0, str(_RESEARCH_ROOT))
+
+from alignment.timebase import get_spec  # noqa: E402
+
 _DEFAULT_TRADING_DB = _RESEARCH_ROOT.parent / "data" / "btc_trading.db"
 _DEFAULT_FORWARD_DB = _RESEARCH_ROOT / "data" / "evidence_forward.db"
+
+#: How long after a signal day begins before that day's row exists, taken from
+#: the alignment layer's own declaration rather than restated here. `timebase`
+#: models `signal_log` as event-dated on `day` with a structural availability
+#: delay, and this module must not disagree with it about when an observation
+#: became readable.
+SIGNAL_AVAILABILITY_DELAY = timedelta(
+    seconds=get_spec("signal_log").availability_offset_s)
 
 MANUAL_STRATEGY = "manual"
 PROTECTION_STRATEGY = "protection"
@@ -318,22 +335,31 @@ def _signal_context(fwd: Optional[sqlite3.Connection], signal_id: Optional[str],
                     entry_ts: str) -> tuple[Optional[str], Optional[float], Optional[float]]:
     """The most recent signal observation that existed when the trade entered.
 
-    Bounded by `day < entry date`, strictly. The day-D observation is computed
-    from day D's close and is not written until the collector runs at 01:00 UTC
-    on D+1, so an entry on day D could only ever have seen D-1 or earlier --
-    which is exactly what `bridge.latest_direction()` read at submission time.
-    Admitting `day == entry date` would attach a value produced hours after the
-    decision it is supposed to explain.
+    Bounded by AVAILABILITY, not by the calendar: a day-D observation is
+    computed from day D's close and written by the collector at 01:00 UTC on
+    D+1, so it is admissible only once ``day + SIGNAL_AVAILABILITY_DELAY`` has
+    passed. The latest day that can satisfy that at `entry_ts` is therefore
+    ``(entry_ts - SIGNAL_AVAILABILITY_DELAY).date()``, and the bound is
+    inclusive because an observation available at exactly the entry instant was
+    available.
+
+    `day < entry date` was the previous rule, and it is wrong for the first
+    hour of a UTC day: day D-1 does not exist until 01:00 on D, so an entry at
+    00:xx on D could only have seen D-2. It is reachable -- the real order
+    placed 2026-09-02T00:01:20Z would have been attributed signal day
+    2026-09-01, written 58 minutes AFTER it was submitted. The alignment layer
+    already models this correctly; this function used to disagree with it.
     """
     if fwd is None or not signal_id:
         return None, None, None
     entry_dt = parse_ts(entry_ts)
     if entry_dt is None:
         return None, None, None
+    latest_available_day = (entry_dt - SIGNAL_AVAILABILITY_DELAY).date()
     row = fwd.execute(
         "SELECT day, position, raw_value FROM signal_log "
-        "WHERE signal_id=? AND day<? ORDER BY day DESC LIMIT 1",
-        (signal_id, entry_dt.date().isoformat()),
+        "WHERE signal_id=? AND day<=? ORDER BY day DESC LIMIT 1",
+        (signal_id, latest_available_day.isoformat()),
     ).fetchone()
     if row is None:
         return None, None, None
