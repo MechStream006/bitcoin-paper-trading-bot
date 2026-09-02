@@ -58,6 +58,9 @@ research/label_store/label_store.db
 research/label_store/label_store.db-wal
 research/label_store/label_store.db-shm
 research/label_store/label_store.pre-*.db
+research/label_store/decision_outcomes.db
+research/label_store/decision_outcomes.db-wal
+research/label_store/decision_outcomes.db-shm
 
 # Dataset Builder registry DB — data, not code (Phase 4 WBS 4.1, DS-DEC-005)
 research/dataset_builder/dataset_builder.db
