@@ -35,6 +35,7 @@ and the caller has to be able to tell.
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import sqlite3
 import sys
@@ -100,6 +101,39 @@ def to_observations(rows: Iterable[Any], spec: SourceSpec,
         ))
     out.sort(key=lambda o: (o.available_ts, str(o.provenance)))
     return out
+
+
+@dataclass(frozen=True)
+class SourceLoad:
+    """Observations plus what was discarded getting to them.
+
+    The counts matter downstream: "no rows at all" and "rows existed but none
+    could be placed in time" are different failures. The first is incomplete
+    data; the second means the store cannot say when anything arrived, which
+    must fail closed rather than be dated from the event clock.
+    """
+
+    source: str
+    observations: tuple[Observation, ...]
+    rows_seen: int
+    rows_without_availability: int
+
+    @property
+    def unusable_clock(self) -> bool:
+        return self.rows_seen > 0 and not self.observations             and self.rows_without_availability > 0
+
+
+def load_observations(rows: Iterable[Any], spec: SourceSpec,
+                      payload_fields: Sequence[str] = ()) -> SourceLoad:
+    """to_observations, but keeping the discard counts."""
+    materialised = list(rows)
+    obs = to_observations(materialised, spec, payload_fields)
+    return SourceLoad(
+        source=spec.name,
+        observations=tuple(obs),
+        rows_seen=len(materialised),
+        rows_without_availability=len(materialised) - len(obs),
+    )
 
 
 def as_of_join(decision_times: Sequence[datetime],
@@ -283,24 +317,47 @@ def load_oi(db_path, instrument_id: int | None = None,
 
 def load_lake_source(source: str, base_dir=None,
                      payload_fields: Sequence[str] = ()) -> list[Observation]:
-    """Load a Parquet-lake source through the existing DuckDB harness."""
+    """Load a Parquet-lake source, one partition at a time, with provenance.
+
+    Read partition-by-partition rather than through one merged DuckDB view.
+    `storage.duck.register_view` builds an explicit file list without hive
+    partitioning, so a row selected from the merged view cannot say which
+    partition it came from -- and a feature input whose provenance is a row of
+    Nones is not reproducible. Reading per partition attaches the dataset,
+    symbol, year, month and the manifest's `parquet_sha256` to every row, which
+    is the hook that lets a stored feature be traced back to an exact file.
+    """
     spec = get_spec(source)
     if spec.store != "parquet_lake":
         raise ValueError(f"{source} is not a lake source")
-    from storage import duck  # noqa: PLC0415 -- optional heavy dep, lake-only path
+    from storage import lake  # noqa: PLC0415 -- optional heavy dep, lake-only path
 
     dataset, symbol = spec.table.split("/", 1)
     base = pathlib.Path(base_dir) if base_dir else (_RESEARCH_ROOT / "data" / "raw")
-    con = duck.open_db()
-    try:
-        n = duck.register_view(con, "src", base, dataset, symbol)
-        if n == 0:
-            return []
-        cols = ", ".join(sorted({spec.event_field, *payload_fields}))
-        df = duck.query(con, f"SELECT {cols} FROM src ORDER BY {spec.event_field}")
-    finally:
-        con.close()
-    return to_observations(df.to_dict("records"), spec, payload_fields)
+    out: list[Observation] = []
+    for part in lake.list_partitions(base, dataset, symbol):
+        manifest_path = part["path"].parent / "_manifest.json"
+        sha = None
+        if manifest_path.exists():
+            try:
+                sha = json.loads(manifest_path.read_text()).get("parquet_sha256")
+            except (ValueError, OSError):
+                sha = None
+        prov = {"dataset": dataset, "symbol": symbol, "year": part["year"],
+                "month": part["month"], "parquet_sha256": sha}
+        frame = lake.read_partition(base, dataset, symbol, part["year"], part["month"])
+        keep = [c for c in {spec.event_field, *payload_fields} if c in frame.columns]
+        for row in frame[keep].to_dict("records"):
+            avail = availability_time(row, spec)
+            if avail is None:
+                continue
+            out.append(Observation(
+                source=spec.name, event_ts=event_time(row, spec),
+                available_ts=avail,
+                payload={f: row.get(f) for f in payload_fields},
+                provenance=dict(prov)))
+    out.sort(key=lambda o: (o.available_ts, str(o.provenance)))
+    return out
 
 
 def align_many(decision_times: Sequence[datetime],

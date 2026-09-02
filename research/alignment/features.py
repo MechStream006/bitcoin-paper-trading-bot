@@ -1,0 +1,429 @@
+"""
+features.py
+===========
+Deterministic feature construction on top of the alignment layer.
+
+    decision timestamp
+      -> declared source requirements
+      -> availability-safe aligned inputs (as-of, backward only)
+      -> feature row, with per-input age_s and provenance
+      -> explicit state when an input is missing, stale, or untimestampable
+
+Read-only and pure: `build_row` performs no I/O and never reads a clock. Every
+observation it uses is passed in. That is what makes offline and live parity
+possible later -- a live caller supplies observations from its own in-memory
+state, an offline caller from the loaders in `align`, and both run the identical
+code over the identical contract.
+
+STATES ARE NOT INVENTED HERE
+----------------------------
+Readiness reuses `research/dq`'s frozen vocabulary rather than a parallel one:
+the eight severity-ordered states in `dq.states` and the (state, criticality)
+matrix in `dq.policy`. That is deliberate. Those two modules are described in
+their own docstring as "the entire safety argument", and a second, subtly
+different set of statuses in the research tree would be exactly the second
+source of truth this project keeps refusing to create.
+
+The mapping this module is responsible for is only *observation -> state*:
+
+    READY             a match inside tolerance, with a non-null value
+    STALE_DATA        a match, but older than the declared tolerance
+    INCOMPLETE_DATA   no observation available by the decision instant, or the
+                      matched row's field is NULL
+    UNKNOWN           rows exist but none can be placed in time -- the store
+                      cannot say when anything arrived. Fails closed (L2),
+                      because a gate that cannot tell must not say yes.
+    CONFIGURATION_ERROR  the requirement names an unknown source, or one this
+                      project declares dormant
+
+An absent input is never NULL and never silently zero. It is a state.
+
+WHAT THIS MODULE WILL NOT DO
+----------------------------
+It will not interpolate, forward-fill past the declared tolerance, or reach for
+a different source to complete a row. A feature whose input is stale is a stale
+feature, and the row says so. In particular, the market bars in the Parquet lake
+end 2026-07-31 while live decisions are in September: `market_close_1m` is
+therefore INCOMPLETE_DATA at every current decision instant, and that is the
+correct answer, not a gap to paper over by substituting the spot price embedded
+in the option feed. They are different measurements from different venues.
+
+TOLERANCE IS MANDATORY AND EXPLICIT
+-----------------------------------
+Every requirement must state `tolerance_s`, or state `None` to mean deliberately
+unbounded. There is no default, because the sensible bound differs by two orders
+of magnitude across these sources -- the quote cycle drifts around 60s while a
+signal observation is a day old by construction -- and a shared default would be
+wrong for nearly all of them.
+"""
+from __future__ import annotations
+
+import pathlib
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+
+_HERE = pathlib.Path(__file__).resolve().parent
+_RESEARCH_ROOT = _HERE.parent
+if str(_RESEARCH_ROOT) not in sys.path:
+    sys.path.insert(0, str(_RESEARCH_ROOT))
+
+from alignment.align import (  # noqa: E402
+    Observation, SourceLoad, as_of_join, check_no_lookahead, observation_key,
+)
+from alignment.timebase import SOURCES, get_spec  # noqa: E402
+
+
+def _load_dq() -> tuple[Any, Any]:
+    """Load dq.states and dq.policy without leaving research/dq on sys.path.
+
+    `research/dq` uses flat imports (`policy.py` does `from states import ...`),
+    so the modules can only be loaded with that directory importable. The
+    obvious fix -- inserting it into sys.path -- is what the test suite does and
+    is exactly how `research/dq/engine.py` and `research/evidence/engine.py`
+    came to collide on `sys.modules['engine']` (CLAUDE.md sec.18, Increment 6).
+    Library code must not widen that. The directory is bound only for the
+    duration of these two loads, and every sys.modules entry touched is
+    restored, so importing this module changes no global import state.
+    """
+    import importlib.util
+
+    dq_dir = _RESEARCH_ROOT / "dq"
+    saved_path = list(sys.path)
+    saved_modules = {n: sys.modules.get(n) for n in ("states", "policy")}
+    sys.path.insert(0, str(dq_dir))
+    try:
+        loaded = {}
+        for name in ("states", "policy"):
+            spec = importlib.util.spec_from_file_location(name, dq_dir / f"{name}.py")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            loaded[name] = module
+        return loaded["states"], loaded["policy"]
+    finally:
+        sys.path[:] = saved_path
+        for name, previous in saved_modules.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
+
+
+states, policy = _load_dq()
+
+
+class FeatureContractError(ValueError):
+    """A malformed feature or input declaration."""
+
+
+@dataclass(frozen=True)
+class InputRequirement:
+    """One input a feature needs, and how fresh it has to be."""
+
+    name: str
+    source: str
+    field: str
+    criticality: str = policy.REQUIRED
+    tolerance_s: Optional[float] = None
+    key_field: Optional[str] = None
+    key: Any = None
+    degradation_declared: bool = False
+
+    def __post_init__(self) -> None:
+        if self.criticality not in policy.CRITICALITIES:
+            raise FeatureContractError(
+                f"{self.name}: criticality must be required|optional")
+        if self.tolerance_s is not None and self.tolerance_s < 0:
+            raise FeatureContractError(f"{self.name}: negative tolerance")
+        if self.key_field is not None and self.key is None:
+            raise FeatureContractError(
+                f"{self.name}: key_field {self.key_field!r} given without a key; "
+                "a panel source must name the member it means")
+
+
+@dataclass(frozen=True)
+class FeatureSpec:
+    """A feature: what it needs, and a pure function of those values."""
+
+    name: str
+    inputs: tuple[InputRequirement, ...]
+    compute: Callable[[Mapping[str, Any]], Any]
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.inputs:
+            raise FeatureContractError(f"{self.name}: declares no inputs")
+        seen = [i.name for i in self.inputs]
+        if len(set(seen)) != len(seen):
+            raise FeatureContractError(f"{self.name}: duplicate input names")
+
+
+@dataclass(frozen=True)
+class InputRecord:
+    """What was resolved for one input, and everything needed to audit it."""
+
+    name: str
+    source: str
+    state: str
+    action: str
+    value: Any
+    event_ts: Optional[datetime]
+    available_ts: Optional[datetime]
+    age_s: Optional[float]
+    tolerance_s: Optional[float]
+    criticality: str
+    provenance: dict[str, Any] = field(default_factory=dict)
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class FeatureValue:
+    name: str
+    value: Any
+    state: str
+    action: str
+    inputs: tuple[InputRecord, ...]
+
+    @property
+    def available(self) -> bool:
+        return self.action == policy.COMPUTE and self.value is not None
+
+
+@dataclass(frozen=True)
+class FeatureRow:
+    decision_ts: datetime
+    features: dict[str, FeatureValue]
+    state: str
+    action: str
+
+    def values(self) -> dict[str, Any]:
+        """Only the features that were actually computed. Absent means absent."""
+        return {n: f.value for n, f in self.features.items() if f.available}
+
+    def unavailable(self) -> dict[str, str]:
+        return {n: f.state for n, f in self.features.items() if not f.available}
+
+
+def _resolve_input(decision_ts: datetime, req: InputRequirement,
+                   loads: Mapping[str, SourceLoad]) -> InputRecord:
+    def rec(state: str, *, value=None, event_ts=None, available_ts=None,
+            age_s=None, provenance=None, detail="") -> InputRecord:
+        action = policy.resolve(state, req.criticality, req.degradation_declared)
+        return InputRecord(
+            name=req.name, source=req.source, state=state, action=action,
+            value=value, event_ts=event_ts, available_ts=available_ts,
+            age_s=age_s, tolerance_s=req.tolerance_s,
+            criticality=req.criticality, provenance=dict(provenance or {}),
+            detail=detail)
+
+    if req.source not in SOURCES:
+        return rec(states.CONFIGURATION_ERROR,
+                   detail=f"unknown source {req.source!r}")
+    spec = get_spec(req.source)
+    if not spec.populated:
+        return rec(states.CONFIGURATION_ERROR,
+                   detail=f"{req.source} is declared dormant: {spec.notes}")
+
+    load = loads.get(req.source)
+    if load is None:
+        return rec(states.INCOMPLETE_DATA, detail="source not supplied")
+    if load.unusable_clock:
+        # Rows exist, none can be placed in time. Never date them from the
+        # event clock -- that is the substitution this layer exists to refuse.
+        return rec(states.UNKNOWN,
+                   detail=f"{load.rows_without_availability} of "
+                          f"{load.rows_seen} rows have no usable arrival time")
+
+    obs: Sequence[Observation] = load.observations
+    if req.key_field is not None:
+        obs = [o for o in obs if observation_key(o, req.key_field) == req.key]
+
+    joined = as_of_join([decision_ts], obs, tolerance_s=None)[0]
+    if not joined["matched"]:
+        return rec(states.INCOMPLETE_DATA,
+                   detail="no observation available at the decision instant")
+
+    age = joined["age_s"]
+    prov = joined["provenance"]
+    if req.tolerance_s is not None and age is not None and age > req.tolerance_s:
+        # Reported, never forward-filled: the value exists, it is simply too
+        # old to stand for the decision instant.
+        return rec(states.STALE_DATA, event_ts=joined["event_ts"],
+                   available_ts=joined["available_ts"], age_s=age,
+                   provenance=prov,
+                   detail=f"age {age:.1f}s exceeds tolerance {req.tolerance_s:g}s")
+
+    value = joined["payload"].get(req.field)
+    if value is None:
+        return rec(states.INCOMPLETE_DATA, event_ts=joined["event_ts"],
+                   available_ts=joined["available_ts"], age_s=age,
+                   provenance=prov,
+                   detail=f"field {req.field!r} is NULL on the matched row")
+
+    return rec(states.READY, value=value, event_ts=joined["event_ts"],
+               available_ts=joined["available_ts"], age_s=age, provenance=prov)
+
+
+def build_feature(decision_ts: datetime, spec: FeatureSpec,
+                  loads: Mapping[str, SourceLoad]) -> FeatureValue:
+    records = tuple(_resolve_input(decision_ts, r, loads) for r in spec.inputs)
+    state = states.worst(r.state for r in records)
+    action = states.worst_action(r.action for r in records)
+
+    value = None
+    if action == policy.COMPUTE:
+        try:
+            value = spec.compute({r.name: r.value for r in records})
+        except Exception as exc:  # noqa: BLE001 -- a bad compute is a bad row, not a crash
+            return FeatureValue(spec.name, None, states.CONFIGURATION_ERROR,
+                                policy.HALT, records + (InputRecord(
+                                    name="__compute__", source="",
+                                    state=states.CONFIGURATION_ERROR,
+                                    action=policy.HALT, value=None, event_ts=None,
+                                    available_ts=None, age_s=None, tolerance_s=None,
+                                    criticality=policy.REQUIRED,
+                                    detail=f"{type(exc).__name__}: {exc}"),))
+    return FeatureValue(spec.name, value, state, action, records)
+
+
+def build_row(decision_ts: datetime, specs: Sequence[FeatureSpec],
+              loads: Mapping[str, SourceLoad],
+              verify_no_lookahead: bool = True) -> FeatureRow:
+    """One feature row for one decision instant.
+
+    Pure: no I/O, no clock. `verify_no_lookahead` re-runs the independent
+    checker from `align` over every resolved input, so a look-ahead cannot
+    reach a feature row even if the join that produced it were wrong.
+    """
+    features = {s.name: build_feature(decision_ts, s, loads) for s in specs}
+
+    if verify_no_lookahead:
+        rows = [{"decision_ts": decision_ts, "matched": r.available_ts is not None,
+                 "available_ts": r.available_ts, "age_s": r.age_s}
+                for f in features.values() for r in f.inputs]
+        violations = check_no_lookahead(rows)
+        if violations:
+            offenders = {r.name for f in features.values() for r in f.inputs
+                         if r.available_ts is not None and r.available_ts > decision_ts}
+            raise AssertionError(
+                f"look-ahead in feature inputs {sorted(offenders)}: "
+                f"{violations[0]['reason']}")
+
+    return FeatureRow(
+        decision_ts=decision_ts,
+        features=features,
+        state=states.worst(f.state for f in features.values()),
+        action=states.worst_action(f.action for f in features.values()),
+    )
+
+
+def build_rows(decision_times: Sequence[datetime], specs: Sequence[FeatureSpec],
+               loads: Mapping[str, SourceLoad]) -> list[FeatureRow]:
+    return [build_row(t, specs, loads) for t in decision_times]
+
+
+def coverage(rows: Sequence[FeatureRow]) -> dict[str, Any]:
+    """Per-feature availability and state counts over a set of rows."""
+    if not rows:
+        return {"rows": 0, "features": {}}
+    out: dict[str, Any] = {"rows": len(rows), "features": {}}
+    for name in sorted(rows[0].features):
+        vals = [r.features[name] for r in rows]
+        by_state: dict[str, int] = {}
+        for v in vals:
+            by_state[v.state] = by_state.get(v.state, 0) + 1
+        ages = [i.age_s for v in vals for i in v.inputs
+                if i.age_s is not None and i.state == states.READY]
+        entry: dict[str, Any] = {
+            "available": sum(1 for v in vals if v.available),
+            "availability_rate": sum(1 for v in vals if v.available) / len(vals),
+            "states": dict(sorted(by_state.items())),
+        }
+        if ages:
+            s = sorted(ages)
+            entry["input_age_s"] = {"min": s[0], "median": s[len(s) // 2],
+                                    "max": s[-1]}
+        out["features"][name] = entry
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The starter feature set: observed quantities and two mechanical ratios.
+# No indicator is invented here -- every value is either a field the collector
+# already records, or arithmetic over fields from a single observation.
+# ---------------------------------------------------------------------------
+
+def _identity(key: str) -> Callable[[Mapping[str, Any]], Any]:
+    return lambda v: v[key]
+
+
+def _spread_bps(v: Mapping[str, Any]) -> Optional[float]:
+    bid, ask = v["bid"], v["ask"]
+    mid = (bid + ask) / 2.0
+    if mid <= 0 or ask < bid:
+        return None
+    return (ask - bid) / mid * 10_000.0
+
+
+QUOTE_TOLERANCE_S = 300.0
+SIGNAL_TOLERANCE_S = 172_800.0
+BAR_TOLERANCE_S = 900.0
+
+
+def starter_features(instrument_id: int, signal_id: str) -> list[FeatureSpec]:
+    """Six features over sources this project already collects.
+
+    `instrument_id` and `signal_id` are required because `option_quotes` and
+    `signal_log` are panels; a feature that did not name its member would be
+    reading whichever row sorted last.
+    """
+    q = dict(source="option_quotes", key_field="instrument_id", key=instrument_id,
+             tolerance_s=QUOTE_TOLERANCE_S)
+    return [
+        FeatureSpec(
+            name="spot_price",
+            inputs=(InputRequirement(name="spot", field="spot_price", **q),),
+            compute=_identity("spot"),
+            description="BTC index embedded in every option ticker.",
+        ),
+        FeatureSpec(
+            name="option_mark_iv",
+            inputs=(InputRequirement(name="iv", field="mark_iv", **q),),
+            compute=_identity("iv"),
+            description="Mark IV of the named instrument.",
+        ),
+        FeatureSpec(
+            name="option_oi_contracts",
+            inputs=(InputRequirement(name="oi", field="oi_contracts", **q),),
+            compute=_identity("oi"),
+            description="Open interest. Rides the quote cadence, which drifts; "
+                        "oi_snapshots is empty.",
+        ),
+        FeatureSpec(
+            name="quote_spread_bps",
+            inputs=(InputRequirement(name="bid", field="best_bid", **q),
+                    InputRequirement(name="ask", field="best_ask", **q)),
+            compute=_spread_bps,
+            description="Top-of-book spread in bps. Mechanical, not an indicator.",
+        ),
+        FeatureSpec(
+            name="signal_position",
+            inputs=(InputRequirement(
+                name="pos", source="signal_log", field="position",
+                key_field="signal_id", key=signal_id,
+                tolerance_s=SIGNAL_TOLERANCE_S),),
+            compute=_identity("pos"),
+            description="The signal family's position as of the decision.",
+        ),
+        FeatureSpec(
+            name="market_close_1m",
+            inputs=(InputRequirement(
+                name="close", source="spot_1m", field="close",
+                tolerance_s=BAR_TOLERANCE_S),),
+            compute=_identity("close"),
+            description="Binance 1m close. Expected INCOMPLETE_DATA at current "
+                        "decision instants: the lake ends 2026-07-31.",
+        ),
+    ]
