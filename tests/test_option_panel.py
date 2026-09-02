@@ -163,6 +163,108 @@ class TestAtmIv:
         assert len(obs) == 1, "a broken cycle must not inherit the previous one"
 
 
+class TestPositiveIvValidity:
+    """Both ATM legs must quote mark_iv > 0, tested per leg not on the mid."""
+
+    def test_normal_positive_ivs_still_resolve(self):
+        o = OP.atm_iv_observations(pair(100000.0, call_iv=0.50, put_iv=0.40))[0]
+        assert o.payload["atm_iv"] == pytest.approx(0.45)
+
+    def test_both_legs_zero_yields_no_observation(self):
+        assert OP.atm_iv_observations(
+            pair(100000.0, call_iv=0.0, put_iv=0.0)) == []
+
+    def test_a_single_zero_leg_yields_no_observation(self):
+        assert OP.atm_iv_observations(
+            pair(100000.0, call_iv=0.50, put_iv=0.0)) == []
+        assert OP.atm_iv_observations(
+            pair(100000.0, call_iv=0.0, put_iv=0.50)) == []
+
+    def test_a_positive_mid_cannot_rescue_a_zero_leg(self):
+        """The real case: call 0.0184, put 0.0 -> mid 0.0092 > 0.
+
+        One cycle in the extracted window is exactly this. A mid-only test
+        would admit it, which is why the rule is per leg.
+        """
+        assert OP.atm_iv_observations(
+            pair(100000.0, call_iv=0.0184, put_iv=0.0)) == []
+
+    def test_negative_iv_is_refused(self):
+        assert OP.atm_iv_observations(
+            pair(100000.0, call_iv=-0.10, put_iv=0.50)) == []
+
+    def test_a_tiny_but_positive_iv_is_kept(self):
+        """The rule is validity, not a plausibility filter."""
+        o = OP.atm_iv_observations(
+            pair(100000.0, call_iv=0.002, put_iv=0.004))[0]
+        assert o.payload["atm_iv"] == pytest.approx(0.003)
+
+    def test_an_invalid_cycle_does_not_inherit_a_neighbour(self):
+        good = pair(100000.0, call_iv=0.50, put_iv=0.40, ts=CYCLE)
+        bad = pair(100000.0, call_iv=0.0, put_iv=0.0,
+                   ts="2026-09-01T10:01:00+00:00", base=50)
+        obs = OP.atm_iv_observations(good + bad)
+        assert len(obs) == 1 and obs[0].provenance["cycle_ts"] == CYCLE
+
+    def test_the_feature_reports_incomplete_not_ready_zero(self):
+        # rows_without_availability=0: the cycle was timestamped fine, the
+        # value was invalid. Counting it as a clock failure would raise the
+        # state to UNKNOWN, which means "we cannot tell when" -- not the case.
+        loads = {"atm_iv": AL.SourceLoad(
+            "atm_iv",
+            tuple(OP.atm_iv_observations(pair(100000.0, call_iv=0.0, put_iv=0.0))),
+            1, 0)}
+        row_ = FT.build_row(T(2026, 9, 1, 10, 0, 30),
+                            [s for s in FT.starter_features("g3")
+                             if s.name == "option_atm_iv"], loads)
+        f = row_.features["option_atm_iv"]
+        assert f.state == FT.states.INCOMPLETE_DATA
+        assert f.value is None and f.available is False
+
+    def test_a_validity_drop_is_not_reported_as_a_clock_failure(self, tmp_path):
+        """UNKNOWN means "we cannot tell when"; that is not what happened."""
+        import sqlite3
+        p = tmp_path / "q.db"
+        con = sqlite3.connect(p)
+        con.executescript(
+            "CREATE TABLE option_quotes (instrument_id INTEGER, ts TEXT, "
+            "exch_ts INTEGER, spot_price REAL, mark_iv REAL);"
+            "CREATE TABLE instruments (id INTEGER PRIMARY KEY, symbol TEXT, "
+            "strike_price REAL, settlement_time TEXT, contract_type TEXT);")
+        con.executemany("INSERT INTO option_quotes VALUES (?,?,?,?,?)", [
+            (1, CYCLE, US, 100000.0, 0.0), (2, CYCLE, US, 100000.0, 0.0)])
+        con.executemany("INSERT INTO instruments VALUES (?,?,?,?,?)", [
+            (1, "C", 100000.0, EXP_NEAR, OP.CALL),
+            (2, "P", 100000.0, EXP_NEAR, OP.PUT)])
+        con.commit()
+        con.close()
+        loads = OP.load_derived_sources(p)
+        assert loads["atm_iv"].observations == ()
+        assert loads["atm_iv"].rows_without_availability == 0
+        assert loads["atm_iv"].unusable_clock is False
+
+    def test_spot_index_is_unaffected_by_the_iv_rule(self):
+        """The fix is scoped to option_atm_iv only."""
+        rows = pair(100000.0, call_iv=0.0, put_iv=0.0)
+        assert OP.atm_iv_observations(rows) == []
+        assert len(OP.spot_index_observations(rows)) == 1
+
+    def test_validity_is_declared_on_the_contract(self):
+        spec = [s for s in FT.starter_features("g3")
+                if s.name == "option_atm_iv"][0]
+        assert spec.inputs[0].validity == "both ATM legs quote mark_iv > 0"
+
+    def test_only_the_iv_contract_hash_moves(self):
+        """Adding the field must not bump features nobody touched."""
+        from feature_store import decision_store as DS
+        hashes = {s.name: DS.contract_hash(s)
+                  for s in FT.starter_features("g3_momentum_tsmom")}
+        assert hashes["spot_price"].startswith("d0c3da2b9c73")
+        assert hashes["signal_position"].startswith("6a2dcdb053c8")
+        assert hashes["market_close_1m"].startswith("5bee276a9aad")
+        assert not hashes["option_atm_iv"].startswith("35dbdc82fd85")
+
+
 class TestNoLookAhead:
     def test_state_is_never_read(self):
         """instruments.state is a current-snapshot field, not history."""
@@ -263,23 +365,15 @@ class TestAgainstRealCorpus:
         assert loads["spot_index"].observations
         assert loads["atm_iv"].observations
 
-    def test_atm_iv_range_and_the_degenerate_tail(self):
-        """Measured, not assumed.
-
-        5.96% of cycles (1,244 of 20,870) carry an ATM pair whose BOTH legs
-        report mark_iv exactly 0.0 -- the synthetic-quote degeneracy CLAUDE.md
-        sec.11 documents, and it reaches the money, not only the wings. The
-        reduction reports it faithfully rather than hiding it; whether a
-        positive-IV validity condition belongs in the contract is an open
-        decision, so this test pins the current behaviour instead of asserting
-        a range that does not hold.
-        """
+    def test_atm_iv_is_positive_everywhere_after_the_validity_rule(self):
+        """1,245 of 20,870 cycles (5.97%) had at least one ATM leg at 0.0 --
+        the synthetic-quote degeneracy CLAUDE.md sec.11 documents, reaching the
+        money and not only the wings. Those cycles now yield no observation."""
         vals = [o.payload["atm_iv"] for o in self._loads()["atm_iv"].observations]
-        zero = [v for v in vals if v <= 0.0]
-        positive = [v for v in vals if v > 0.0]
-        assert 0.0 < len(zero) / len(vals) < 0.15
-        assert min(positive) > 0.005 and max(positive) < 5.0
-        assert all(v >= 0.0 for v in vals), "IV must never be negative"
+        assert all(v > 0.0 for v in vals), "the validity rule removed the zeros"
+        assert min(vals) > 0.005 and max(vals) < 5.0
+        for o in self._loads()["atm_iv"].observations[:2000]:
+            assert o.payload["call_iv"] > 0 and o.payload["put_iv"] > 0
 
     def test_call_and_put_legs_agree_closely(self):
         obs = self._loads()["atm_iv"].observations

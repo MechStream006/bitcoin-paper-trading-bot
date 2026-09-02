@@ -219,18 +219,25 @@ def contract_of(spec: FeatureSpec) -> dict[str, Any]:
         body = inspect.getsource(spec.compute)
     except (OSError, TypeError):
         body = repr(spec.compute)
+    inputs = []
+    for i in spec.inputs:
+        d = {
+            "name": i.name, "source": i.source, "field": i.field,
+            "criticality": i.criticality, "tolerance_s": i.tolerance_s,
+            "key_field": i.key_field, "key": i.key,
+            "degradation_declared": i.degradation_declared,
+        }
+        # Emitted ONLY when set, so adding the field leaves every existing
+        # contract byte-identical. A declared validity rule must move the hash;
+        # an absent one must not bump features nobody touched.
+        validity = getattr(i, "validity", None)
+        if validity is not None:
+            d["validity"] = validity
+        inputs.append(d)
     return {
         "feature_name": spec.name,
         "compute_source": " ".join(body.split()),
-        "inputs": [
-            {
-                "name": i.name, "source": i.source, "field": i.field,
-                "criticality": i.criticality, "tolerance_s": i.tolerance_s,
-                "key_field": i.key_field, "key": i.key,
-                "degradation_declared": i.degradation_declared,
-            }
-            for i in spec.inputs
-        ],
+        "inputs": inputs,
     }
 
 

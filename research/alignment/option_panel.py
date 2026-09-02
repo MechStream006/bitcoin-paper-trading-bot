@@ -64,6 +64,14 @@ from alignment.timebase import to_utc  # noqa: E402
 CALL = "call_options"
 PUT = "put_options"
 
+#: An implied vol of zero (or below) is not a measurement -- it is a degenerate
+#: or absent quote. CLAUDE.md sec.11 documents exactly this on testnet ("ask_iv
+#: as low as 0.000005, degenerate bid/ask"), and it reaches the money: 1,245 of
+#: 20,870 cycles (5.97%) in 2026-08-19..09-02 have at least one ATM leg at 0.0.
+#: The test must be per LEG, not on the mid: one cycle carries call 0.0184 with
+#: put 0.0000, whose mid 0.0092 is positive and would otherwise pass.
+MIN_VALID_IV = 0.0
+
 
 @dataclass(frozen=True)
 class PanelRow:
@@ -208,6 +216,10 @@ def select_atm_pair(rows: Sequence[PanelRow], cycle_ts: str) -> Optional[AtmPair
 def atm_iv_observations(rows: Iterable[PanelRow]) -> list[Observation]:
     """Nearest-expiry ATM implied vol per cycle, as the call/put pair mid.
 
+    Both legs must quote a strictly positive implied vol; see `MIN_VALID_IV`.
+    A cycle failing that yields no observation at all, so the feature reports
+    INCOMPLETE_DATA rather than a spurious READY 0.0.
+
     The mid is used rather than either leg because put-call parity implies a
     single ATM implied vol: measured across the six real automated decisions the
     two legs differed by 0.005-0.020 against a cross-date range of 0.24, while
@@ -219,7 +231,11 @@ def atm_iv_observations(rows: Iterable[PanelRow]) -> list[Observation]:
         pair = select_atm_pair(cyc, ts)
         if pair is None:
             continue
-        if pair.call.mark_iv is None or pair.put.mark_iv is None:
+        legs = (pair.call.mark_iv, pair.put.mark_iv)
+        if any(v is None or float(v) <= MIN_VALID_IV for v in legs):
+            # Absent, not zero. Emitting no observation lets the feature layer
+            # report INCOMPLETE_DATA, which is the honest answer; a 0.0 written
+            # as READY would be a wrong number inside a feature corpus.
             continue
         avail = to_utc(ts, "iso")
         if avail is None:
@@ -252,13 +268,22 @@ def atm_iv_observations(rows: Iterable[PanelRow]) -> list[Observation]:
 
 def load_derived_sources(db_path, lo: str | None = None, hi: str | None = None
                          ) -> dict[str, SourceLoad]:
-    """Both derived series from one pass over the panel."""
+    """Both derived series from one pass over the panel.
+
+    `rows_without_availability` counts ONLY cycles that could not be placed in
+    time. A cycle dropped for an incomplete or invalid ATM pair is not one of
+    them: its clock was fine and its value was not. The distinction is load
+    bearing -- `SourceLoad.unusable_clock` drives the UNKNOWN state, which
+    fails closed because the store cannot say WHEN anything arrived, whereas a
+    validity drop is ordinary absence and must read INCOMPLETE_DATA.
+    """
     rows = load_panel(db_path, lo, hi)
     spot = spot_index_observations(rows)
     atm = atm_iv_observations(rows)
-    cycles = len({r.ts for r in rows})
+    cycle_ts = {r.ts for r in rows}
+    cycles = len(cycle_ts)
+    unclocked = sum(1 for ts in cycle_ts if to_utc(ts, "iso") is None)
     return {
-        "spot_index": SourceLoad("spot_index", tuple(spot), cycles,
-                                 cycles - len(spot)),
-        "atm_iv": SourceLoad("atm_iv", tuple(atm), cycles, cycles - len(atm)),
+        "spot_index": SourceLoad("spot_index", tuple(spot), cycles, unclocked),
+        "atm_iv": SourceLoad("atm_iv", tuple(atm), cycles, unclocked),
     }

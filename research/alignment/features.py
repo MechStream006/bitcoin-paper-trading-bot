@@ -130,6 +130,13 @@ class InputRequirement:
     key_field: Optional[str] = None
     key: Any = None
     degradation_declared: bool = False
+    #: A hashed, human-readable statement of what this input requires to count
+    #: as present, beyond being non-NULL. Declarative only: the condition is
+    #: ENFORCED where it can be, which for a reduction is inside the reduction
+    #: -- the feature layer sees one value and cannot test the legs behind it.
+    #: Declaring it here is what moves the contract hash when the rule changes,
+    #: so a validity change cannot silently reuse an existing version.
+    validity: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.criticality not in policy.CRITICALITIES:
@@ -403,7 +410,8 @@ def starter_features(signal_id: str) -> list[FeatureSpec]:
             name="option_atm_iv",
             inputs=(InputRequirement(
                 name="iv", source="atm_iv", field="atm_iv",
-                tolerance_s=QUOTE_TOLERANCE_S),),
+                tolerance_s=QUOTE_TOLERANCE_S,
+                validity="both ATM legs quote mark_iv > 0"),),
             compute=_identity("iv"),
             description="Nearest-expiry ATM call/put mark_iv mid. Front-end "
                         "implied vol; not the vol-state feature, which is DVOL.",
