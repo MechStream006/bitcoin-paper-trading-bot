@@ -239,10 +239,15 @@ def evaluate_once(
     # round-trip, and the 01:00 UTC collector can close or open a forward trade
     # inside that window -- so a re-read can pin a direction the order never
     # carried. `intent.side` is the artefact that actually went to Delta.
+    #
+    # `now` is the decision instant, already held here, and bounds the signal
+    # fields to what had become available by then. It is passed rather than
+    # re-derived, and no signal_log read is added to this path: the bound is
+    # applied inside the capture, against the same source it already reads.
     try:
         bridge.capture_signal_context(
             conn, intent.client_order_id, forward_db_path, bridge.SIGNAL_ID,
-            direction=_intent_direction(intent))
+            direction=_intent_direction(intent), decision_ts=now)
     except Exception as exc:  # noqa: BLE001
         log.warning("[strategy] signal context not captured for %s: %s: %s",
                     intent.client_order_id, type(exc).__name__, exc)

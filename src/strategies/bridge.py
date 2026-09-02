@@ -21,7 +21,8 @@ import logging
 import math
 import pathlib
 import sqlite3
-from datetime import datetime, timezone
+import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.risk import limits
@@ -124,9 +125,28 @@ def latest_direction(forward_db_path: str, signal_id: str = SIGNAL_ID) -> int | 
 _REREAD_DIRECTION = object()
 
 
+def _signal_availability_delay() -> timedelta:
+    """The declared delay before a `signal_log` day becomes readable.
+
+    Taken from `alignment.timebase`, which is where this project states when
+    each source became available, so the capture cannot disagree with the
+    research layer about a signal's vintage. Imported lazily and inside the
+    caller's try block, following `src/api/services.py`'s stance on the
+    research tree: this is the live order path, and a research-tree import
+    problem must never reach it at module load.
+    """
+    research_root = pathlib.Path(__file__).resolve().parents[2] / "research"
+    if str(research_root) not in sys.path:
+        sys.path.insert(0, str(research_root))
+    from alignment.timebase import get_spec
+
+    return timedelta(seconds=get_spec("signal_log").availability_offset_s)
+
+
 def capture_signal_context(conn, client_order_id: str, forward_db_path: str,
                            signal_id: str = SIGNAL_ID,
-                           direction: Any = _REREAD_DIRECTION) -> bool:
+                           direction: Any = _REREAD_DIRECTION,
+                           decision_ts: datetime | None = None) -> bool:
     """Record the signal state that motivated one live entry, at submit time.
 
     The forward-evidence database moves on: a reader months later cannot
@@ -149,6 +169,20 @@ def capture_signal_context(conn, client_order_id: str, forward_db_path: str,
     after the quote, wallet, risk and HTTP round-trips, and the 01:00 UTC
     collector can close or open a trade inside that window, so a re-read can
     record a direction the submitted order never carried.
+
+    `decision_ts` bounds the signal fields to what had actually become
+    AVAILABLE by the decision instant: a day-D observation is written by the
+    collector at 01:00 UTC on D+1 (measured 01:00:06-01:00:42), so the latest
+    admissible day is ``(decision_ts - 25h).date()``, inclusive. Without it the
+    fields are whatever is newest at capture time, which is a few seconds later
+    and can straddle that commit -- an entry decided at 00:59 would then record
+    a signal day it could not have seen. `strategy_jobs` passes the instant it
+    already holds; omitting it keeps the original unbounded behaviour for any
+    caller with no decision instant to offer.
+
+    All three signal reads share one snapshot and one bound, so `signal_day`,
+    `raw_value` and `context_json` cannot come from different vintages even if
+    the collector commits mid-call.
     """
     p = pathlib.Path(forward_db_path)
     if not p.exists():
@@ -158,23 +192,43 @@ def capture_signal_context(conn, client_order_id: str, forward_db_path: str,
     fwd = None
     try:
         fwd = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
-        if direction is _REREAD_DIRECTION:
-            row = fwd.execute(
-                "SELECT direction FROM trade_entries WHERE signal_id = ? AND open = 1 "
-                "ORDER BY entry_date DESC LIMIT 1", (signal_id,)).fetchone()
-            direction = int(row[0]) if row else None
-        sig = fwd.execute(
-            "SELECT day, position, raw_value FROM signal_log WHERE signal_id = ? "
-            "ORDER BY id DESC LIMIT 1", (signal_id,)).fetchone()
-        signal_day = sig[0] if sig else None
-        raw_value = float(sig[2]) if sig and sig[2] is not None else None
-        latest_day = fwd.execute("SELECT MAX(day) FROM signal_log").fetchone()
-        context = {}
-        if latest_day and latest_day[0]:
-            for sid, pos in fwd.execute(
-                    "SELECT signal_id, position FROM signal_log WHERE day = ?",
-                    (latest_day[0],)):
-                context[sid] = pos
+        bound = None
+        if decision_ts is not None:
+            at = (decision_ts if decision_ts.tzinfo is not None
+                  else decision_ts.replace(tzinfo=timezone.utc))
+            bound = (at - _signal_availability_delay()).date().isoformat()
+        # One read transaction for every signal query below. Without it each
+        # SELECT takes its own snapshot, so a collector commit landing between
+        # them could pair a signal_day with a context_json from the next day.
+        fwd.execute("BEGIN")
+        try:
+            if direction is _REREAD_DIRECTION:
+                row = fwd.execute(
+                    "SELECT direction FROM trade_entries WHERE signal_id = ? AND open = 1 "
+                    "ORDER BY entry_date DESC LIMIT 1", (signal_id,)).fetchone()
+                direction = int(row[0]) if row else None
+            if bound is None:
+                sig = fwd.execute(
+                    "SELECT day, position, raw_value FROM signal_log WHERE signal_id = ? "
+                    "ORDER BY id DESC LIMIT 1", (signal_id,)).fetchone()
+                latest_day = fwd.execute("SELECT MAX(day) FROM signal_log").fetchone()
+            else:
+                sig = fwd.execute(
+                    "SELECT day, position, raw_value FROM signal_log WHERE signal_id = ? "
+                    "AND day <= ? ORDER BY day DESC LIMIT 1",
+                    (signal_id, bound)).fetchone()
+                latest_day = fwd.execute(
+                    "SELECT MAX(day) FROM signal_log WHERE day <= ?", (bound,)).fetchone()
+            signal_day = sig[0] if sig else None
+            raw_value = float(sig[2]) if sig and sig[2] is not None else None
+            context = {}
+            if latest_day and latest_day[0]:
+                for sid, pos in fwd.execute(
+                        "SELECT signal_id, position FROM signal_log WHERE day = ?",
+                        (latest_day[0],)):
+                    context[sid] = pos
+        finally:
+            fwd.execute("COMMIT")
         from src.data import storage as _storage
         _storage.write_trade_signal_context(
             conn, client_order_id=client_order_id, signal_id=signal_id,

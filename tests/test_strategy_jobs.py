@@ -7,6 +7,8 @@ TestnetExecutor.submit(), and these tests fix the wiring around them.
 from __future__ import annotations
 
 import ast
+import json
+import inspect
 import hashlib
 import pathlib
 import sqlite3
@@ -92,11 +94,13 @@ UNTOUCHED_MODULES = (
     "src/execution/protection.py",
 )
 
-#: bridge.py's authorized content identity. Taken at the one change this
-#: workstream was permitted: `capture_signal_context` gained an optional
-#: `direction`, so the caller can pin the direction it actually consumed
-#: instead of re-reading a ledger that may have moved underneath it, and its
-#: docstring was corrected to say that the execution path now calls it.
+#: bridge.py's authorized content identity. Re-pinned deliberately for the
+#: availability-bound capture: `capture_signal_context` now also takes an
+#: optional `decision_ts`, bounds the signal fields to days already available
+#: at that instant, and reads them inside one transaction so they cannot come
+#: from different vintages. The pin previously covered the `direction`
+#: parameter and the docstring correction that admitted the execution path
+#: calls this function.
 #:
 #: This freezes the WHOLE file, prose included. That is the point -- the module
 #: it protects sets stop distance, the order-id bound and the ledger query, and
@@ -105,13 +109,14 @@ UNTOUCHED_MODULES = (
 #: this deliberately. `BRIDGE_OTHER_SURFACE` below is the structural half, and
 #: says WHAT changed when the change is structural.
 BRIDGE_CONTENT_SHA256 = (
-    "f0450d6745319e073ea71de4bf8c64c33e2282bcd5a9b31774925c39bcaa8b92")
+    "323e3200ccfed26756647cfc57dbf8c69d48d880a8d033e97a08bbf6c820bc16")
 
 #: The authorized signature, spelled out so a drifting default or a dropped
 #: parameter names itself rather than only moving a hash.
 BRIDGE_CAPTURE_SIGNATURE = (
     "def(conn, client_order_id: str, forward_db_path: str, "
-    "signal_id: str=SIGNAL_ID, direction: Any=_REREAD_DIRECTION)")
+    "signal_id: str=SIGNAL_ID, direction: Any=_REREAD_DIRECTION, "
+    "decision_ts: datetime | None=None)")
 
 #: Everything else bridge.py declares. Pinned so an added, removed or
 #: re-signatured function is reported by name.
@@ -125,6 +130,7 @@ BRIDGE_OTHER_SURFACE = {
     "read_latest_signal": "def(forward_db_path: str, signal_id: str=SIGNAL_ID)",
     "latest_direction": "def(forward_db_path: str, signal_id: str=SIGNAL_ID)",
     "_REREAD_DIRECTION": "object()",
+    "_signal_availability_delay": "def()",
     "CLIENT_ORDER_ID_MAX_LEN": "32",
     "_SIGNAL_DIGEST_LEN": "6",
     "_signal_token": "def(signal_id: str, budget: int)",
@@ -675,6 +681,169 @@ class TestCapturedDirectionIsTheSubmittedOne:
             ("coid-pinned",)).fetchone()[0] == 1
 
 
+class TestSignalFieldsAreBoundedByAvailability:
+
+    """signal_day / raw_value / context_json must be what the DECISION could see.
+
+    They are read after submit(), so without a bound they are whatever is
+    newest at capture time -- a few seconds later, and able to straddle the
+    01:00 UTC collector commit (measured 01:00:06-01:00:42). The bound is the
+    same one alignment.timebase declares for signal_log.
+    """
+
+    SIG = bridge.SIGNAL_ID
+    OTHER = "h5_vol_regime"
+
+    _seq = 0
+
+    def _fwd(self, tmp_path, days, name=None):
+        """A forward corpus carrying two signals on each of `days`."""
+        TestSignalFieldsAreBoundedByAvailability._seq += 1
+        path = tmp_path / (name or f"avail_{self._seq}.db")
+        c = sqlite3.connect(path)
+        c.executescript((ROOT / "research" / "forward_evidence" /
+                         "schema_forward.sql").read_text(encoding="utf-8"))
+        for i, day in enumerate(days):
+            c.execute("INSERT INTO run_log (signal_id, run_date, fn_hash, status)"
+                      " VALUES (?,?,?, 'ok')", (self.SIG, day, "h"))
+            rid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            c.execute("INSERT INTO signal_log (signal_id, day, position, raw_value,"
+                      " run_id) VALUES (?,?,?,?,?)",
+                      (self.SIG, day, 1.0, float(i), rid))
+            c.execute("INSERT INTO run_log (signal_id, run_date, fn_hash, status)"
+                      " VALUES (?,?,?, 'ok')", (self.OTHER, day, "h"))
+            rid2 = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            c.execute("INSERT INTO signal_log (signal_id, day, position, raw_value,"
+                      " run_id) VALUES (?,?,?,?,?)",
+                      (self.OTHER, day, -1.0, float(i) + 100.0, rid2))
+        c.execute("INSERT INTO trade_entries (signal_id, entry_date, direction,"
+                  " entry_close_price, planned_exit_date, open) VALUES (?,?,?,?,?,1)",
+                  (self.SIG, days[-1], -1, 70000.0, "2099-01-01"))
+        c.commit(); c.close()
+        return str(path)
+
+    DAYS = ("2026-08-30", "2026-08-31", "2026-09-01")
+
+    def _capture(self, tmp_path, conn, decision_ts, coid="coid-x", **kw):
+        fwd = self._fwd(tmp_path, self.DAYS)
+        assert bridge.capture_signal_context(
+            conn, coid, fwd, self.SIG, decision_ts=decision_ts, **kw) is True
+        return dict(zip(
+            ("signal_day", "raw_value", "context_json", "direction"),
+            conn.execute("SELECT signal_day, raw_value, context_json, direction "
+                         "FROM trade_signal_context WHERE client_order_id=?",
+                         (coid,)).fetchone()))
+
+    def test_the_delay_is_the_one_the_timebase_declares(self):
+        sys.path.insert(0, str(ROOT / "research"))
+        from alignment.timebase import get_spec
+        assert (bridge._signal_availability_delay().total_seconds()
+                == get_spec("signal_log").availability_offset_s == 25 * 3600)
+
+    def test_the_position_six_style_case_takes_the_available_day(self, tmp_path, conn):
+        """00:01:20 on 09-02: the 09-01 row is not written until 01:00 on 09-02."""
+        got = self._capture(tmp_path, conn,
+                            datetime(2026, 9, 2, 0, 1, 20, 167341, tzinfo=timezone.utc))
+        assert got["signal_day"] == "2026-08-31"
+
+    def test_exactly_twenty_five_hours_admits_the_day(self, tmp_path, conn):
+        got = self._capture(tmp_path, conn,
+                            datetime(2026, 9, 2, 1, 0, 0, tzinfo=timezone.utc))
+        assert got["signal_day"] == "2026-09-01"
+
+    def test_one_microsecond_short_of_the_boundary_excludes_it(self, tmp_path, conn):
+        got = self._capture(tmp_path, conn,
+                            datetime(2026, 9, 2, 0, 59, 59, 999999, tzinfo=timezone.utc))
+        assert got["signal_day"] == "2026-08-31"
+
+    def test_a_not_yet_available_signal_is_never_recorded(self, tmp_path, conn):
+        """Every row in the corpus post-dates this decision."""
+        fwd = self._fwd(tmp_path, ("2026-09-05", "2026-09-06"))
+        assert bridge.capture_signal_context(
+            conn, "coid-none", fwd, self.SIG,
+            decision_ts=datetime(2026, 9, 2, 12, tzinfo=timezone.utc)) is True
+        row = conn.execute("SELECT signal_day, raw_value, context_json FROM "
+                           "trade_signal_context WHERE client_order_id=?",
+                           ("coid-none",)).fetchone()
+        assert row[0] is None and row[1] is None
+        assert json.loads(row[2]) == {}, "context must not reach past the bound"
+
+    def test_all_three_fields_share_one_eligible_vintage(self, tmp_path, conn):
+        """signal_day, raw_value and context_json must agree on the day."""
+        got = self._capture(tmp_path, conn,
+                            datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc))
+        assert got["signal_day"] == "2026-08-31"
+        assert got["raw_value"] == 1.0, "the 08-31 row's own raw_value"
+        ctx = json.loads(got["context_json"])
+        assert set(ctx) == {self.SIG, self.OTHER}
+        assert ctx[self.SIG] == 1.0 and ctx[self.OTHER] == -1.0
+
+    def test_context_json_cannot_reach_a_day_the_signal_field_could_not(self, tmp_path, conn):
+        """The bound applies to the MAX(day) query too, not only to the signal."""
+        got = self._capture(tmp_path, conn,
+                            datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc))
+        ctx_day_values = json.loads(got["context_json"])
+        fwd = self._fwd(tmp_path, self.DAYS, name="probe.db")
+        c = sqlite3.connect(f"{pathlib.Path(fwd).as_uri()}?mode=ro", uri=True)
+        newest = c.execute("SELECT MAX(day) FROM signal_log").fetchone()[0]
+        c.close()
+        assert newest == "2026-09-01", "the corpus does hold a newer day"
+        assert ctx_day_values[self.SIG] == 1.0, "but context came from 08-31"
+
+    def test_a_naive_decision_ts_is_read_as_utc(self, tmp_path, conn):
+        aware = self._capture(tmp_path, conn,
+                              datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc))
+        conn.execute("DELETE FROM trade_signal_context"); conn.commit()
+        naive = self._capture(tmp_path, conn, datetime(2026, 9, 2, 0, 30))
+        assert aware["signal_day"] == naive["signal_day"] == "2026-08-31"
+
+    def test_direction_stays_pinned_to_the_intent(self, tmp_path, conn):
+        """The bound must not disturb the already-pinned direction."""
+        got = self._capture(tmp_path, conn,
+                            datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc),
+                            direction=1)
+        assert got["direction"] == 1, "pinned, not the ledger's -1"
+
+    def test_an_unbounded_caller_keeps_the_original_behaviour(self, tmp_path, conn):
+        """No decision instant to offer -> latest at capture time, as before."""
+        fwd = self._fwd(tmp_path, self.DAYS)
+        assert bridge.capture_signal_context(conn, "coid-legacy", fwd, self.SIG) is True
+        row = conn.execute("SELECT signal_day, direction FROM trade_signal_context "
+                           "WHERE client_order_id=?", ("coid-legacy",)).fetchone()
+        assert row[0] == "2026-09-01", "unbounded: the newest row"
+        assert row[1] == -1, "and the ledger's direction, re-read"
+
+    def test_captured_ts_is_still_capture_time_not_the_decision(self, tmp_path, conn):
+        before = datetime.now(timezone.utc)
+        self._capture(tmp_path, conn,
+                      datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc))
+        stamp = conn.execute("SELECT captured_ts FROM trade_signal_context "
+                             "WHERE client_order_id=?", ("coid-x",)).fetchone()[0]
+        assert datetime.fromisoformat(stamp) >= before
+
+    def test_every_signal_read_shares_one_transaction(self):
+        """A collector commit mid-call cannot split the three queries.
+
+        Structural: the reads sit inside an explicit BEGIN, so they take one
+        snapshot instead of three.
+        """
+        src = inspect.getsource(bridge.capture_signal_context)
+        begin = src.index('fwd.execute("BEGIN")')
+        for needle in ("FROM signal_log WHERE signal_id", "MAX(day) FROM signal_log",
+                       "SELECT signal_id, position FROM signal_log"):
+            assert src.index(needle) > begin, f"{needle} escapes the snapshot"
+        assert 'fwd.execute("COMMIT")' in src
+
+    def test_the_job_passes_its_decision_instant(self):
+        """And adds no signal_log read of its own to do it."""
+        src = (ROOT / "src" / "strategies" / "strategy_jobs.py").read_text(
+            encoding="utf-8")
+        assert "decision_ts=now" in src
+        assert "signal_log" not in _code_only(src), (
+            "the job must not read signal_log; the bound belongs in the capture")
+
+
+
 class TestRegistration:
     def _register(self, sched, enabled, fwd, conn, dry_run=True):
         return SJ.register_strategy_job(
@@ -864,10 +1033,10 @@ class TestBridgeIsPinnedToItsAuthorizedChange:
         surface.pop("capture_signal_context")
         assert surface != BRIDGE_OTHER_SURFACE
 
-    def test_dropping_the_direction_parameter_is_rejected(self):
+    def test_dropping_a_pinned_parameter_is_rejected(self):
         """The regression this whole pin exists to prevent."""
         edited = self._src().replace(
-            ",\n                           direction: Any = _REREAD_DIRECTION", "", 1)
+            ",\n                           decision_ts: datetime | None = None", "", 1)
         assert edited != self._src(), "the signature anchor moved"
         assert (_module_surface(edited)["capture_signal_context"]
                 != BRIDGE_CAPTURE_SIGNATURE)
