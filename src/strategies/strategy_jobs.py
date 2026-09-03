@@ -9,11 +9,17 @@ WHAT IT DOES
 ------------
 One pass, on an interval::
 
-    bridge.latest_direction()  ->  bridge.build_intent()
+    bridge.mirrorable_entry()  ->  claim_forward_entry()   [atomic]
+                               ->  bridge.build_intent()
                                ->  RiskManager.validate()
                                ->  [dry-run: STOP]  |  executor.submit()
                                                     -> [ACKED only]
                                                        capture_signal_context
+
+and, on the same pass, the governed exit::
+
+    bridge.forward_exit()      ->  [trade_exits row exists]
+                               ->  reduce-only exit  |  CLOSED_BY_RISK
 
 Every step delegates. No signal is recomputed, no price is invented, no size is
 chosen here: sizing is ``limits.MAX_CONTRACTS_PER_ORDER`` inside `build_intent`,
@@ -30,14 +36,37 @@ TWO INDEPENDENT SAFETY GATES
 
 Both default to the refusing value.
 
-IDEMPOTENCY
------------
-`bridge.client_order_id()` is deterministic in (signal, UTC day, side, seq), so
-the same day's intent always has the same id. The job looks that id up in the
-orders table before submitting: an id already present means this day's intent
-was already acted on, and the pass returns without a second submission. The
-interval can therefore be short without risking duplicates, and a restart
-mid-day re-derives the same id rather than a new one.
+WHAT THE TRIGGER IS (ADR-0003, P-MIRROR)
+----------------------------------------
+A forward ENTRY EVENT -- a new `trade_entries` row -- and nothing else. The
+live path mirrors the governed 7-day strategy; it does not originate entries.
+`bridge.latest_direction()` is retained as a diagnostic but is NOT the trigger:
+it reports whether a forward trade is *held*, which is nearly always true and
+is the exact complement of the collector's own entry condition.
+
+An entry is mirrorable only inside `bridge.MIRROR_WINDOW` (1 hour) after it
+becomes readable. Past that it is permanently NOT_MIRRORED, because a position
+opened mid-hold has a different entry price and a truncated horizon and is not
+comparable at the entry level.
+
+IDEMPOTENCY AND CONCURRENCY
+---------------------------
+Two mechanisms, both keyed on the forward entry rather than on wall-clock time:
+
+1. `storage.claim_forward_entry()` is an atomic INSERT against a PRIMARY KEY
+   inside BEGIN IMMEDIATE. Of two passes racing one entry exactly one proceeds,
+   before any network call. Check-then-act on `orders` cannot guarantee that.
+2. `bridge.client_order_id(signal, ENTRY_DATE, side, 1)` is deterministic in
+   the mirrored event, so a restart, a retry and UTC midnight all re-derive the
+   same id. The UTC day no longer appears anywhere in the entry path.
+
+RISK OVERLAY (ADR-LE-5)
+-----------------------
+The protective stop is unchanged and remains an independent live risk overlay.
+A stop exit is a RISK exit, not a strategy exit: it closes the live position,
+never the forward trade, and the mirror row keeps accruing the governed
+`forward_exit_*` outcome afterwards so both outcomes exist for one entry.
+No re-entry is ever made after a risk exit while the forward entry is open.
 
 WHAT IT DOES NOT TOUCH
 ----------------------
@@ -49,7 +78,7 @@ is established by the reconciliation pass, exactly as before.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -116,8 +145,9 @@ def evaluate_once(
     strategy_enabled: bool,
     dry_run: bool = True,
     now: datetime | None = None,
+    service_started_at: datetime | None = None,
 ) -> EvaluationResult:
-    """One signal -> intent -> risk -> (dry-run stop | submit) pass.
+    """One forward-entry -> intent -> risk -> (dry-run stop | submit) pass.
 
     Never raises: a strategy job that throws would trip the scheduler's failure
     counter and confuse it with an execution fault. Every failure is returned
@@ -135,34 +165,61 @@ def evaluate_once(
         return EvaluationResult(NOT_PERMITTED,
                                 f"reconciler: {getattr(reconciler, 'halt_reason', '') or 'not permitted'}")
 
+    # ADR-0003 (P-MIRROR). The trigger is a forward ENTRY EVENT, not an open
+    # forward trade. `latest_direction()` is retained as a diagnostic but is no
+    # longer wired here: it reports whether something is held, which is nearly
+    # always true and is the complement of the collector's own entry condition.
     try:
-        direction = bridge.latest_direction(forward_db_path)
+        entries = bridge.read_forward_entries(forward_db_path, bridge.SIGNAL_ID)
+        considered = storage.mirrored_entry_ids(conn)
     except Exception as exc:  # noqa: BLE001 -- never raise into the scheduler
-        log.error("[strategy] signal read failed: %s: %s", type(exc).__name__, exc)
-        return EvaluationResult(ERROR, f"signal read: {type(exc).__name__}: {exc}")
+        log.error("[strategy] forward read failed: %s: %s", type(exc).__name__, exc)
+        return EvaluationResult(ERROR, f"forward read: {type(exc).__name__}: {exc}")
 
-    if direction is None or direction == 0:
-        return EvaluationResult(NO_SIGNAL, f"latest direction is {direction!r}")
+    # Close out anything whose 1h mirror window has passed, so a forward trade
+    # with no live counterpart is visibly absent rather than silently missing.
+    _record_expired(conn, entries, considered, now, service_started_at)
 
-    day = now.strftime("%Y-%m-%d")
+    entry = bridge.mirrorable_entry(entries, now)
+    if entry is None:
+        return EvaluationResult(NO_SIGNAL, "no forward entry inside its mirror window")
+    if entry.entry_id in considered:
+        return EvaluationResult(DUPLICATE,
+                                f"forward entry {entry.entry_id} already mirrored")
+
+    direction = entry.direction
     side = "buy" if direction == 1 else "sell"
-    coid = bridge.client_order_id(bridge.SIGNAL_ID, day, side, 1)
+    # The id is deterministic in the forward ENTRY, not in the submission day,
+    # so it survives a restart, a retry and UTC midnight unchanged (ADR-LE-2).
+    coid = bridge.client_order_id(bridge.SIGNAL_ID, entry.entry_date, side, 1)
+    day = entry.entry_date
 
-    # Idempotency, before any network call: the id is deterministic, so an
-    # existing row means this day's intent was already acted on.
+    # Atomic claim. Two passes racing this entry cannot both reach the exchange:
+    # the loser fails the PRIMARY KEY insert and stops here, before any network
+    # call. A check-then-act read of `orders` could not guarantee that.
     try:
+        if not storage.claim_forward_entry(
+                conn, forward_entry_id=entry.entry_id, signal_id=entry.signal_id,
+                entry_date=entry.entry_date, direction=direction,
+                planned_exit_date=entry.planned_exit_date,
+                readable_ts=entry.readable_ts.isoformat(),
+                now_ts=now.isoformat()):
+            return EvaluationResult(DUPLICATE,
+                                    f"forward entry {entry.entry_id} already claimed")
         if storage.get_order(conn, coid) is not None:
             return EvaluationResult(DUPLICATE, f"{coid} already exists")
     except Exception as exc:  # noqa: BLE001
-        log.error("[strategy] duplicate check failed: %s: %s", type(exc).__name__, exc)
-        return EvaluationResult(ERROR, f"duplicate check: {type(exc).__name__}: {exc}")
+        log.error("[strategy] claim failed: %s: %s", type(exc).__name__, exc)
+        return EvaluationResult(ERROR, f"claim: {type(exc).__name__}: {exc}")
 
     try:
         quote = _quote(client)
     except Exception as exc:  # noqa: BLE001
         log.error("[strategy] quote unavailable: %s: %s", type(exc).__name__, exc)
+        _release(conn, entry.entry_id)
         return EvaluationResult(QUOTE_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
     if quote is None:
+        _release(conn, entry.entry_id)
         return EvaluationResult(QUOTE_UNAVAILABLE, "no usable BTCUSD bid/ask/mark")
     mark, bid, ask = quote
 
@@ -171,9 +228,11 @@ def evaluate_once(
             direction=direction, mark_price=mark, enabled=strategy_enabled,
             best_bid=bid, best_ask=ask, utc_day=day, seq=1)
     except bridge.StrategyDisabled as exc:
+        _release(conn, entry.entry_id)
         return EvaluationResult(DISABLED, str(exc))
     except Exception as exc:  # noqa: BLE001
         log.error("[strategy] build_intent failed: %s: %s", type(exc).__name__, exc)
+        _release(conn, entry.entry_id)
         return EvaluationResult(ERROR, f"build_intent: {type(exc).__name__}: {exc}")
 
     try:
@@ -181,6 +240,7 @@ def evaluate_once(
         decision = risk_manager.validate(intent, account, now=now)
     except Exception as exc:  # noqa: BLE001
         log.error("[strategy] risk evaluation failed: %s: %s", type(exc).__name__, exc)
+        _release(conn, entry.entry_id)
         return EvaluationResult(ERROR, f"risk: {type(exc).__name__}: {exc}",
                                 intent=intent)
 
@@ -188,6 +248,7 @@ def evaluate_once(
         log.info("[strategy] %s %s x%d @ %.1f REJECTED: %s",
                  intent.side, intent.symbol, intent.size, intent.limit_price,
                  decision.reason)
+        _release(conn, entry.entry_id)
         return EvaluationResult(REJECTED, decision.reason, intent, decision)
 
     if dry_run:
@@ -199,12 +260,14 @@ def evaluate_once(
             intent.side, intent.symbol, intent.size, intent.limit_price,
             intent.stop_price, intent.client_order_id,
             decision.risk_usd or 0.0, decision.fees_usd or 0.0)
+        _release(conn, entry.entry_id)
         return EvaluationResult(DRY_RUN, "approved; dry_run=True", intent, decision)
 
     try:
         outcome = executor.submit(intent, account, now=now)
     except Exception as exc:  # noqa: BLE001
         log.error("[strategy] submit failed: %s: %s", type(exc).__name__, exc)
+        _release(conn, entry.entry_id)
         return EvaluationResult(ERROR, f"submit: {type(exc).__name__}: {exc}",
                                 intent, decision)
 
@@ -215,10 +278,18 @@ def evaluate_once(
         # acts on it -- reconciliation owns an ambiguous order, exactly as before.
         log.error("[strategy] NOT ACKED %s: executor returned %s",
                   intent.client_order_id, state)
+        _release(conn, entry.entry_id)
         return EvaluationResult(NOT_ACKED, f"executor returned {state}",
                                 intent, decision, order_state=state)
 
     log.warning("[strategy] SUBMITTED %s", intent.client_order_id)
+    try:
+        storage.update_mirror(conn, entry.entry_id, now_ts=now.isoformat(),
+                              state="ENTERED",
+                              entry_client_order_id=intent.client_order_id)
+    except Exception as exc:  # noqa: BLE001 -- the order is already live
+        log.error("[strategy] could not mark mirror ENTERED for %s: %s: %s",
+                  entry.entry_id, type(exc).__name__, exc)
 
     # Pin the signal state that motivated this entry, at submit time. The
     # forward database moves on, so a reader months later can recover what the
@@ -254,6 +325,212 @@ def evaluate_once(
 
     return EvaluationResult(SUBMITTED, "submitted", intent, decision,
                             submitted=True, order_state=state)
+
+
+
+# --------------------------------------------------------------------- mirror
+
+#: Outcomes of the exit pass, kept distinct from the entry outcomes above.
+NO_EXIT = "no_exit"                   # nothing held, or the hold is not over
+EXIT_SUBMITTED = "exit_submitted"     # the governed horizon exit went out
+RISK_EXITED = "risk_exited"           # the overlay closed it first (ADR-LE-5)
+
+
+def _release(conn, forward_entry_id: int) -> None:
+    """Undo an unconsummated claim so the entry can be retried in-window."""
+    try:
+        storage.release_forward_entry(conn, forward_entry_id)
+    except Exception as exc:  # noqa: BLE001 -- never raise into the scheduler
+        log.warning("[strategy] could not release claim %s: %s: %s",
+                    forward_entry_id, type(exc).__name__, exc)
+
+
+def _record_expired(conn, entries, considered, now, service_started_at) -> None:
+    """Permanently mark entries whose 1h mirror window has closed.
+
+    `cold_start` when the entry was already readable before this process
+    started -- it was never mirrorable by this process. `missed` when it became
+    readable while this process was running and was not acted on. The first
+    classification written stands; the row is never rewritten, which is what
+    keeps the distinction stable across a restart.
+    """
+    started = service_started_at or now
+    for e in bridge.expired_entries(entries, now, considered):
+        reason = "cold_start" if e.readable_ts < started else "missed"
+        try:
+            storage.record_not_mirrored(
+                conn, forward_entry_id=e.entry_id, signal_id=e.signal_id,
+                entry_date=e.entry_date, direction=e.direction,
+                planned_exit_date=e.planned_exit_date,
+                readable_ts=e.readable_ts.isoformat(), reason=reason,
+                now_ts=now.isoformat())
+            log.info("[strategy] forward entry %s (%s) NOT_MIRRORED: %s",
+                     e.entry_id, e.entry_date, reason)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[strategy] could not record NOT_MIRRORED for %s: %s: %s",
+                        e.entry_id, type(exc).__name__, exc)
+
+
+def _entry_filled(conn, entry_client_order_id) -> bool:
+    """Did the mirrored entry order actually produce a fill?
+
+    Joined through `orders.delta_order_id` because `order_fills.client_order_id`
+    is NULL on every row the runtime has written.
+    """
+    if not entry_client_order_id:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM order_fills f JOIN orders o "
+            " ON o.delta_order_id = f.delta_order_id "
+            "WHERE o.client_order_id = ?", (entry_client_order_id,)).fetchone()
+        return bool(row and row[0])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _risk_exit_cause(conn, mirror) -> str:
+    """Why a mirrored position closed without a horizon exit from us.
+
+    `risk_stop` when a protective order filled after the entry; `external`
+    otherwise (a reconciler action, a manual close, or an exchange event).
+    Both are risk-overlay exits under ADR-LE-5; neither is a strategy exit.
+    """
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE strategy = 'protection' "
+            "AND status = 'filled' AND placed_ts >= ?",
+            (mirror.get("claimed_ts") or "",)).fetchone()
+        return "risk_stop" if row and row[0] else "external"
+    except Exception:  # noqa: BLE001
+        return "external"
+
+
+def evaluate_exit_once(*, forward_db_path: str, conn, client, risk_manager,
+                       executor, reconciler=None, strategy_enabled: bool,
+                       dry_run: bool = True,
+                       now: datetime | None = None) -> EvaluationResult:
+    """One governed-horizon exit pass for the mirrored position, if any.
+
+    ADR-0003: the exit trigger is the appearance of the forward `trade_exits`
+    row, which the collector writes in the same transaction that sets
+    `trade_entries.open = 0`. There is deliberately NO live horizon timer -- a
+    timer would drift from the governed convention during a collector outage
+    and would amount to inventing a second exit policy.
+
+    A position closed earlier by the risk overlay is recorded as
+    CLOSED_BY_RISK. Its forward exit is still recorded when the collector
+    produces it, with no order submitted, so the strategy-horizon outcome and
+    the live-overlay outcome both exist for the same entry (ADR-LE-5).
+    """
+    now = now or datetime.now(timezone.utc)
+    if not strategy_enabled:
+        return EvaluationResult(DISABLED, "DEMO_STRATEGY_ENABLED=0")
+
+    try:
+        outstanding = [m for m in storage.list_mirrors(conn)
+                       if m["state"] in ("ENTERED", "EXIT_SUBMITTED",
+                                         "CLOSED_BY_RISK")]
+    except Exception as exc:  # noqa: BLE001
+        log.error("[strategy] mirror read failed: %s: %s", type(exc).__name__, exc)
+        return EvaluationResult(ERROR, f"mirror read: {type(exc).__name__}: {exc}")
+    if not outstanding:
+        return EvaluationResult(NO_EXIT, "no mirrored position outstanding")
+
+    result = EvaluationResult(NO_EXIT, "nothing to do")
+    for m in outstanding:
+        fid = int(m["forward_entry_id"])
+        fx = bridge.forward_exit(forward_db_path, fid)
+
+        # Record the governed outcome whenever it appears, in EVERY state --
+        # a stopped-out trade still earns its strategy_horizon_outcome.
+        if fx is not None and m.get("forward_exit_date") is None:
+            try:
+                storage.update_mirror(
+                    conn, fid, now_ts=now.isoformat(),
+                    forward_exit_date=fx["exit_date"],
+                    forward_exit_price=fx["exit_close_price"])
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[strategy] could not record forward exit %s: %s",
+                            fid, exc)
+
+        if m["state"] == "CLOSED_BY_RISK":
+            continue                   # overlay closed it; never re-enter
+
+        try:
+            flat = fills_mod.position_size(conn) == 0
+        except Exception:  # noqa: BLE001
+            flat = False
+
+        # A position that never opened cannot have been closed. Between the ACK
+        # and the fill being reconciled the book is legitimately flat, and
+        # reading that as a risk exit would retire every mirror seconds after
+        # entry. Require evidence the entry actually filled first.
+        if not _entry_filled(conn, m.get("entry_client_order_id")):
+            continue
+
+        if m["state"] == "ENTERED" and flat:
+            cause = _risk_exit_cause(conn, m)
+            storage.update_mirror(conn, fid, now_ts=now.isoformat(),
+                                  state="CLOSED_BY_RISK", exit_cause=cause,
+                                  live_exit_ts=now.isoformat())
+            log.warning("[strategy] mirror %s closed by risk overlay (%s)",
+                        fid, cause)
+            result = EvaluationResult(RISK_EXITED, f"{fid}: {cause}")
+            continue
+
+        if fx is None:
+            continue                   # still inside the governed hold
+
+        if m["state"] == "EXIT_SUBMITTED":
+            if flat:
+                storage.update_mirror(conn, fid, now_ts=now.isoformat(),
+                                      state="CLOSED_AT_HORIZON",
+                                      exit_cause="horizon",
+                                      live_exit_ts=now.isoformat())
+                result = EvaluationResult(EXIT_SUBMITTED,
+                                          f"{fid}: closed at horizon")
+            continue
+
+        if reconciler is not None and not reconciler.trading_permitted:
+            result = EvaluationResult(NOT_PERMITTED, "reconciler: exit deferred")
+            continue
+        if dry_run:
+            result = EvaluationResult(DRY_RUN, f"{fid}: horizon exit withheld")
+            continue
+
+        quote = _quote(client)
+        if quote is None:
+            result = EvaluationResult(QUOTE_UNAVAILABLE, "no usable book for exit")
+            continue
+        mark, bid, ask = quote
+        try:
+            intent = bridge.build_intent(
+                direction=-int(m["direction"]), mark_price=mark,
+                enabled=strategy_enabled, best_bid=bid, best_ask=ask,
+                utc_day=str(m["entry_date"]), seq=2)
+            intent = replace(intent,
+                             client_order_id="x" + intent.client_order_id[:31],
+                             intent_kind="exit", stop_price=None)
+            account = _account(conn, client, mark)
+            outcome = executor.submit(intent, account, now=now)
+        except Exception as exc:  # noqa: BLE001
+            log.error("[strategy] horizon exit failed for %s: %s: %s",
+                      fid, type(exc).__name__, exc)
+            result = EvaluationResult(ERROR, f"exit: {type(exc).__name__}: {exc}")
+            continue
+        state = _submitted_state(outcome)
+        if state != ACCEPTED_STATE:
+            result = EvaluationResult(NOT_ACKED, f"exit returned {state}",
+                                      order_state=state)
+            continue
+        storage.update_mirror(conn, fid, now_ts=now.isoformat(),
+                              state="EXIT_SUBMITTED",
+                              exit_client_order_id=intent.client_order_id)
+        result = EvaluationResult(EXIT_SUBMITTED,
+                                  f"{fid}: horizon exit submitted",
+                                  intent=intent, order_state=state)
+    return result
 
 
 def _submitted_state(outcome: Any) -> str:
@@ -348,14 +625,27 @@ def register_strategy_job(
         log.info("[strategy] job %r already registered; not re-registering", job_id)
         return False
 
+    # The instant this process began mirroring. A forward entry readable before
+    # it was never mirrorable by this process, which is what separates
+    # `cold_start` from `missed`.
+    service_started_at = datetime.now(timezone.utc)
+
     def _job() -> None:
+        common = dict(forward_db_path=forward_db_path, conn=conn, client=client,
+                      risk_manager=risk_manager, executor=executor,
+                      reconciler=reconciler, strategy_enabled=strategy_enabled,
+                      dry_run=dry_run)
+        # Exit first: a horizon exit frees the single position slot that an
+        # entry in the same pass would otherwise be refused for.
         try:
-            result = evaluate_once(
-                forward_db_path=forward_db_path, conn=conn, client=client,
-                risk_manager=risk_manager, executor=executor,
-                reconciler=reconciler, strategy_enabled=strategy_enabled,
-                dry_run=dry_run)
+            ex = evaluate_exit_once(**common)
+            if ex.outcome not in (NO_EXIT, DISABLED):
+                log.info("[strategy] exit pass: %s (%s)", ex.outcome, ex.detail)
         except Exception as exc:  # noqa: BLE001 -- never raise into the scheduler
+            log.error("[strategy] exit pass raised %s: %s", type(exc).__name__, exc)
+        try:
+            result = evaluate_once(service_started_at=service_started_at, **common)
+        except Exception as exc:  # noqa: BLE001
             log.error("[strategy] pass raised %s: %s", type(exc).__name__, exc)
             return
         if result.outcome not in (NO_SIGNAL, DUPLICATE):

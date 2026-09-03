@@ -22,6 +22,7 @@ import math
 import pathlib
 import sqlite3
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -110,6 +111,155 @@ def latest_direction(forward_db_path: str, signal_id: str = SIGNAL_ID) -> int | 
         return int(row[0]) if row else None
     except Exception as exc:
         log.warning("[bridge] could not read direction: %s", exc)
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+#: ADR-0003 / ADR-LE-4 (P-MIRROR): how long after a forward entry becomes
+#: readable the live path may still mirror it. Decided by the strategy owner at
+#: one hour -- long enough to absorb the 900s scheduler interval and a restart,
+#: short enough that the live entry price still tracks the forward entry close.
+#: The window is NEVER extended by planned_exit_date or by the next collector
+#: run: after it expires the entry is permanently NOT_MIRRORED (missed), because
+#: a position opened mid-hold has a different entry price and a truncated
+#: horizon and is therefore not comparable at the entry level.
+MIRROR_WINDOW = timedelta(hours=1)
+
+
+@dataclass(frozen=True)
+class ForwardEntry:
+    """One `trade_entries` row plus the instant it became readable.
+
+    `readable_ts` is the `run_log.created_at` of the run that wrote it. The
+    collector writes the entry (5b), the run_log row (5c) and signal_log (5d)
+    in ONE transaction, so that stamp is the commit instant to within
+    milliseconds -- a truer readable time than the nominal 01:00 UTC schedule,
+    which drifts by the unit's RandomizedDelaySec (measured 01:00:06-01:00:42).
+    """
+
+    entry_id: int
+    signal_id: str
+    entry_date: str
+    direction: int
+    planned_exit_date: str
+    open: int
+    readable_ts: datetime
+
+
+def read_forward_entries(forward_db_path: str,
+                         signal_id: str = SIGNAL_ID) -> list[ForwardEntry]:
+    """Every forward entry for `signal_id`, oldest first. READ-ONLY.
+
+    Never raises: a strategy job that throws would trip the scheduler's failure
+    counter. An unreadable store yields an empty list, which produces no entry.
+    """
+    p = pathlib.Path(forward_db_path)
+    if not p.exists():
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT e.id, e.signal_id, e.entry_date, e.direction, "
+            "       e.planned_exit_date, e.open, r.created_at "
+            "FROM trade_entries e "
+            "LEFT JOIN run_log r "
+            "  ON r.signal_id = e.signal_id AND r.run_date = e.entry_date "
+            "WHERE e.signal_id = ? ORDER BY e.entry_date, e.id",
+            (signal_id,)).fetchall()
+        out: list[ForwardEntry] = []
+        for r in rows:
+            readable = _parse_utc(r["created_at"])
+            if readable is None:
+                # No usable commit stamp: fall back to the structural schedule,
+                # entry_date + 25h, the same delay alignment.timebase declares
+                # for signal_log. Never guess earlier than that.
+                base = _parse_utc(str(r["entry_date"]))
+                if base is None:
+                    continue
+                readable = base + timedelta(hours=25)
+            out.append(ForwardEntry(
+                entry_id=int(r["id"]), signal_id=str(r["signal_id"]),
+                entry_date=str(r["entry_date"]), direction=int(r["direction"]),
+                planned_exit_date=str(r["planned_exit_date"]),
+                open=int(r["open"]), readable_ts=readable))
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[bridge] could not read forward entries: %s", exc)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _parse_utc(value) -> datetime | None:
+    """Parse the collector's timestamp spellings ('...Z', offset, bare date)."""
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def mirrorable_entry(entries, now: datetime) -> ForwardEntry | None:
+    """The forward entry whose mirror window contains `now`, or None.
+
+    Pure, and deliberately unaware of what has already been mirrored: this
+    answers "is there an entry event live right now", and whether it was
+    already acted on is a separate question the caller answers against its own
+    store. Keeping them apart is what lets the caller distinguish "nothing to
+    mirror" from "already mirrored". The newest qualifying entry wins, so a
+    backlog never causes the live path to act on a stale one.
+    """
+    fresh = [e for e in entries
+             if e.readable_ts <= now < e.readable_ts + MIRROR_WINDOW]
+    if not fresh:
+        return None
+    return max(fresh, key=lambda e: (e.readable_ts, e.entry_id))
+
+
+def expired_entries(entries, now: datetime, considered_ids) -> list[ForwardEntry]:
+    """Unconsidered entries whose mirror window has closed. Never enterable."""
+    seen = set(considered_ids or ())
+    return [e for e in entries
+            if e.entry_id not in seen and now >= e.readable_ts + MIRROR_WINDOW]
+
+
+def forward_exit(forward_db_path: str, entry_id: int) -> dict | None:
+    """The governed exit for one forward entry, or None while it is still held.
+
+    `trade_exits` is written in the same transaction that sets
+    `trade_entries.open = 0` (runner_base 5a) and carries UNIQUE(entry_id), so
+    its appearance is the atomic, authoritative signal that the governed 7-day
+    hold has ended. ADR-0003 forbids a separate live horizon timer.
+    """
+    p = pathlib.Path(forward_db_path)
+    if not p.exists():
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT entry_id, exit_date, exit_close_price, cost_bps "
+            "FROM trade_exits WHERE entry_id = ?", (int(entry_id),)).fetchone()
+        return dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[bridge] could not read forward exit for %s: %s", entry_id, exc)
         return None
     finally:
         if conn is not None:

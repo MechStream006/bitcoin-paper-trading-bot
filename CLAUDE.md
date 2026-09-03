@@ -1512,6 +1512,108 @@ Full record: `docs/governance/fb11_h6_unevaluable_window_provenance.md`.
 
 ---
 
+## 22. Live Entry Policy (ADR-0003 / P-MIRROR) — Engineering Record
+
+Decisions live in `docs/adr/0003-live-entry-policy.md`. This section records
+history: what was measured, what was found, and what was built. Accepted and
+implemented 2026-09-03.
+
+### How the divergence was found
+
+A provenance audit of the decision-to-outcome chain, then three studies, each
+terminating on the same root fact:
+
+1. **Cost calibration.** Forward outcomes are insensitive to the cost
+   assumption across the whole empirical range: **0 sign flips from 0 to 100
+   bps** over 31 resolved holds, because the smallest |gross| is 129.5 bps
+   against a 15 bps assumption. Measured live round-trip fees are **8.3–11.8
+   bps**, *below* the assumption. The 15 bps figure is not conservative or
+   optimistic — it is **not comparable**, because execution ran minutes-long
+   stopped trades (median |gross| 19.3 bps) while the forward corpus holds 7
+   days (median |gross| 587 bps).
+2. **7-day counterfactual.** Re-pricing the 5 completed live trades under the
+   governed horizon: 4 mature, 1 censored (its exit date post-dated the lake;
+   never extrapolated). **Sign agreement 0/4** — live +1 to +44 bps versus
+   counterfactual −59 to −1039 bps net. It survives excluding the dominant
+   observation (0/3). Critically, **4 of 5 live exits were supervised manual
+   closes 2–9 minutes after entry**, so no production exit policy had ever been
+   observed; the only automated exit was the protective stop, on the censored
+   trade.
+3. **Entry-set divergence.** Under an entry-event rule declared before
+   measuring, **0 of 8** live entries corresponded to a forward entry event,
+   while **8 of 8** occurred mid-hold at ages of 3.56–6.82 days. Cadence ratio
+   **2.67 live entries per forward trade**. Both forward entries in the window
+   had no live counterpart. Not all 8 were from the current automated path: 2
+   used a superseded 35-char id and were rejected by Delta on `bad_schema`,
+   and 1 carried `seq=2`, which `evaluate_once` never emits.
+
+### What the specification audit found
+
+No file under `docs/` named `strategy_jobs`, `latest_direction`,
+`DEMO_STRATEGY_ENABLED` or `DEMO_STRATEGY_DRY_RUN`; no pre-registration
+contained an execution key; this file carried no entry-cadence statement. The
+live behaviour was **inherited from wiring, not chosen**. `bridge.py`'s module
+docstring and `latest_direction`'s own docstring asserted different sources.
+The trigger and the stop were therefore put to the strategy owner, who chose
+**P-MIRROR** and **retain the stop as an independent risk overlay**, with a
+**1-hour mirror window**.
+
+### The stop-versus-horizon conflict, quantified
+
+Over the 31 completed forward holds, on **daily closes only** (a lower bound;
+intraday is deeper): **15/31 = 48%** breach the 140 bps stop implied by
+`STOP_DISTANCE_PCT = 1.4` and `MAX_TRADE_RISK_USD = $1.00`; median worst
+adverse excursion **−131 bps**; at the `$2.00` hard ceiling (~256 bps) still
+39%. Surviving the deepest hold (1502 bps) would need ~$11.72/trade, and
+notional cannot shrink because `MAX_CONTRACTS_PER_ORDER = 1` is already the
+0.001 BTC floor. **A pure 7-day mirror is not implementable under the current
+risk parameters**, which is why ADR-LE-5 keeps the stop and separates the two
+outcomes rather than widening anything.
+
+### What was built
+
+- `mirrored_forward_entry` (in `EXECUTION_SCHEMA`) — one row per forward entry
+  the live path has considered, keyed on `trade_entries.id`. States `PENDING →
+  ENTERED → EXIT_SUBMITTED → CLOSED_AT_HORIZON`, or `CLOSED_BY_RISK`, or
+  `NOT_MIRRORED` with reason `cold_start`/`missed`. `exit_cause ∈ {horizon,
+  risk_stop, external}`. The row does not terminate at a risk exit: the
+  `forward_exit_*` columns are still filled when the collector closes the
+  trade, so both outcomes exist for one entry.
+- Trigger swapped to `bridge.mirrorable_entry()`; `latest_direction()` retained
+  unchanged as a diagnostic.
+- `client_order_id` keyed on the forward `entry_date`; the UTC day no longer
+  appears in the entry path.
+- `readable_ts` taken from `run_log.created_at` (the collector's own commit
+  stamp, written in the same transaction), falling back to `entry_date + 25h`.
+- Concurrency by atomic claim — `INSERT` against a `PRIMARY KEY` inside
+  `BEGIN IMMEDIATE`, before any network call.
+
+### Two defects the new tests caught before completion
+
+1. `fills_mod.position_size(conn) == 0` is legitimately true between the ACK
+   and the fill being reconciled, so every mirror was being retired as
+   `CLOSED_BY_RISK` seconds after entry. A risk exit now additionally requires
+   evidence the entry actually filled, joined through `orders.delta_order_id`
+   because `order_fills.client_order_id` is NULL on every row the runtime has
+   written.
+2. `list_mirrors`/`get_mirror` assumed the caller's connection carried
+   `row_factory = sqlite3.Row`; they now build dicts from `cursor.description`.
+
+### Not done, and deliberately so
+
+`mae_mfe_path` (pre-registered `collection_spec` step 6) has never been
+implemented and no such table exists — intra-hold excursion is not measurable
+from the collector. The frozen pre-registration, all risk parameters, the
+reconciler, protection, every stored label and every historical feature row are
+unchanged. **The 8 historical execution decisions are permanently
+non-comparable and must not be relabelled**; they remain valid
+execution-quality evidence.
+
+**Nothing is deployed.** Every result rests on fixtures; the path has never run
+against a real forward store or a real Delta ACK.
+
+---
+
 ## Code Generation Standards
 
 These rules apply to all code generated or modified in this repository unless explicitly overridden by the user.

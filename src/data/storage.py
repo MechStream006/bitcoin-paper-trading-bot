@@ -507,6 +507,39 @@ CREATE TABLE IF NOT EXISTS trade_signal_context (
     captured_ts     TEXT    NOT NULL
 );
 
+-- ADR-0003 (P-MIRROR). One row per forward entry the live path has considered.
+-- `forward_entry_id` is trade_entries.id in the forward store and is the
+-- idempotency anchor: claiming it is an atomic INSERT, so two scheduler passes
+-- racing the same entry cannot both reach the exchange.
+--
+-- The row does NOT terminate at a risk exit. `live_*` records what the live
+-- position did; `forward_exit_*` records the governed 7-day outcome and is
+-- written whenever the collector closes the trade, even if the live position
+-- was stopped out days earlier. ADR-LE-5 requires both to exist independently.
+CREATE TABLE IF NOT EXISTS mirrored_forward_entry (
+    forward_entry_id      INTEGER PRIMARY KEY,
+    signal_id             TEXT    NOT NULL,
+    entry_date            TEXT    NOT NULL,
+    direction             INTEGER NOT NULL CHECK (direction IN (-1, 1)),
+    planned_exit_date     TEXT    NOT NULL,
+    readable_ts           TEXT    NOT NULL,
+    state                 TEXT    NOT NULL CHECK (state IN (
+                              'PENDING', 'ENTERED', 'EXIT_SUBMITTED',
+                              'CLOSED_AT_HORIZON', 'CLOSED_BY_RISK',
+                              'NOT_MIRRORED')),
+    not_mirrored_reason   TEXT    CHECK (not_mirrored_reason IN
+                              ('cold_start', 'missed')),
+    entry_client_order_id TEXT    UNIQUE,
+    exit_client_order_id  TEXT,
+    exit_cause            TEXT    CHECK (exit_cause IN
+                              ('horizon', 'risk_stop', 'external')),
+    live_exit_ts          TEXT,
+    forward_exit_date     TEXT,
+    forward_exit_price    REAL,
+    claimed_ts            TEXT    NOT NULL,
+    updated_ts            TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS risk_day_events (
     utc_day  TEXT NOT NULL,
     kind     TEXT NOT NULL CHECK (kind IN ('order', 'pnl')),
@@ -614,6 +647,143 @@ def get_trade_signal_context(conn: sqlite3.Connection, client_order_id: str) -> 
         (client_order_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def claim_forward_entry(conn: sqlite3.Connection, *, forward_entry_id: int,
+                        signal_id: str, entry_date: str, direction: int,
+                        planned_exit_date: str, readable_ts: str,
+                        now_ts: str) -> bool:
+    """Atomically claim one forward entry for mirroring. True if we won it.
+
+    This is the concurrency guard required by ADR-0003: the claim is an INSERT
+    against a PRIMARY KEY inside `BEGIN IMMEDIATE`, so of two scheduler passes
+    racing the same forward entry exactly one proceeds and the other is told
+    the entry is already taken. Check-then-act on the orders table cannot give
+    that guarantee, because the check and the submission are not one operation.
+
+    A claim is not a submission. `release_forward_entry` undoes an unconsummated
+    claim so a transient failure can be retried inside the mirror window.
+    """
+    con_ctx = conn
+    try:
+        con_ctx.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        con_ctx.execute(
+            """
+            INSERT INTO mirrored_forward_entry
+                (forward_entry_id, signal_id, entry_date, direction,
+                 planned_exit_date, readable_ts, state, claimed_ts, updated_ts)
+            VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+            """,
+            (int(forward_entry_id), signal_id, entry_date, int(direction),
+             planned_exit_date, readable_ts, now_ts, now_ts),
+        )
+        con_ctx.commit()
+        return True
+    except sqlite3.IntegrityError:
+        con_ctx.rollback()
+        return False
+    except Exception:
+        con_ctx.rollback()
+        raise
+
+
+def release_forward_entry(conn: sqlite3.Connection, forward_entry_id: int) -> None:
+    """Drop an unconsummated PENDING claim so the entry can be retried.
+
+    Only PENDING is releasable. An ENTERED row is a real position and must
+    never be removed by a retry path.
+    """
+    conn.execute(
+        "DELETE FROM mirrored_forward_entry "
+        "WHERE forward_entry_id = ? AND state = 'PENDING'",
+        (int(forward_entry_id),))
+    conn.commit()
+
+
+def update_mirror(conn: sqlite3.Connection, forward_entry_id: int, *,
+                  now_ts: str, **fields) -> None:
+    """Set named columns on one mirror row. Unknown columns are refused."""
+    allowed = {"state", "not_mirrored_reason", "entry_client_order_id",
+               "exit_client_order_id", "exit_cause", "live_exit_ts",
+               "forward_exit_date", "forward_exit_price"}
+    bad = sorted(set(fields) - allowed)
+    if bad:
+        raise ValueError(f"unknown mirror column(s): {bad}")
+    cols = sorted(fields)
+    sets = ", ".join(f"{c} = ?" for c in cols) + ", updated_ts = ?"
+    conn.execute(
+        f"UPDATE mirrored_forward_entry SET {sets} WHERE forward_entry_id = ?",
+        [fields[c] for c in cols] + [now_ts, int(forward_entry_id)])
+    conn.commit()
+
+
+def record_not_mirrored(conn: sqlite3.Connection, *, forward_entry_id: int,
+                        signal_id: str, entry_date: str, direction: int,
+                        planned_exit_date: str, readable_ts: str,
+                        reason: str, now_ts: str) -> bool:
+    """Permanently mark a forward entry as never mirrored, with its reason.
+
+    Written so a forward trade with no live counterpart is visibly absent
+    rather than silently missing. Never overwrites an existing row: a first
+    classification stands, which is what makes `cold_start` and `missed`
+    stable across a restart.
+    """
+    if reason not in ("cold_start", "missed"):
+        raise ValueError(f"reason must be cold_start|missed, got {reason!r}")
+    try:
+        conn.execute(
+            """
+            INSERT INTO mirrored_forward_entry
+                (forward_entry_id, signal_id, entry_date, direction,
+                 planned_exit_date, readable_ts, state, not_mirrored_reason,
+                 claimed_ts, updated_ts)
+            VALUES (?, ?, ?, ?, ?, ?, 'NOT_MIRRORED', ?, ?, ?)
+            """,
+            (int(forward_entry_id), signal_id, entry_date, int(direction),
+             planned_exit_date, readable_ts, reason, now_ts, now_ts),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False
+
+
+def _rows(cur) -> list[dict]:
+    """Cursor rows as dicts, built from `cursor.description`.
+
+    Deliberately does not rely on the connection carrying `row_factory =
+    sqlite3.Row`: that is the caller's choice, and a mirror read must return
+    the same shape either way.
+    """
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def get_mirror(conn: sqlite3.Connection, forward_entry_id: int) -> dict | None:
+    rows = _rows(conn.execute(
+        "SELECT * FROM mirrored_forward_entry WHERE forward_entry_id = ?",
+        (int(forward_entry_id),)))
+    return rows[0] if rows else None
+
+
+def list_mirrors(conn: sqlite3.Connection, state: str | None = None) -> list[dict]:
+    sql = "SELECT * FROM mirrored_forward_entry"
+    params: tuple = ()
+    if state is not None:
+        sql += " WHERE state = ?"
+        params = (state,)
+    sql += " ORDER BY entry_date, forward_entry_id"
+    return _rows(conn.execute(sql, params))
+
+
+def mirrored_entry_ids(conn: sqlite3.Connection) -> set[int]:
+    """Every forward entry the live path has already considered, in any state."""
+    return {int(r[0]) for r in conn.execute(
+        "SELECT forward_entry_id FROM mirrored_forward_entry")}
 
 
 def init_execution_schema(conn: sqlite3.Connection) -> None:

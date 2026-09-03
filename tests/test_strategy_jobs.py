@@ -94,13 +94,13 @@ UNTOUCHED_MODULES = (
     "src/execution/protection.py",
 )
 
-#: bridge.py's authorized content identity. Re-pinned deliberately for the
-#: availability-bound capture: `capture_signal_context` now also takes an
-#: optional `decision_ts`, bounds the signal fields to days already available
-#: at that instant, and reads them inside one transaction so they cannot come
-#: from different vintages. The pin previously covered the `direction`
-#: parameter and the docstring correction that admitted the execution path
-#: calls this function.
+#: bridge.py's authorized content identity. Re-pinned deliberately for
+#: ADR-0003 (P-MIRROR): the bridge gains the forward-entry reader
+#: (`ForwardEntry`, `read_forward_entries`, `mirrorable_entry`,
+#: `expired_entries`, `forward_exit`) and the 1-hour `MIRROR_WINDOW` decided by
+#: the strategy owner. `latest_direction` is retained unchanged as a diagnostic
+#: but is no longer the live entry trigger. Earlier pins covered the
+#: availability-bounded capture and the pinned `direction` parameter.
 #:
 #: This freezes the WHOLE file, prose included. That is the point -- the module
 #: it protects sets stop distance, the order-id bound and the ledger query, and
@@ -109,7 +109,7 @@ UNTOUCHED_MODULES = (
 #: this deliberately. `BRIDGE_OTHER_SURFACE` below is the structural half, and
 #: says WHAT changed when the change is structural.
 BRIDGE_CONTENT_SHA256 = (
-    "323e3200ccfed26756647cfc57dbf8c69d48d880a8d033e97a08bbf6c820bc16")
+    "309ed52f444e5a61928a8e1ff1c3bbae46cc4e70592c42f8ebdc52d56abc4000")
 
 #: The authorized signature, spelled out so a drifting default or a dropped
 #: parameter names itself rather than only moving a hash.
@@ -129,6 +129,13 @@ BRIDGE_OTHER_SURFACE = {
     "_utc_today": "def()",
     "read_latest_signal": "def(forward_db_path: str, signal_id: str=SIGNAL_ID)",
     "latest_direction": "def(forward_db_path: str, signal_id: str=SIGNAL_ID)",
+    "MIRROR_WINDOW": "timedelta(hours=1)",
+    "ForwardEntry": "class",
+    "read_forward_entries": "def(forward_db_path: str, signal_id: str=SIGNAL_ID)",
+    "_parse_utc": "def(value)",
+    "mirrorable_entry": "def(entries, now: datetime)",
+    "expired_entries": "def(entries, now: datetime, considered_ids)",
+    "forward_exit": "def(forward_db_path: str, entry_id: int)",
     "_REREAD_DIRECTION": "object()",
     "_signal_availability_delay": "def()",
     "CLIENT_ORDER_ID_MAX_LEN": "32",
@@ -221,24 +228,41 @@ def conn(tmp_path):
     return c
 
 
-def _forward_db(tmp_path, direction, name="evidence_forward.db"):
-    """A forward corpus with (or without) an OPEN trade.
+#: The forward entry in the default fixture becomes readable 10 minutes before
+#: NOW, i.e. inside `bridge.MIRROR_WINDOW`. ADR-0003 makes the ENTRY EVENT the
+#: trigger, so a fixture must state when that event became readable; the
+#: collector's own `run_log.created_at` is that instant.
+READABLE = "2026-09-01T11:50:00Z"
 
-    bridge.latest_direction() reads trade_entries WHERE open = 1 -- the
-    collector's currently-open forward trade -- NOT signal_log. The strategy
-    therefore mirrors the research position, not the raw daily signal.
+
+def _forward_db(tmp_path, direction, name="evidence_forward.db",
+                readable_ts=READABLE, entry_date=None, exited=False):
+    """A forward corpus carrying one entry EVENT.
+
+    ADR-0003 (P-MIRROR): the live path mirrors the forward entry event, so what
+    matters is `run_log.created_at` (when the row became readable) rather than
+    whether some trade happens to be open. `exited=True` adds the governed
+    `trade_exits` row, which is the authoritative horizon-exit signal.
     """
+    day = entry_date or DAY
     p = tmp_path / name
     c = sqlite3.connect(p)
     c.executescript((ROOT / "research" / "forward_evidence" /
                      "schema_forward.sql").read_text(encoding="utf-8"))
-    c.execute("INSERT INTO run_log (signal_id, run_date, fn_hash, status) "
-              "VALUES (?,?,?, 'ok')", (bridge.SIGNAL_ID, DAY, "h"))
+    c.execute("INSERT INTO run_log (signal_id, run_date, fn_hash, status,"
+              " created_at) VALUES (?,?,?, 'ok', ?)",
+              (bridge.SIGNAL_ID, day, "h", readable_ts))
     if direction is not None:
         c.execute("INSERT INTO trade_entries (signal_id, entry_date, direction,"
                   " entry_close_price, planned_exit_date, open)"
-                  " VALUES (?,?,?,?,?,1)",
-                  (bridge.SIGNAL_ID, DAY, direction, 70000.0, "2026-09-08"))
+                  " VALUES (?,?,?,?,?,?)",
+                  (bridge.SIGNAL_ID, day, direction, 70000.0, "2026-09-08",
+                   0 if exited else 1))
+        if exited:
+            eid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            c.execute("INSERT INTO trade_exits (entry_id, exit_date,"
+                      " exit_close_price, cost_bps) VALUES (?,?,?,?)",
+                      (eid, "2026-09-08", 71000.0, 15.0))
     c.commit(); c.close()
     return str(p)
 
@@ -655,6 +679,7 @@ class TestCapturedDirectionIsTheSubmittedOne:
             c = conn
             c.execute("DELETE FROM trade_signal_context")
             c.execute("DELETE FROM orders")
+            c.execute("DELETE FROM mirrored_forward_entry")
             c.commit()
             fwd = _forward_db(tmp_path, direction, name=f"fwd{direction}.db")
             ex = FakeExecutor()
