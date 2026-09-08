@@ -21,9 +21,12 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import json
 import logging
+import os
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 from src.data import storage
 from src.execution import fills as fills_mod
@@ -74,7 +77,8 @@ class Reconciler:
 
     def __init__(self, conn, client, *, product_id: int,
                  ingest_fills: bool = True, risk_state=None,
-                 executor=None, enforce_protection: bool = True) -> None:
+                 executor=None, enforce_protection: bool = True,
+                 halt_state_path: str | Path | None = None) -> None:
         self._conn = conn
         self._client = client
         self._product_id = product_id
@@ -93,6 +97,14 @@ class Reconciler:
         self._running = False
         self._booted = False
         self._pass_halted = False
+        #: Where the halt latch outlives this process. Deliberately a file and
+        #: not a row on `conn`: that handle is shared with the executor by
+        #: design, an implicit transaction is open on it whenever the executor
+        #: is mid-write, and committing a halt through it would publish the
+        #: executor's half-written batch. The one piece of state that must
+        #: survive a crash cannot be stored where a crash is entangled with it.
+        self._halt_state_path = Path(halt_state_path) if halt_state_path else None
+        self._restore_halt()
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -115,20 +127,97 @@ class Reconciler:
         return self._halt_reason
 
     def _halt(self, reason: str) -> None:
-        """Latch a halt.
+        """Latch a halt, in memory and on disk.
 
         Two flags, deliberately: ``_halted`` is STICKY and survives every
-        subsequent pass, restart included -- that is what makes a halt a real
-        safety control rather than a transient warning. ``_pass_halted`` is
-        scoped to the current pass, so a later pass can be judged on its own
-        evidence without the latch making the verdict a foregone conclusion.
-        Without that separation a halted reconciler could never be shown clean
-        again, and the halt could only be cleared by restarting the process.
+        subsequent pass -- that is what makes a halt a real safety control
+        rather than a transient warning. ``_pass_halted`` is scoped to the
+        current pass, so a later pass can be judged on its own evidence without
+        the latch making the verdict a foregone conclusion. Without that
+        separation a halted reconciler could never be shown clean again.
+
+        Neither flag survives the PROCESS on its own -- both are reset by
+        __init__ -- which is why the latch is also written to disk here. With
+        `Restart=always` on the unit, an in-memory-only latch made every crash
+        an automatic halt bypass: the supervisor would restart into a fresh
+        instance reporting trading_permitted, having cleared a safety control
+        that no operator ever looked at.
         """
         self._halted = True
         self._pass_halted = True
         self._halt_reason = reason
         log.critical("[reconcile] HALT: %s", reason)
+        self._persist_halt()
+
+    def _restore_halt(self) -> None:
+        """Reinstate a halt latched by a previous process.
+
+        Called from __init__ so there is no window -- not one statement -- in
+        which a fresh instance could answer trading_permitted for a halt that
+        is still in force. Restoring here rather than in start() also means a
+        caller that constructs a Reconciler and asks gate_state() without ever
+        starting it still sees the halt.
+
+        An unreadable file fails CLOSED. It may be a halt we cannot parse, and
+        this module's whole doctrine is that what it cannot verify is treated
+        as divergence -- "an exchange we cannot read is an exchange we cannot
+        claim to agree with" applies equally to our own latch.
+        """
+        if self._halt_state_path is None or not self._halt_state_path.exists():
+            return
+        try:
+            payload = json.loads(self._halt_state_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("halt state is not an object")
+        except Exception as exc:  # noqa: BLE001
+            self._halted = True
+            self._halt_reason = (
+                f"halt state file unreadable ({type(exc).__name__}); failing closed")
+            log.critical("[reconcile] %s: %s", self._halt_reason,
+                         self._halt_state_path)
+            return
+        if payload.get("halted"):
+            self._halted = True
+            self._halt_reason = str(
+                payload.get("halt_reason")
+                or "halt restored from disk, no reason recorded")
+            log.critical("[reconcile] restored persisted HALT: %s",
+                         self._halt_reason)
+
+    def _persist_halt(self) -> None:
+        """Write the latch durably: temp file, fsync, atomic rename.
+
+        A plain write can be torn by a crash into a file that parses as
+        "not halted". The rename is what makes the swap atomic, and the fsync
+        before it is what makes the CONTENT durable rather than just the
+        directory entry -- without it the rename can land while the bytes are
+        still only in the page cache.
+
+        A failure here cannot be allowed to abort a halt: the in-memory latch
+        is already set and still blocks trading in THIS process. It is logged
+        at CRITICAL because what is lost is the cross-restart guarantee.
+        """
+        if self._halt_state_path is None:
+            return
+        payload = {
+            "halted": self._halted,
+            "halt_reason": self._halt_reason,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            path = self._halt_state_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            log.critical(
+                "[reconcile] COULD NOT PERSIST HALT STATE to %s: %s: %s -- the "
+                "halt holds in this process but will NOT survive a restart",
+                self._halt_state_path, type(exc).__name__, exc)
 
     @property
     def running(self) -> bool:
@@ -463,9 +552,13 @@ class Reconciler:
         """Start, and boot-reconcile before trading may be permitted.
 
         Restart-safe in the one direction that matters: a stop()/start() cycle
-        re-runs boot reconciliation but CANNOT clear an existing halt. A halt
-        survives restart by design -- if restarting cleared it, the supervisor's
-        own restart policy would become an automatic halt-bypass.
+        re-runs boot reconciliation but CANNOT clear an existing halt, and a
+        halt latched by a previous PROCESS is restored in __init__ before this
+        runs. If either could clear it, the supervisor's own restart policy
+        would become an automatic halt-bypass.
+
+        Cross-process survival requires `halt_state_path` to be wired; without
+        it the latch is in-memory only and dies with the process.
 
         Registers nothing. Scheduler jobs are owned by
         `reconciliation_jobs.register_reconciliation_jobs`, so restarting this
@@ -512,6 +605,12 @@ class Reconciler:
                         "(was: %s)", self._halt_reason)
             self._halted = False
             self._halt_reason = ""
+            # The persisted latch is cleared ONLY here, on the operator-initiated
+            # path. A clean boot reconciliation does not reach this line, so a
+            # halt is never retired merely because the divergence stopped being
+            # visible -- which is the whole point: the 2026-09-05 halt would
+            # otherwise clear itself the moment the exchange agreed again.
+            self._persist_halt()
             return True
         log.critical("[reconcile] halt NOT cleared; still divergent: %s",
                      result.halt_reason or "see findings")

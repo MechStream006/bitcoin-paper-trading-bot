@@ -529,7 +529,9 @@ class Runtime:
             # executor is attached to it, and only THEN does it boot -- so the
             # first pass can establish a missing stop instead of only halting.
             reconciler = Reconciler(exec_conn, client, product_id=84,
-                                    risk_state=risk_state)
+                                    risk_state=risk_state,
+                                    halt_state_path=self._db_path.parent
+                                    / ".reconciler-halt.json")
 
             risk_manager = RiskManager(
                 kill_switch_engaged=self._demo_kill_switch_engaged,

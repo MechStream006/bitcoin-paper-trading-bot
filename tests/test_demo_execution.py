@@ -741,6 +741,172 @@ class TestHaltPropagation:
         assert _risk().validate(_intent(), _account(), now=NOON).approved
 
 
+class TestHaltSurvivesProcessRestart:
+    """A halt must outlive the process that latched it.
+
+    `_halted` is reset by __init__, so before this the latch was in-memory
+    only. With `Restart=always` on the unit that made every crash an automatic
+    halt bypass -- the supervisor would restart into an instance reporting
+    trading_permitted, having retired a safety control nobody looked at.
+    Production sat halted for 3.4 days on a latch a single crash would have
+    erased.
+    """
+
+    def _halting_client(self):
+        # Exchange reports a position we have no local record of.
+        return _FakeReconcileClient(positions={"success": True,
+                                               "result": [{"size": 1}]})
+
+    def _agreeing_client(self):
+        return _FakeReconcileClient()
+
+    def _halted_instance(self, conn, path):
+        r = Reconciler(conn, self._halting_client(), product_id=84,
+                       halt_state_path=path)
+        r.start()
+        assert r.halted
+        return r
+
+    def test_halt_is_written_to_disk(self, conn, tmp_path):
+        path = tmp_path / ".reconciler-halt.json"
+        r = self._halted_instance(conn, path)
+        assert path.exists()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["halted"] is True
+        assert payload["halt_reason"] == r.halt_reason
+        assert payload["ts"]
+
+    def test_a_new_instance_restores_the_halt(self, conn, tmp_path):
+        path = tmp_path / ".reconciler-halt.json"
+        first = self._halted_instance(conn, path)
+
+        second = Reconciler(conn, self._agreeing_client(), product_id=84,
+                            halt_state_path=path)
+        assert second.halted
+        assert second.halt_reason == first.halt_reason
+
+    def test_restored_halt_blocks_trading_before_start(self, conn, tmp_path):
+        """Restoration happens in __init__, not in start().
+
+        A caller that constructs a Reconciler and consults the gate without
+        starting it must still be refused -- otherwise the guarantee depends
+        on call order.
+        """
+        path = tmp_path / ".reconciler-halt.json"
+        self._halted_instance(conn, path)
+
+        fresh = Reconciler(conn, self._agreeing_client(), product_id=84,
+                           halt_state_path=path)
+        assert not fresh.trading_permitted
+        blocked, reason = fresh.gate_state()
+        assert blocked and "halted" in reason
+
+        rm = _risk(halt_provider=fresh.gate_state)
+        assert not rm.validate(_intent(), _account(), now=NOON).approved
+
+    def test_restored_halt_blocks_trading_after_a_clean_start(self, conn, tmp_path):
+        path = tmp_path / ".reconciler-halt.json"
+        self._halted_instance(conn, path)
+
+        fresh = Reconciler(conn, self._agreeing_client(), product_id=84,
+                           halt_state_path=path)
+        fresh.start()
+        assert fresh.halted
+        assert not fresh.trading_permitted
+        rm = _risk(halt_provider=fresh.gate_state)
+        assert not rm.validate(_intent(), _account(), now=NOON).approved
+
+    def test_agreeing_exchange_does_not_clear_the_persisted_halt(self, conn, tmp_path):
+        """The 2026-09-05 case: the divergence stopped being visible.
+
+        The exchange was +2 on one 60s sample and is +1 now, matching local.
+        A reconciler that retired the halt on that basis would be clearing a
+        safety control because a transient stopped repeating.
+        """
+        path = tmp_path / ".reconciler-halt.json"
+        self._halted_instance(conn, path)
+
+        fresh = Reconciler(conn, self._agreeing_client(), product_id=84,
+                           halt_state_path=path)
+        result = fresh.reconcile()
+        assert result.clean
+        assert fresh.halted
+        assert json.loads(path.read_text(encoding="utf-8"))["halted"] is True
+
+    def test_repeated_restarts_never_erode_the_halt(self, conn, tmp_path):
+        path = tmp_path / ".reconciler-halt.json"
+        self._halted_instance(conn, path)
+        for _ in range(5):
+            r = Reconciler(conn, self._agreeing_client(), product_id=84,
+                           halt_state_path=path)
+            r.start()
+            assert r.halted
+
+    def test_explicit_operator_clear_is_what_retires_it(self, conn, tmp_path):
+        path = tmp_path / ".reconciler-halt.json"
+        self._halted_instance(conn, path)
+
+        fresh = Reconciler(conn, self._agreeing_client(), product_id=84,
+                           halt_state_path=path)
+        assert fresh.clear_halt_if_clean() is True
+        assert not fresh.halted
+        assert json.loads(path.read_text(encoding="utf-8"))["halted"] is False
+
+        after = Reconciler(conn, self._agreeing_client(), product_id=84,
+                           halt_state_path=path)
+        assert not after.halted
+        assert after.trading_permitted is False  # not started yet
+        after.start()
+        assert after.trading_permitted
+
+    def test_explicit_clear_refuses_while_still_divergent(self, conn, tmp_path):
+        path = tmp_path / ".reconciler-halt.json"
+        r = self._halted_instance(conn, path)
+        assert r.clear_halt_if_clean() is False
+        assert r.halted
+        assert json.loads(path.read_text(encoding="utf-8"))["halted"] is True
+
+    def test_unreadable_halt_state_fails_closed(self, conn, tmp_path):
+        """A latch we cannot parse may be a latch that is still in force."""
+        path = tmp_path / ".reconciler-halt.json"
+        path.write_text("{not json", encoding="utf-8")
+        r = Reconciler(conn, self._agreeing_client(), product_id=84,
+                       halt_state_path=path)
+        assert r.halted
+        assert "unreadable" in r.halt_reason
+        assert not r.trading_permitted
+
+    def test_absent_state_file_is_not_a_halt(self, conn, tmp_path):
+        r = Reconciler(conn, self._agreeing_client(), product_id=84,
+                       halt_state_path=tmp_path / "nope.json")
+        assert not r.halted
+        r.start()
+        assert r.trading_permitted
+
+    def test_persist_is_atomic_and_leaves_no_partial_file(self, conn, tmp_path):
+        path = tmp_path / ".reconciler-halt.json"
+        self._halted_instance(conn, path)
+        assert [p.name for p in tmp_path.iterdir() if p.suffix == ".tmp"] == []
+        json.loads(path.read_text(encoding="utf-8"))
+
+    def test_unwritable_path_does_not_abort_the_halt(self, conn, tmp_path):
+        """Losing the cross-restart guarantee must not lose the halt itself."""
+        blocker = tmp_path / "blocker"
+        blocker.write_text("i am a file, not a directory", encoding="utf-8")
+        r = Reconciler(conn, self._halting_client(), product_id=84,
+                       halt_state_path=blocker / "sub" / "halt.json")
+        r.start()
+        assert r.halted
+        assert not r.trading_permitted
+
+    def test_no_path_preserves_the_previous_in_memory_behaviour(self, conn):
+        r = Reconciler(conn, self._halting_client(), product_id=84)
+        r.start()
+        assert r.halted
+        assert not Reconciler(conn, self._agreeing_client(),
+                              product_id=84).halted
+
+
 class TestDailyOrderCap:
     """1 - MAX_ORDERS_PER_DAY, counted from persisted state."""
 
