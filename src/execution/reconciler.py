@@ -68,6 +68,41 @@ _EXCHANGE_STATE_MAP = {
 }
 
 
+def exchange_signed_position(positions, product_id: int) -> int:
+    """Signed exchange size for ONE product, from a `/v2/positions/margined` body.
+
+    That endpoint takes no product filter -- unlike `/v2/orders` and `/v2/fills`,
+    which this module does filter by product_id -- so its response carries every
+    product the account holds. Summing it whole compared a whole-account figure
+    against BTCUSD-only local exposure: any unrelated position would have read
+    as BTCUSD divergence and halted the stack, and two opposite foreign
+    positions would have cancelled out and hidden a real one.
+
+    A row is skipped ONLY when it positively identifies a DIFFERENT product.
+    A row whose product cannot be resolved is counted, because dropping
+    unattributable exposure is the same silent-omission bug pointing the other
+    way -- and unexplained exposure is what this comparison exists to catch.
+
+    Verified against the live payload (2026-09-08): every row carries a
+    top-level `product_id` int, with `product.id` repeating it.
+    """
+    total = 0
+    for p in positions:
+        pid = p.get("product_id")
+        if pid is None:
+            product = p.get("product")
+            if isinstance(product, dict):
+                pid = product.get("id")
+        if pid is not None:
+            try:
+                if int(pid) != int(product_id):
+                    continue
+            except (TypeError, ValueError):
+                pass
+        total += int(p.get("size") or 0)
+    return total
+
+
 class Reconciler:
     """Compares local orders/positions against the exchange.
 
@@ -401,7 +436,7 @@ class Reconciler:
         # to direction: an exchange long of 1 and a local short of 1 both
         # reduced to 1 and agreed. Direction is the whole point of a position,
         # so a disagreement about it must halt (Gate 5C.15).
-        exch_size = sum(int(p.get("size") or 0) for p in positions)
+        exch_size = exchange_signed_position(positions, self._product_id)
         local_size = self._local_signed_position()
         if exch_size != local_size:
             findings.append(("<position>", Divergence.POSITION_MISMATCH,
