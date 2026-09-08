@@ -62,13 +62,19 @@ def write_execution_status(reconciler, status_path) -> None:
     if status_path is None:
         return
     try:
+        # Read HealthStatus by its real field names. Defensive getattr was
+        # actively harmful here: `ok` resolved to the HealthStatus.ok
+        # CONSTRUCTOR -- a truthy function object -- so the payload reported
+        # "ok": true beside "fatal": true on a halted stack, and `component`
+        # and `detail` silently fell back to their defaults because the fields
+        # are named `name` and `details`.
         h = reconciler.health()
         payload = {
             "ts": datetime.now(timezone.utc).isoformat(),
-            "component": getattr(h, "component", "reconciler"),
-            "ok": bool(getattr(h, "ok", not getattr(h, "fatal", False))),
-            "fatal": bool(getattr(h, "fatal", False)),
-            "detail": str(getattr(h, "detail", "") or ""),
+            "component": h.name,
+            "healthy": bool(h.healthy),
+            "fatal": bool(h.fatal),
+            "detail": str(h.details or ""),
             "trading_permitted": bool(reconciler.trading_permitted),
             "halt_reason": str(getattr(reconciler, "halt_reason", "") or ""),
         }

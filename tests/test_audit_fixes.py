@@ -206,6 +206,33 @@ class TestF2ExecutionStatusCheck:
         assert payload["fatal"] is True
         assert payload["trading_permitted"] is False
         assert "position mismatch" in payload["halt_reason"]
+        # The payload must reflect the real HealthStatus fields. Reading it
+        # with defensive getattr under guessed names produced "healthy": true
+        # (it resolved the HealthStatus.ok CONSTRUCTOR, a truthy function) and
+        # an empty detail, on a stack that was in fact halted.
+        assert payload["healthy"] is False
+        assert payload["component"] == "reconciler"
+        assert payload["detail"] == "position mismatch: exchange=+2 local=+1"
+
+    def test_status_payload_is_honest_when_healthy(self):
+        from src.execution import reconciliation_jobs as rj
+
+        class R:
+            trading_permitted = True
+            halt_reason = ""
+
+            def health(self):
+                from src.runtime.health import HealthStatus
+                return HealthStatus.ok("reconciler", "last run ok, 0 finding(s)")
+
+        import tempfile
+        tmp = pathlib.Path(tempfile.mkdtemp()) / ".execution-status.json"
+        rj.write_execution_status(R(), tmp)
+        payload = json.loads(tmp.read_text(encoding="utf-8"))
+        assert payload["healthy"] is True
+        assert payload["fatal"] is False
+        assert payload["trading_permitted"] is True
+        assert payload["detail"] == "last run ok, 0 finding(s)"
 
     def test_status_write_never_raises(self):
         from src.execution import reconciliation_jobs as rj
