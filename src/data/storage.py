@@ -703,6 +703,31 @@ def release_forward_entry(conn: sqlite3.Connection, forward_entry_id: int) -> No
     conn.commit()
 
 
+def release_stale_claims(conn: sqlite3.Connection, older_than_ts: str) -> list[int]:
+    """Drop PENDING claims made before `older_than_ts`. Returns the ids freed.
+
+    A claim is written before the quote, risk and submit steps and released by
+    the caller on every failure path. A hard process death between those two
+    points -- SIGKILL, OOM, power loss -- leaves the row PENDING with no owner,
+    and nothing else can recover it: `mirrored_entry_ids()` reports it as
+    considered, so the entry is neither retried (it reads as DUPLICATE), nor
+    expired (the expiry filter skips considered ids), nor exited (the exit pass
+    ignores PENDING). Without this sweep one killed process silently removes a
+    forward entry from the strategy for good.
+
+    Only PENDING is swept. ENTERED and later states are real positions.
+    """
+    rows = [int(r[0]) for r in conn.execute(
+        "SELECT forward_entry_id FROM mirrored_forward_entry "
+        "WHERE state = 'PENDING' AND claimed_ts < ?", (older_than_ts,))]
+    if rows:
+        conn.execute(
+            "DELETE FROM mirrored_forward_entry "
+            "WHERE state = 'PENDING' AND claimed_ts < ?", (older_than_ts,))
+        conn.commit()
+    return rows
+
+
 def update_mirror(conn: sqlite3.Connection, forward_entry_id: int, *,
                   now_ts: str, **fields) -> None:
     """Set named columns on one mirror row. Unknown columns are refused."""

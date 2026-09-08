@@ -176,6 +176,17 @@ def evaluate_once(
         log.error("[strategy] forward read failed: %s: %s", type(exc).__name__, exc)
         return EvaluationResult(ERROR, f"forward read: {type(exc).__name__}: {exc}")
 
+    # A claim older than the mirror window has no owner: the process that made
+    # it died before releasing or promoting it. Sweep first, then re-read what
+    # counts as considered, so a swept entry can still be entered if its window
+    # is open and can be classified NOT_MIRRORED if it is not.
+    freed = storage.release_stale_claims(
+        conn, (now - bridge.MIRROR_WINDOW).isoformat())
+    if freed:
+        log.warning("[strategy] released %d stale mirror claim(s): %s",
+                    len(freed), freed)
+        considered = storage.mirrored_entry_ids(conn)
+
     # Close out anything whose 1h mirror window has passed, so a forward trade
     # with no live counterpart is visibly absent rather than silently missing.
     _record_expired(conn, entries, considered, now, service_started_at)
@@ -207,13 +218,18 @@ def evaluate_once(
             return EvaluationResult(DUPLICATE,
                                     f"forward entry {entry.entry_id} already claimed")
         if storage.get_order(conn, coid) is not None:
+            # The claim is already ours at this point. Returning without
+            # releasing it would strand the entry in PENDING, which no other
+            # path can recover from -- see release_stale_claims().
+            _release(conn, entry.entry_id)
             return EvaluationResult(DUPLICATE, f"{coid} already exists")
     except Exception as exc:  # noqa: BLE001
         log.error("[strategy] claim failed: %s: %s", type(exc).__name__, exc)
+        _release(conn, entry.entry_id)
         return EvaluationResult(ERROR, f"claim: {type(exc).__name__}: {exc}")
 
     try:
-        quote = _quote(client)
+        quote = _quote(client, now)
     except Exception as exc:  # noqa: BLE001
         log.error("[strategy] quote unavailable: %s: %s", type(exc).__name__, exc)
         _release(conn, entry.entry_id)
@@ -396,11 +412,29 @@ def _risk_exit_cause(conn, mirror) -> str:
     otherwise (a reconciler action, a manual close, or an exchange event).
     Both are risk-overlay exits under ADR-LE-5; neither is a strategy exit.
     """
+    coid = mirror.get("entry_client_order_id")
+    if not coid:
+        return "external"
     try:
+        # Joined, not inferred: the mirrored entry order -> its fill -> the
+        # position that fill opened (positions.entry_ts is written from the
+        # entry fill's processed_ts) -> the protective stop registered against
+        # that position id -> whether that stop's order actually filled.
+        #
+        # The previous form counted ANY filled protection order placed after
+        # the claim. That is only unambiguous because MAX_OPEN_POSITIONS is 1,
+        # which is a risk bound and not a join key: raise it, or run two
+        # strategies, and a stop belonging to another position would be
+        # attributed here. exit_cause is what keeps the ADR-LE-5 horizon and
+        # overlay outcomes apart, so it must be keyed, not coincidental.
         row = conn.execute(
-            "SELECT COUNT(*) FROM orders WHERE strategy = 'protection' "
-            "AND status = 'filled' AND placed_ts >= ?",
-            (mirror.get("claimed_ts") or "",)).fetchone()
+            "SELECT COUNT(*) FROM protective_stops ps "
+            "JOIN orders so ON so.client_order_id = ps.client_order_id "
+            "JOIN positions pos ON pos.id = ps.position_id "
+            "JOIN order_fills ef ON ef.processed_ts = pos.entry_ts "
+            "JOIN orders eo ON eo.delta_order_id = ef.delta_order_id "
+            "WHERE eo.client_order_id = ? AND so.status = 'filled'",
+            (coid,)).fetchone()
         return "risk_stop" if row and row[0] else "external"
     except Exception:  # noqa: BLE001
         return "external"
@@ -499,7 +533,7 @@ def evaluate_exit_once(*, forward_db_path: str, conn, client, risk_manager,
             result = EvaluationResult(DRY_RUN, f"{fid}: horizon exit withheld")
             continue
 
-        quote = _quote(client)
+        quote = _quote(client, now)
         if quote is None:
             result = EvaluationResult(QUOTE_UNAVAILABLE, "no usable book for exit")
             continue
@@ -558,10 +592,34 @@ def _intent_direction(intent: OrderIntent) -> int:
     return 1 if intent.side == "buy" else -1
 
 
-def _quote(client) -> tuple[float, float, float] | None:
+#: The mark-price cadence budget from CLAUDE.md sec.13 ("v2/ticker mark_price
+#: cadence ~3s, design budget 3-5s"). That budget describes how often a NEW
+#: value is published, not how old the newest one is when sampled.
+MARK_CADENCE_BUDGET_S = 5.0
+
+#: Reject a quote older than two cadence budgets. One is not enough: sampling a
+#: 3s-cadence value at an arbitrary instant costs up to a full cadence before
+#: the REST round-trip is added. Measured on production 2026-09-08 over 8
+#: consecutive GET /v2/tickers/BTCUSD calls, `timestamp` age was min 1.08s /
+#: median 3.81s / max 5.99s -- so a literal 5s bound would have rejected live,
+#: healthy data. Ten seconds still catches a genuine publication stall, which
+#: is what this guard is for.
+QUOTE_MAX_AGE_S = 2 * MARK_CADENCE_BUDGET_S
+
+
+def _quote(client, now: datetime | None = None
+           ) -> tuple[float, float, float] | None:
     """(mark, best_bid, best_ask) for BTCUSD, or None if the book is unusable.
 
     Delta returns every numeric as a string (CLAUDE.md sec.11), hence the casts.
+
+    Rejects a stale book. Freshness is taken from `timestamp` (microseconds
+    since epoch) and NEVER from the sibling `time` field: on production
+    2026-09-08 `time` was frozen at 2026-09-07T16:45:24Z across 8 consecutive
+    calls while `timestamp` advanced normally -- roughly 24h stale, and reading
+    it would reject every quote forever. A ticker carrying no usable timestamp
+    is refused rather than trusted, because an unverifiable age is exactly the
+    case this guard exists for.
     """
     t = (client.get_ticker("BTCUSD") or {}).get("result") or {}
     quotes = t.get("quotes") or {}
@@ -572,6 +630,19 @@ def _quote(client) -> tuple[float, float, float] | None:
     except (TypeError, ValueError):
         return None
     if not (mark > 0 and bid > 0 and ask > 0 and ask >= bid):
+        return None
+
+    now = now or datetime.now(timezone.utc)
+    try:
+        published = datetime.fromtimestamp(
+            float(t.get("timestamp")) / 1_000_000.0, tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        log.warning("[strategy] ticker carries no usable timestamp; refusing quote")
+        return None
+    age = (now - published).total_seconds()
+    if age > QUOTE_MAX_AGE_S:
+        log.warning("[strategy] stale BTCUSD quote refused: %.1fs old "
+                    "(max %.1fs)", age, QUOTE_MAX_AGE_S)
         return None
     return mark, bid, ask
 

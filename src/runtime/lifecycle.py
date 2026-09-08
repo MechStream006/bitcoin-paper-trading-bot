@@ -551,11 +551,22 @@ class Runtime:
             # The executor is absent by design: it is driven only from the
             # reconciliation pass, so it shares that connection deliberately --
             # asserted below rather than left to the reader.
+            # The strategy job is independently scheduled (900s) alongside the
+            # reconciliation job (60s), and since ADR-0003 it runs explicit
+            # transactions of its own -- claim_forward_entry() opens BEGIN
+            # IMMEDIATE and commits. A SQLite transaction belongs to the
+            # CONNECTION, so sharing the reconciler's handle would let a mirror
+            # commit finalise whatever the reconciler had pending, and a mirror
+            # rollback discard it. It gets its own handle and joins the
+            # assertion that exists to catch exactly this.
+            strategy_conn = self._open_owned_connection("strategy")
+            init_execution_schema(strategy_conn)
             assert_distinct_connections(
                 chain_refresher=refresher.connection,
                 snapshot_writer=snapshot_writer.connection,
                 execution=reconciler.connection,
                 risk_state=risk_state_conn,
+                strategy=strategy_conn,
             )
             if executor.connection is not reconciler.connection:
                 raise SharedConnectionError(
@@ -565,7 +576,9 @@ class Runtime:
                 )
 
             reconciler.start()
-            register_reconciliation_jobs(scheduler, reconciler)
+            register_reconciliation_jobs(
+                scheduler, reconciler,
+                status_path=self._db_path.parent / ".execution-status.json")
 
             # The strategy evaluation job. bridge.build_intent() had no caller
             # anywhere in src/ before this, so DEMO_STRATEGY_ENABLED gated a
@@ -574,7 +587,7 @@ class Runtime:
             register_strategy_job(
                 scheduler,
                 forward_db_path=self._forward_status_path,
-                conn=reconciler.connection,
+                conn=strategy_conn,
                 client=client,
                 risk_manager=risk_manager,
                 executor=executor,

@@ -650,6 +650,80 @@ def check_offhost_freshness(
     )
 
 
+
+EXECUTION_STATUS_FILENAME = ".execution-status.json"
+
+#: The reconciler runs every 60s and rewrites its status on every outcome,
+#: including the skipped-because-halted one. Ten minutes of silence means the
+#: writer itself stopped, which is a different failure from a halt.
+EXECUTION_STATUS_STALE_SEC = 600
+
+
+def check_execution_status(
+    data_dir: Path, check_name: str = "execution"
+) -> CheckResult:
+    """Reconciler halt / trading-permission state, from the runtime's sidecar.
+
+    A halt lives in the Reconciler instance and in journald. The Telegram
+    heartbeat sees it, but this process could not: the check set had no
+    execution entry at all, so the verdict read OK while the execution stack
+    had been halted since 2026-09-05 -- 3.4 days and 5,171 warnings, with
+    `"overall": "INFO"` reported throughout.
+
+    The payload is `reconciler.health()` verbatim plus `trading_permitted`, so
+    this surface and the heartbeat cannot drift apart in what "halted" means.
+
+    INFO when absent: reconciliation is only armed with DEMO_TRADING_ENABLED,
+    and a host that has not opted in must not generate alert noise.
+    """
+    status_file = data_dir / EXECUTION_STATUS_FILENAME
+    if not status_file.exists():
+        return CheckResult(
+            check_name, INFO, "execution reconciliation not armed or not yet run", {}
+        )
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            check_name, WARNING, f"execution status unreadable: {exc}", {}
+        )
+
+    halted = not bool(payload.get("trading_permitted", True))
+    fatal = bool(payload.get("fatal", False))
+    reason = str(payload.get("halt_reason") or payload.get("detail") or "")
+    detail = {
+        "trading_permitted": payload.get("trading_permitted"),
+        "fatal": fatal,
+        "halt_reason": reason,
+        "reported_at": payload.get("ts"),
+    }
+
+    age_sec = None
+    ts = payload.get("ts")
+    if ts:
+        try:
+            reported = datetime.fromisoformat(str(ts))
+            if reported.tzinfo is None:
+                reported = reported.replace(tzinfo=timezone.utc)
+            age_sec = (datetime.now(timezone.utc) - reported).total_seconds()
+            detail["age_sec"] = round(age_sec, 1)
+        except ValueError:
+            pass
+
+    if halted or fatal:
+        return CheckResult(
+            check_name, CRITICAL,
+            f"execution HALTED: {reason or 'no reason recorded'}", detail,
+        )
+    if age_sec is not None and age_sec > EXECUTION_STATUS_STALE_SEC:
+        return CheckResult(
+            check_name, WARNING,
+            f"execution status stale: {age_sec / 60:.1f} min since last "
+            f"reconciliation pass", detail,
+        )
+    return CheckResult(check_name, OK, "execution permitted, reconciler clean", detail)
+
+
 def check_integrity(db_path: Path) -> CheckResult:
     if not db_path.exists():
         return CheckResult(
@@ -1074,6 +1148,7 @@ def main() -> int:
             args.feature_store_backup_dir, label="feature_store",
             check_name="feature_store_backup", required=False,
         ),
+        check_execution_status(db_path.parent),
         check_offhost_freshness(backup_dir, check_name="offhost_backup"),
         check_offhost_freshness(
             args.ledger_backup_dir, check_name="ledger_offhost_backup"

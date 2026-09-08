@@ -15,7 +15,10 @@ gated decision.
 """
 from __future__ import annotations
 
+import json
 import logging
+import pathlib
+from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
@@ -42,12 +45,50 @@ DEFAULT_RECONCILE_INTERVAL_SEC = 60
 MAX_CONSECUTIVE_RECONCILE_FAILURES = 3
 
 
+
+def write_execution_status(reconciler, status_path) -> None:
+    """Persist reconciler.health() so an out-of-process checker can see a halt.
+
+    A halt lives only in the Reconciler instance and in journald. The Telegram
+    heartbeat sees it (the reconciler is bound into its degraded-component
+    scan), but `scripts/healthcheck.py` runs in a separate process and had no
+    way to observe it at all -- so its verdict read OK while the execution
+    stack had been halted for days. This sidecar is that missing surface, and
+    follows the `.offhost-status.json` precedent already used for backups.
+
+    Best-effort by construction: a status-write failure must never affect
+    reconciliation, so every exception is swallowed and logged.
+    """
+    if status_path is None:
+        return
+    try:
+        h = reconciler.health()
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "component": getattr(h, "component", "reconciler"),
+            "ok": bool(getattr(h, "ok", not getattr(h, "fatal", False))),
+            "fatal": bool(getattr(h, "fatal", False)),
+            "detail": str(getattr(h, "detail", "") or ""),
+            "trading_permitted": bool(reconciler.trading_permitted),
+            "halt_reason": str(getattr(reconciler, "halt_reason", "") or ""),
+        }
+        path = pathlib.Path(status_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:  # noqa: BLE001 -- never disturb reconciliation
+        log.warning("[reconcile] could not write execution status: %s: %s",
+                    type(exc).__name__, exc)
+
+
 def register_reconciliation_jobs(
     scheduler,
     reconciler,
     *,
     interval_seconds: int = DEFAULT_RECONCILE_INTERVAL_SEC,
     job_id: str = RECONCILE_JOB_ID,
+    status_path=None,
 ) -> bool:
     """Register the periodic reconciliation job. Idempotent.
 
@@ -60,7 +101,7 @@ def register_reconciliation_jobs(
 
     scheduler.register(
         "execution_reconcile",
-        _make_periodic_reconcile(reconciler),
+        _make_periodic_reconcile(reconciler, status_path=status_path),
         trigger="interval",
         job_id=job_id,
         seconds=interval_seconds,
@@ -70,7 +111,8 @@ def register_reconciliation_jobs(
 
 
 def _make_periodic_reconcile(reconciler, *,
-                             failure_threshold: int = MAX_CONSECUTIVE_RECONCILE_FAILURES):
+                             failure_threshold: int = MAX_CONSECUTIVE_RECONCILE_FAILURES,
+                             status_path=None):
     """Wrap `reconcile()` for scheduled execution.
 
     Three deliberate properties:
@@ -103,6 +145,7 @@ def _make_periodic_reconcile(reconciler, *,
         if reconciler.halted:
             log.warning("[reconcile] periodic pass skipped: halted (%s)",
                         reconciler.halt_reason)
+            write_execution_status(reconciler, status_path)
             return
         try:
             result = reconciler.reconcile()
@@ -115,10 +158,12 @@ def _make_periodic_reconcile(reconciler, *,
                 reconciler.halt(
                     f"reconciliation failed {consecutive_failures} consecutive "
                     f"times; last: {type(exc).__name__}: {exc}")
+            write_execution_status(reconciler, status_path)
             return
         consecutive_failures = 0
         if not result.clean:
             log.critical("[reconcile] periodic pass NOT clean: %s",
                          result.halt_reason or "see findings")
+        write_execution_status(reconciler, status_path)
 
     return _job

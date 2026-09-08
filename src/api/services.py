@@ -134,6 +134,7 @@ def runtime_health(settings) -> dict:
             settings.dataset_builder_backup_dir, label="dataset_builder",
             check_name="dataset_builder_backup", required=False,
         ),
+        hc.check_execution_status(db_path.parent),
         hc.check_offhost_freshness(settings.backup_dir, check_name="offhost_backup"),
         hc.check_offhost_freshness(
             settings.ledger_backup_dir, check_name="ledger_offhost_backup"

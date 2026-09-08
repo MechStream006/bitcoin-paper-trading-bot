@@ -39,6 +39,7 @@ EXIT_DATE = "2026-09-07"
 class FakeClient:
     def __init__(self, mark=70000.0, bid=69990.0, ask=70010.0, balance=200.0):
         self._t = {"result": {"mark_price": str(mark),
+                              "timestamp": NOW.timestamp() * 1_000_000,
                               "quotes": {"best_bid": str(bid), "best_ask": str(ask)}}}
         self._w = {"result": [{"asset_symbol": "USD", "balance": str(balance),
                                "available_balance": str(balance)}]}
@@ -398,8 +399,23 @@ class TestRiskOverlayExit:
         _fill_entry(conn)
         _fill_close(conn)
         if protection_filled:
+            # F-6: attribution is now joined through protective_stops.position_id
+            # rather than "any filled protection order after the claim", so the
+            # fixture must build the real chain: entry order -> its fill ->
+            # the position that fill opened -> the stop registered against it.
             _insert_order(conn, "stop-p1-q1", "sell", status="filled",
                           strategy="protection")
+            conn.execute(
+                "INSERT INTO positions (id, instrument_id, side, quantity,"
+                " entry_price, entry_ts, status, strategy)"
+                " VALUES (1,84,'buy',1.0,70000.0,?,'open',?)",
+                (NOW.isoformat(), bridge.SIGNAL_ID))
+            storage.write_protective_stop(
+                conn, client_order_id="stop-p1-q1", delta_order_id="D9",
+                position_id=1, side="sell", size=1, entry_price=70000.0,
+                trigger_price=69000.0, limit_price=68900.0, reduce_only=True,
+                placed_ts=NOW.isoformat())
+            conn.commit()
         return fwd
 
     def test_a_stopped_position_is_a_risk_exit_not_a_strategy_exit(self, tmp_path, conn):

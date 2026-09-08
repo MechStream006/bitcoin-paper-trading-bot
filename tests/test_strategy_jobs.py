@@ -157,7 +157,11 @@ class FakeClient:
     """Only the two read endpoints the job uses. place_order is a tripwire."""
 
     def __init__(self, mark=70000.0, bid=69990.0, ask=70010.0, balance=200.0):
+        # `timestamp` (microseconds) is what _quote() reads for freshness. The
+        # sibling `time` field is deliberately absent: production publishes one
+        # that is ~24h stale, and the code must not depend on it.
         self._t = {"result": {"mark_price": str(mark),
+                              "timestamp": NOW.timestamp() * 1_000_000,
                               "quotes": {"best_bid": str(bid), "best_ask": str(ask)}}}
         self._w = {"result": [{"asset_symbol": "USD", "balance": str(balance),
                                "available_balance": str(balance)}]}
@@ -962,7 +966,7 @@ class TestExistingBehaviourUntouched:
         assert surface["register_reconciliation_jobs"] == (
             "def(scheduler, reconciler, *, "
             "interval_seconds: int=DEFAULT_RECONCILE_INTERVAL_SEC, "
-            "job_id: str=RECONCILE_JOB_ID)")
+            "job_id: str=RECONCILE_JOB_ID, status_path=None)")
         code = _code_only(src)
         assert "'execution_reconcile'" in code
         assert "trigger='interval'" in code
