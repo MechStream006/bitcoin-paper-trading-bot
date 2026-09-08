@@ -171,6 +171,56 @@ def _within_retention(bdate: datetime, now: datetime) -> bool:
             or (bdate.day == 1 and age_days <= KEEP_MONTHLY_DAYS))
 
 
+def _discard_shipped_ciphertext(ciphertext: Path, age_manifest: Path) -> bool:
+    """Drop the local `.age` once it is safely off-host. False if it could not be.
+
+    The ciphertext is an intermediate: it exists to be shipped. Keeping it for
+    the whole retention window stored every backup twice on a volume with room
+    for one -- 36 GB of a 58 GB disk, half of it a byte-for-byte duplicate of
+    something already in S3 under versioning and a 90-day Object Lock.
+
+    Removed only when the transfer command reported success AND the local file
+    still matches the `ciphertext_sha256` recorded in its manifest. An exit
+    code says the command ran, not that it shipped this artifact intact, and a
+    backup is the wrong thing to discard on that alone.
+
+    Two things are deliberately KEPT:
+      - the plaintext backup, the documented on-host fast restore path, whose
+        sole owner remains GFS retention;
+      - the `.age-manifest.json`, a few hundred bytes carrying the ciphertext
+        and plaintext checksums needed to verify and decrypt the S3 copy.
+        Discarding it would damage the restore path this change exists to
+        protect.
+    """
+    try:
+        import offhost_backup
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import offhost_backup
+
+    try:
+        offhost_backup.verify_ciphertext(ciphertext, age_manifest)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] not discarding {ciphertext.name}: {exc}", file=sys.stderr)
+        return False
+
+    try:
+        size = ciphertext.stat().st_size
+        ciphertext.unlink()
+    except Exception as exc:  # noqa: BLE001
+        # Never silent: failing to reclaim is how the disk filled in the first
+        # place, and an unnoticed failure here reproduces it exactly.
+        print(f"[error] could not remove shipped ciphertext {ciphertext}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        print("[error] backup and off-host transfer both SUCCEEDED; only the "
+              "local cleanup failed", file=sys.stderr)
+        return False
+
+    print(f"[backup] discarded shipped ciphertext {ciphertext.name} "
+          f"({size // 1024} KB reclaimed; manifest and plaintext kept)")
+    return True
+
+
 def _apply_retention(backup_dir: Path, now: datetime, dry_run: bool,
                      db_label: str = "btc_trading") -> None:
     """Delete backup files outside the retention window.
@@ -431,10 +481,12 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
     # let an unencrypted run (e.g. the real --all unit) ship plaintext,
     # exactly what BK3 exists to prevent.
     offhost_cmd = _load_env_var("BACKUP_OFFHOST_CMD")
+    shipped = False
     if offhost_cmd and encrypt:
         cmd = offhost_cmd.format(file=xfer_file, manifest=xfer_manifest)
         print(f"[backup] off-host: {cmd}")
         result = subprocess.run(cmd, shell=True, timeout=300)
+        shipped = result.returncode == 0
         if result.returncode != 0:
             print(
                 f"[warning] off-host command exited {result.returncode} — local backup is intact",
@@ -466,9 +518,13 @@ def run_backup(db_path: Path, backup_dir: Path, dry_run: bool,
             artifact=None,
         )
 
+    reclaimed = True
+    if encrypt and shipped:
+        reclaimed = _discard_shipped_ciphertext(xfer_file, xfer_manifest)
+
     _apply_retention(backup_dir, now, dry_run=False, db_label=db_label)
     print("[backup] done")
-    return 0
+    return 0 if reclaimed else 1
 
 
 def main() -> int:

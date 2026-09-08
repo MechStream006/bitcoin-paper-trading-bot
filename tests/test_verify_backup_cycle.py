@@ -190,6 +190,33 @@ class TestCompanions:
         out = v.check_companions(n, {n})
         assert [f.status for f in out] == [v.MISSING] * 3
 
+    def test_shipped_ciphertext_is_expected_to_be_absent(self):
+        """Once shipped, the .age is reclaimed -- absence is the good outcome."""
+        n = "btc_trading_20260824_024340.db"
+        present = {n, n[:-3] + ".manifest.json", n + ".age-manifest.json"}
+        out = v.check_companions(n, present, shipped=True)
+        assert all(f.status == v.OBSERVED for f in out)
+
+    def test_a_shipped_ciphertext_still_present_is_flagged(self):
+        """It means the reclaim did not happen, which is what filled the disk."""
+        n = "btc_trading_20260824_024340.db"
+        present = {n, n[:-3] + ".manifest.json", n + ".age",
+                   n + ".age-manifest.json"}
+        out = v.check_companions(n, present, shipped=True)
+        assert [f.status for f in out if "reclaimed" in f.check] == [v.AMBIGUOUS]
+
+    def test_an_unshipped_ciphertext_is_still_required(self):
+        n = "btc_trading_20260824_024340.db"
+        present = {n, n[:-3] + ".manifest.json", n + ".age-manifest.json"}
+        out = v.check_companions(n, present, shipped=False)
+        assert [f.status for f in out if "ciphertext" in f.check] == [v.MISSING]
+
+    def test_recorded_ciphertext_digest_is_enough_once_reclaimed(self):
+        out = v.check_checksums({"sha256": "aa"},
+                                {"ciphertext_sha256": "bb", "plaintext_sha256": "aa"},
+                                "aa", None)
+        assert [f.status for f in out] == [v.OBSERVED] * 3
+
 
 # ---------------------------------------------------------------------------
 # Exclusions, checksums, off-host, retention

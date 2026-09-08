@@ -195,16 +195,33 @@ def check_provenance(name: str, trading_journal: str) -> Finding:
                    f"{name} is not mentioned by {TRADING_UNIT}; provenance unclear")
 
 
-def check_companions(name: str, present: set[str]) -> list[Finding]:
-    """Plaintext manifest, ciphertext and age-manifest must all exist."""
-    expected = {
-        "plaintext manifest": name[:-3] + ".manifest.json",
-        "ciphertext (.age)": name + ".age",
-        "age-manifest": name + ".age-manifest.json",
-    }
-    return [Finding(OBSERVED, f"{label} exists", fn) if fn in present
-            else Finding(MISSING, f"{label} exists", f"{fn} absent")
-            for label, fn in expected.items()]
+def check_companions(name: str, present: set[str],
+                     shipped: bool = False) -> list[Finding]:
+    """Plaintext manifest and age-manifest must exist; the ciphertext depends.
+
+    Once the ciphertext has been shipped off-host it is DELETED locally, so
+    for a shipped artifact its absence is the expected outcome and its
+    presence is what deserves attention -- it means the reclaim did not
+    happen. The age-manifest is never reclaimed: it carries the checksums the
+    S3 copy is verified against.
+    """
+    out = [
+        Finding(OBSERVED, f"{label} exists", fn) if fn in present
+        else Finding(MISSING, f"{label} exists", f"{fn} absent")
+        for label, fn in (("plaintext manifest", name[:-3] + ".manifest.json"),
+                          ("age-manifest", name + ".age-manifest.json"))
+    ]
+    ct = name + ".age"
+    if shipped:
+        out.append(Finding(OBSERVED, "ciphertext (.age) reclaimed after shipping",
+                           f"{ct} absent as expected") if ct not in present
+                   else Finding(AMBIGUOUS, "ciphertext (.age) reclaimed after shipping",
+                                f"{ct} still present after a successful ship"))
+    else:
+        out.append(Finding(OBSERVED, "ciphertext (.age) exists", ct)
+                   if ct in present
+                   else Finding(MISSING, "ciphertext (.age) exists", f"{ct} absent"))
+    return out
 
 
 def check_checksums(manifest: dict, age_manifest: dict,
@@ -223,6 +240,14 @@ def check_checksums(manifest: dict, age_manifest: dict,
     if want_c and ciphertext_sha and want_c == ciphertext_sha:
         out.append(Finding(OBSERVED, "ciphertext SHA-256 matches its age-manifest",
                            ciphertext_sha))
+    elif want_c and ciphertext_sha is None:
+        # Reclaimed after shipping, so there is no local file to recompute
+        # from. The recorded digest is what the S3 copy is verified against on
+        # restore, and it was checked against the file immediately before the
+        # reclaim -- so this is a complete record, not a gap.
+        out.append(Finding(OBSERVED,
+                           "ciphertext SHA-256 recorded for the shipped copy",
+                           want_c))
     else:
         out.append(Finding(AMBIGUOUS, "ciphertext SHA-256 matches its age-manifest",
                            f"manifest={want_c} recomputed={ciphertext_sha}"))
@@ -481,9 +506,14 @@ def main(argv: list[str] | None = None) -> int:                 # pragma: no cov
         art, finding = select_plaintext(names, cycle)
         findings.append(finding)
 
+        sidecar = read_json(args.backup_dir / ".offhost-status.json")
+        shipped = bool(art and sidecar.get("status") == "ok"
+                       and sidecar.get("exit_code") == 0
+                       and sidecar.get("artifact") == art + ".age")
+
         if art:
             findings.append(check_provenance(art, trade_j))
-            findings += check_companions(art, set(names))
+            findings += check_companions(art, set(names), shipped)
             mf = read_json(args.backup_dir / (art[:-3] + ".manifest.json"))
             am = read_json(args.backup_dir / (art + ".age-manifest.json"))
             findings += check_checksums(
@@ -494,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:                 # pragma: no cov
                                     f"backup_ts={mf.get('backup_ts')} "
                                     f"option_quotes="
                                     f"{(mf.get('row_counts') or {}).get('option_quotes')}"))
-        findings += check_offhost(read_json(args.backup_dir / ".offhost-status.json"),
+        findings += check_offhost(sidecar,
                                   (art + ".age") if art else None, trade_j)
         findings += check_retention(trade_j)
 

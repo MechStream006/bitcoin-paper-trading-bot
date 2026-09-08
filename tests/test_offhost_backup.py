@@ -505,3 +505,143 @@ class TestOffhostStatusSidecar:
         )
         backup.run_backup(tmp_path / "src.db", bdir, dry_run=True, db_label="ledger")
         assert not (bdir / backup.OFFHOST_STATUS_FILENAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# Reclaiming the shipped ciphertext (local disk-growth fix)
+# ---------------------------------------------------------------------------
+
+class TestShippedCiphertextIsReclaimed:
+    """The `.age` is an intermediate: it exists to be shipped.
+
+    Retaining it for the whole retention window stored every backup twice on a
+    volume with room for one -- 36 GB of a 58 GB disk, half of it a duplicate
+    of something already in S3 under a 90-day Object Lock, projected to ENOSPC
+    within days. It is dropped only once it is provably safe off-host.
+    """
+
+    def _artifacts(self, tmp_path, *, good_checksum=True):
+        """A ciphertext plus a manifest, without needing the age binary."""
+        ct = tmp_path / "btc_trading_20260908_024329.db.age"
+        ct.write_bytes(b"pretend-ciphertext" * 100)
+        mf = tmp_path / "btc_trading_20260908_024329.db.age-manifest.json"
+        digest = ob.sha256_file(ct) if good_checksum else "0" * 64
+        mf.write_text(json.dumps({
+            "ciphertext_sha256": digest,
+            "plaintext_sha256": "a" * 64,
+        }), encoding="utf-8")
+        return ct, mf
+
+    def test_verified_ciphertext_is_removed_and_manifest_kept(self, tmp_path):
+        ct, mf = self._artifacts(tmp_path)
+        assert backup._discard_shipped_ciphertext(ct, mf) is True
+        assert not ct.exists()
+        assert mf.exists(), "the manifest carries the checksums S3 is verified against"
+
+    def test_checksum_mismatch_keeps_the_ciphertext(self, tmp_path, capsys):
+        """An exit code says the command ran, not that it shipped this file."""
+        ct, mf = self._artifacts(tmp_path, good_checksum=False)
+        assert backup._discard_shipped_ciphertext(ct, mf) is False
+        assert ct.exists()
+        assert "not discarding" in capsys.readouterr().err
+
+    def test_missing_manifest_keeps_the_ciphertext(self, tmp_path):
+        ct, mf = self._artifacts(tmp_path)
+        mf.unlink()
+        assert backup._discard_shipped_ciphertext(ct, mf) is False
+        assert ct.exists()
+
+    def test_deletion_failure_is_loud_and_not_swallowed(self, tmp_path, capsys, monkeypatch):
+        """Failing to reclaim is how the disk filled; silence would repeat it."""
+        ct, mf = self._artifacts(tmp_path)
+
+        def boom(self):
+            raise PermissionError("read-only file system")
+
+        monkeypatch.setattr(Path, "unlink", boom)
+        assert backup._discard_shipped_ciphertext(ct, mf) is False
+        err = capsys.readouterr().err
+        assert "could not remove shipped ciphertext" in err
+        assert "SUCCEEDED" in err, "must say the backup itself is intact"
+
+    # -- end to end through run_backup, without needing the age binary -------
+
+    def _fake_encrypt(self, monkeypatch):
+        """Stand in for age, producing a real ciphertext + matching manifest."""
+        def encrypt_backup(backup_file, recipient, age_bin=None, out_dir=None):
+            out = out_dir or backup_file.parent
+            ct = out / (backup_file.name + ".age")
+            ct.write_bytes(backup_file.read_bytes())
+            mf = out / (backup_file.name + ".age-manifest.json")
+            mf.write_text(json.dumps({
+                "ciphertext_sha256": ob.sha256_file(ct),
+                "plaintext_sha256": ob.sha256_file(backup_file),
+            }), encoding="utf-8")
+            return ct, mf
+        monkeypatch.setattr(ob, "encrypt_backup", encrypt_backup)
+
+    def _run(self, tmp_path, monkeypatch, offhost_cmd):
+        self._fake_encrypt(monkeypatch)
+        _make_db(tmp_path / "src.db")
+        bdir = tmp_path / "b"
+        env = {"BACKUP_AGE_RECIPIENT": "age1" + "x" * 58,
+               "BACKUP_OFFHOST_CMD": offhost_cmd}
+        monkeypatch.setattr(backup, "_load_env_var", lambda k: env.get(k, ""))
+        rc = backup.run_backup(tmp_path / "src.db", bdir, dry_run=False,
+                               db_label="btc_trading", encrypt=True)
+        return rc, bdir
+
+    def test_successful_upload_removes_the_ciphertext(self, tmp_path, monkeypatch):
+        rc, bdir = self._run(tmp_path, monkeypatch, "echo shipped {file} {manifest}")
+        assert rc == 0
+        assert list(bdir.glob("*.db.age")) == []
+        assert len(list(bdir.glob("btc_trading_*.db"))) == 1, "plaintext must survive"
+        assert len(list(bdir.glob("*.age-manifest.json"))) == 1
+        assert len(list(bdir.glob("*[0-9].manifest.json"))) == 1
+
+    def test_failed_upload_keeps_the_ciphertext(self, tmp_path, monkeypatch):
+        """A backup that never left the host must not also be deleted from it."""
+        rc, bdir = self._run(tmp_path, monkeypatch, "exit 3")
+        assert len(list(bdir.glob("*.db.age"))) == 1
+        assert len(list(bdir.glob("btc_trading_*.db"))) == 1
+
+    def test_no_offhost_command_keeps_the_ciphertext(self, tmp_path, monkeypatch):
+        rc, bdir = self._run(tmp_path, monkeypatch, "")
+        assert len(list(bdir.glob("*.db.age"))) == 1
+
+    def test_reclaim_failure_surfaces_in_the_exit_code(self, tmp_path, monkeypatch):
+        self._fake_encrypt(monkeypatch)
+        monkeypatch.setattr(backup, "_discard_shipped_ciphertext",
+                            lambda ct, mf: False)
+        _make_db(tmp_path / "src.db")
+        bdir = tmp_path / "b"
+        env = {"BACKUP_AGE_RECIPIENT": "age1" + "x" * 58,
+               "BACKUP_OFFHOST_CMD": "echo shipped {file} {manifest}"}
+        monkeypatch.setattr(backup, "_load_env_var", lambda k: env.get(k, ""))
+        assert backup.run_backup(tmp_path / "src.db", bdir, dry_run=False,
+                                 db_label="btc_trading", encrypt=True) == 1
+
+    def test_unencrypted_runs_are_completely_unaffected(self, tmp_path, monkeypatch):
+        """The 02:00 --all unit runs without --encrypt and must not change."""
+        _make_db(tmp_path / "src.db")
+        bdir = tmp_path / "b"
+        monkeypatch.setattr(backup, "_load_env_var", lambda k: "")
+        assert backup.run_backup(tmp_path / "src.db", bdir, dry_run=False,
+                                 db_label="btc_trading") == 0
+        assert len(list(bdir.glob("btc_trading_*.db"))) == 1
+        assert list(bdir.glob("*.age")) == []
+
+    def test_plaintext_retention_still_applies_after_reclaim(self, tmp_path, monkeypatch):
+        """GFS retention keeps owning the plaintext; the reclaim does not touch it."""
+        from datetime import datetime, timedelta, timezone
+        rc, bdir = self._run(tmp_path, monkeypatch, "echo shipped {file} {manifest}")
+        # Not a 1st and older than 28 days, so it is outside all three GFS
+        # windows -- 20260101 would legitimately be KEPT as a monthly.
+        stale = bdir / "btc_trading_20260115_000000.db"
+        stale.write_bytes(b"old")
+        (bdir / "btc_trading_20260115_000000.manifest.json").write_text("{}", encoding="utf-8")
+        backup._apply_retention(
+            bdir, datetime(2026, 9, 8, tzinfo=timezone.utc),
+            dry_run=False, db_label="btc_trading")
+        assert not stale.exists(), "retention must still prune old plaintext"
+        assert len(list(bdir.glob("btc_trading_2026090*.db"))) == 1
