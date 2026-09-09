@@ -458,6 +458,145 @@ class TestRiskOverlayExit:
         assert limits.MAX_OPEN_POSITIONS == 1
 
 
+class TestHorizonExitVersusTheOverlayRacing:
+    """Submitting the horizon exit does not make it the closer.
+
+    The stop is a live overlay and stays armed while the horizon exit rests, so
+    it can fill first. Attributing that to the horizon would merge the governed
+    7-day outcome with the live risk-overlay outcome, which ADR-LE-5 requires
+    kept apart -- and the mirror row is where that separation is recorded.
+    """
+
+    def _exit_submitted(self, tmp_path, conn):
+        """Drive the mirror to EXIT_SUBMITTED with the position still open."""
+        fwd = forward_db(tmp_path)
+        run_entry(fwd, conn, executor=FakeExecutor(record_to=conn))
+        _fill_entry(conn)
+        closed = forward_db(tmp_path, exited=True, name="closed.db")
+        r = run_exit(closed, conn, executor=FakeExecutor(record_to=conn))
+        assert r.outcome == SJ.EXIT_SUBMITTED
+        assert storage.list_mirrors(conn)[0]["state"] == "EXIT_SUBMITTED"
+        return closed
+
+    def _stop_filled_against_the_position(self, conn):
+        """The real keyed chain: entry order -> fill -> position -> its stop."""
+        _insert_order(conn, "stop-p1-q1", "sell", status="filled",
+                      strategy="protection")
+        conn.execute(
+            "INSERT INTO positions (id, instrument_id, side, quantity,"
+            " entry_price, entry_ts, status, strategy)"
+            " VALUES (1,84,'buy',1.0,70000.0,?,'open',?)",
+            (NOW.isoformat(), bridge.SIGNAL_ID))
+        storage.write_protective_stop(
+            conn, client_order_id="stop-p1-q1", delta_order_id="D9",
+            position_id=1, side="sell", size=1, entry_price=70000.0,
+            trigger_price=69000.0, limit_price=68900.0, reduce_only=True,
+            placed_ts=NOW.isoformat())
+        conn.commit()
+
+    # 1. the horizon exit is what closed it
+
+    def test_the_horizon_exit_filling_is_recorded_as_the_horizon(self, tmp_path, conn):
+        closed = self._exit_submitted(tmp_path, conn)
+        _fill_close(conn)                     # our own exit filled; no stop fill
+        ex = FakeExecutor()
+        r = run_exit(closed, conn, executor=ex)
+        m = storage.list_mirrors(conn)[0]
+        assert r.outcome == SJ.EXIT_SUBMITTED
+        assert m["state"] == "CLOSED_AT_HORIZON"
+        assert m["exit_cause"] == "horizon"
+        assert ex.submits == []
+
+    # 2. the overlay closed it while the horizon exit was still resting
+
+    def test_a_stop_filling_first_is_attributed_to_the_overlay(self, tmp_path, conn):
+        closed = self._exit_submitted(tmp_path, conn)
+        _fill_close(conn)
+        self._stop_filled_against_the_position(conn)
+        ex = FakeExecutor()
+        r = run_exit(closed, conn, executor=ex)
+        m = storage.list_mirrors(conn)[0]
+        assert r.outcome == SJ.RISK_EXITED
+        assert m["state"] == "CLOSED_BY_RISK", "must not read as a horizon close"
+        assert m["exit_cause"] == "risk_stop"
+        assert ex.submits == []
+
+    def test_the_two_outcomes_are_not_merged(self, tmp_path, conn):
+        """ADR-LE-5: a stop-out still earns its governed 7-day outcome."""
+        closed = self._exit_submitted(tmp_path, conn)
+        _fill_close(conn)
+        self._stop_filled_against_the_position(conn)
+        run_exit(closed, conn, executor=FakeExecutor())
+        m = storage.list_mirrors(conn)[0]
+        assert m["state"] == "CLOSED_BY_RISK"
+        assert m["exit_cause"] == "risk_stop"
+        assert m["forward_exit_date"] == EXIT_DATE
+        assert m["forward_exit_price"] == 71500.0
+
+    def test_an_unexplained_flat_after_exit_submitted_stays_horizon(self, tmp_path, conn):
+        """No filled stop keyed to the position -> our exit is the closer."""
+        closed = self._exit_submitted(tmp_path, conn)
+        _fill_close(conn)
+        run_exit(closed, conn, executor=FakeExecutor())
+        assert storage.list_mirrors(conn)[0]["exit_cause"] == "horizon"
+
+    # 3. no double-close, in either attribution
+
+    def test_neither_attribution_submits_another_order(self, tmp_path, conn):
+        for stop_filled in (False, True):
+            c = sqlite3.connect(":memory:")
+            storage.init_schema(c); storage.init_execution_schema(c)
+            d = tmp_path / ("dc_%s" % stop_filled)
+            d.mkdir()
+            closed = self._exit_submitted(d, c)
+            _fill_close(c)
+            if stop_filled:
+                self._stop_filled_against_the_position(c)
+            ex = FakeExecutor()
+            run_exit(closed, c, executor=ex)
+            assert ex.submits == [], f"order submitted (stop_filled={stop_filled})"
+            # A second pass must not act again either.
+            run_exit(closed, c, executor=ex)
+            assert ex.submits == []
+
+    def test_a_terminal_row_is_never_reopened(self, tmp_path, conn):
+        closed = self._exit_submitted(tmp_path, conn)
+        _fill_close(conn)
+        self._stop_filled_against_the_position(conn)
+        run_exit(closed, conn, executor=FakeExecutor())
+        before = dict(storage.list_mirrors(conn)[0])
+        run_exit(closed, conn, executor=FakeExecutor())
+        after = dict(storage.list_mirrors(conn)[0])
+        assert after["state"] == before["state"] == "CLOSED_BY_RISK"
+        assert after["exit_cause"] == before["exit_cause"] == "risk_stop"
+
+    # 4. dry-run behaviour is untouched by this change
+
+    def test_dry_run_still_withholds_and_still_attributes(self, tmp_path, conn):
+        """The attribution runs on already-flat state; it submits nothing, so
+        dry-run has nothing extra to withhold and the classification stands."""
+        closed = self._exit_submitted(tmp_path, conn)
+        _fill_close(conn)
+        self._stop_filled_against_the_position(conn)
+        ex = FakeExecutor()
+        r = run_exit(closed, conn, executor=ex, dry_run=True)
+        assert ex.submits == []
+        assert r.outcome == SJ.RISK_EXITED
+        assert storage.list_mirrors(conn)[0]["exit_cause"] == "risk_stop"
+
+    def test_dry_run_withholding_an_unsubmitted_horizon_exit_is_unchanged(
+            self, tmp_path, conn):
+        """The pre-existing ENTERED + dry-run path must behave exactly as before."""
+        fwd = forward_db(tmp_path)
+        run_entry(fwd, conn, executor=FakeExecutor(record_to=conn))
+        _fill_entry(conn)
+        closed = forward_db(tmp_path, exited=True, name="c.db")
+        ex = FakeExecutor()
+        assert run_exit(closed, conn, executor=ex, dry_run=True).outcome == SJ.DRY_RUN
+        assert ex.submits == []
+        assert storage.list_mirrors(conn)[0]["state"] == "ENTERED"
+
+
 class TestExistingProtectionsPreserved:
     def test_disabled_strategy_does_nothing(self, tmp_path, conn):
         fwd = forward_db(tmp_path)

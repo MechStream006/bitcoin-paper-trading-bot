@@ -518,12 +518,28 @@ def evaluate_exit_once(*, forward_db_path: str, conn, client, risk_manager,
 
         if m["state"] == "EXIT_SUBMITTED":
             if flat:
-                storage.update_mirror(conn, fid, now_ts=now.isoformat(),
-                                      state="CLOSED_AT_HORIZON",
-                                      exit_cause="horizon",
-                                      live_exit_ts=now.isoformat())
-                result = EvaluationResult(EXIT_SUBMITTED,
-                                          f"{fid}: closed at horizon")
+                # Submitting the horizon exit does not make it the closer. The
+                # stop is a live overlay and stays armed while that exit rests,
+                # so it can fill first -- and attributing that to the horizon
+                # would merge the two outcomes ADR-LE-5 requires kept apart.
+                # Asked of the same keyed evidence the ENTERED branch uses.
+                cause = _risk_exit_cause(conn, m)
+                if cause == "risk_stop":
+                    storage.update_mirror(conn, fid, now_ts=now.isoformat(),
+                                          state="CLOSED_BY_RISK",
+                                          exit_cause=cause,
+                                          live_exit_ts=now.isoformat())
+                    log.warning("[strategy] mirror %s closed by risk overlay "
+                                "while the horizon exit was resting (%s)",
+                                fid, cause)
+                    result = EvaluationResult(RISK_EXITED, f"{fid}: {cause}")
+                else:
+                    storage.update_mirror(conn, fid, now_ts=now.isoformat(),
+                                          state="CLOSED_AT_HORIZON",
+                                          exit_cause="horizon",
+                                          live_exit_ts=now.isoformat())
+                    result = EvaluationResult(EXIT_SUBMITTED,
+                                              f"{fid}: closed at horizon")
             continue
 
         if reconciler is not None and not reconciler.trading_permitted:
