@@ -312,20 +312,46 @@ def check_retention(trading_journal: str) -> list[Finding]:
 
 
 def check_collector(pid: str, nrestarts: str, active: str,
-                    baseline_pid: str | None, snapshots: list[str],
+                    started_at: datetime | None, cycle_started: datetime | None,
+                    snapshots: list[str],
                     error_counts: dict[str, int],
                     exec_calls: list[str]) -> list[Finding]:
-    """Collection must be untouched by anything the backup cycle did."""
+    """Collection must be untouched by anything the backup cycle did.
+
+    The claim is scoped to the cycle: the process running now is the one that
+    was ALREADY running before the backup began, so the backup cannot have
+    disturbed it. That is what `ExecMainStartTimestamp < cycle start` proves,
+    and it stays true without anyone maintaining it.
+
+    It replaces a comparison against a PID hand-recorded in baseline.json.
+    That file was written once, for one cycle, and nothing has ever updated it
+    -- so the first restart of any kind made it permanently wrong, and it
+    reported the same stale mismatch every night regardless of what the backup
+    did. An 18-day-old PID cannot speak for tonight's cycle.
+
+    Crash detection is unchanged and still carried by NRestarts: systemd
+    increments it on a supervisor-driven restart under `Restart=always`, which
+    is what a crash produces. An operator's deliberate `systemctl restart`
+    does not increment it -- which is exactly the difference between the two
+    that the old check could not see. A restart DURING or after the cycle
+    began moves the start timestamp into the window and still fails, so this
+    is stricter than the PID pin for the question actually being asked.
+
+    An unknown or unparseable start time fails closed: absent proof the
+    process predates the cycle, the claim is not observed.
+    """
     out: list[Finding] = []
-    same = baseline_pid is None or pid == baseline_pid
-    if same and nrestarts == "0" and active == "active":
-        out.append(Finding(OBSERVED, "collector never restarted",
-                           f"PID {pid} (baseline {baseline_pid}), "
-                           f"NRestarts=0, {active}"))
+    predates = (started_at is not None and cycle_started is not None
+                and started_at < cycle_started)
+    detail = (f"PID={pid} started={started_at.isoformat() if started_at else '?'} "
+              f"cycle_started={cycle_started.isoformat() if cycle_started else '?'} "
+              f"NRestarts={nrestarts} state={active}")
+    if predates and nrestarts == "0" and active == "active":
+        out.append(Finding(OBSERVED, "collector untouched by the backup cycle",
+                           detail))
     else:
-        out.append(Finding(AMBIGUOUS, "collector never restarted",
-                           f"PID={pid} baseline={baseline_pid} "
-                           f"NRestarts={nrestarts} state={active}"))
+        out.append(Finding(AMBIGUOUS, "collector untouched by the backup cycle",
+                           detail))
 
     dirty = [s for s in snapshots if "skip=0 fail=0" not in s]
     gap = max_gap_minutes(snapshots)
@@ -539,12 +565,14 @@ def main(argv: list[str] | None = None) -> int:                 # pragma: no cov
         calls = [l for l in col_j.splitlines()
                  if re.search(r"place_order|cancel_order|\[exec\] ", l)]
         raw.append(f"collector window snapshots={len(snaps)} counts={counts}")
-        base = read_json(args.state_dir / "baseline.json")
         findings += check_collector(
             sh("systemctl", "show", COLLECTOR_UNIT, "-p", "MainPID", "--value").strip(),
             sh("systemctl", "show", COLLECTOR_UNIT, "-p", "NRestarts", "--value").strip(),
             sh("systemctl", "show", COLLECTOR_UNIT, "-p", "ActiveState", "--value").strip(),
-            base.get("collector_pid"), snaps, counts, calls)
+            _systemd_ts(sh("systemctl", "show", COLLECTOR_UNIT, "-p",
+                           "ExecMainStartTimestamp", "--value")),
+            cycle.started if cycle else None,
+            snaps, counts, calls)
 
     failed = sh("systemctl", "--failed", "--no-legend", "--plain")
     raw.append("--- systemctl --failed ---\n" + failed)

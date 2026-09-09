@@ -325,36 +325,109 @@ def _snaps(n, start_min=0, step=1, dirty=False):
 class TestCollector:
     CLEAN = {"periodic pass failed": 0, "HALT": 0, "database is locked": 0}
 
+    # The cycle under test, and a process that was already running before it.
+    CYCLE = datetime(2026, 9, 9, 2, 40, 40, tzinfo=timezone.utc)
+    BEFORE = datetime(2026, 9, 8, 18, 15, 56, tzinfo=timezone.utc)
+    DURING = datetime(2026, 9, 9, 2, 42, 0, tzinfo=timezone.utc)
+
     def test_healthy_window(self):
-        out = v.check_collector("414071", "0", "active", "414071",
-                                _snaps(45), self.CLEAN, [])
+        out = v.check_collector("414071", "0", "active", self.BEFORE,
+                                self.CYCLE, _snaps(45), self.CLEAN, [])
         assert all(f.status == v.OBSERVED for f in out)
 
     def test_restart_is_caught(self):
-        out = v.check_collector("999", "1", "active", "414071",
-                                _snaps(45), self.CLEAN, [])
+        out = v.check_collector("999", "1", "active", self.BEFORE,
+                                self.CYCLE, _snaps(45), self.CLEAN, [])
         assert out[0].status == v.AMBIGUOUS
 
     def test_collection_gap_is_caught(self):
         gapped = _snaps(5) + _snaps(5, start_min=30)
-        out = v.check_collector("414071", "0", "active", "414071",
-                                gapped, self.CLEAN, [])
+        out = v.check_collector("414071", "0", "active", self.BEFORE,
+                                self.CYCLE, gapped, self.CLEAN, [])
         assert out[1].status == v.AMBIGUOUS
 
     def test_skip_or_fail_is_caught(self):
-        out = v.check_collector("414071", "0", "active", "414071",
-                                _snaps(45, dirty=True), self.CLEAN, [])
+        out = v.check_collector("414071", "0", "active", self.BEFORE,
+                                self.CYCLE, _snaps(45, dirty=True), self.CLEAN, [])
         assert out[1].status == v.AMBIGUOUS
 
     def test_errors_are_caught(self):
-        out = v.check_collector("414071", "0", "active", "414071", _snaps(45),
-                                dict(self.CLEAN, HALT=1), [])
+        out = v.check_collector("414071", "0", "active", self.BEFORE,
+                                self.CYCLE, _snaps(45), dict(self.CLEAN, HALT=1), [])
         assert out[2].status == v.AMBIGUOUS
 
     def test_order_calls_are_caught(self):
-        out = v.check_collector("414071", "0", "active", "414071", _snaps(45),
-                                self.CLEAN, ["[exec] ACKED something"])
+        out = v.check_collector("414071", "0", "active", self.BEFORE,
+                                self.CYCLE, _snaps(45), self.CLEAN,
+                                ["[exec] ACKED something"])
         assert out[3].status == v.AMBIGUOUS
+
+    # -- the stale-baseline defect this replaced --------------------------
+
+    def test_an_authorized_restart_before_the_cycle_is_not_flagged(self):
+        """The defect: a PID pinned once on 2026-08-22 was compared every night.
+
+        After the authorized restart of 2026-09-08 18:15:56 it could never
+        match again, so the check reported the same AMBIG nightly no matter
+        what the backup did. A process that started 8h before the cycle is
+        exactly what "untouched by the backup" means.
+        """
+        out = v.check_collector("581989", "0", "active", self.BEFORE,
+                                self.CYCLE, _snaps(45), self.CLEAN, [])
+        assert out[0].status == v.OBSERVED
+        assert "581989" in out[0].detail
+
+    def test_a_restart_during_the_cycle_is_still_caught(self):
+        """Detection must not be weakened: this is the case that matters."""
+        out = v.check_collector("999", "0", "active", self.DURING,
+                                self.CYCLE, _snaps(45), self.CLEAN, [])
+        assert out[0].status == v.AMBIGUOUS
+
+    def test_a_crash_restart_is_still_caught_by_nrestarts(self):
+        """NRestarts carries crash detection and is unchanged.
+
+        systemd increments it on a supervisor-driven restart under
+        Restart=always; a deliberate `systemctl restart` does not.
+        """
+        out = v.check_collector("999", "2", "active", self.BEFORE,
+                                self.CYCLE, _snaps(45), self.CLEAN, [])
+        assert out[0].status == v.AMBIGUOUS
+
+    def test_inactive_is_still_caught(self):
+        out = v.check_collector("0", "0", "failed", self.BEFORE,
+                                self.CYCLE, _snaps(45), self.CLEAN, [])
+        assert out[0].status == v.AMBIGUOUS
+
+    def test_unknown_start_time_fails_closed(self):
+        out = v.check_collector("581989", "0", "active", None,
+                                self.CYCLE, _snaps(45), self.CLEAN, [])
+        assert out[0].status == v.AMBIGUOUS
+
+    def test_unknown_cycle_fails_closed(self):
+        out = v.check_collector("581989", "0", "active", self.BEFORE,
+                                None, _snaps(45), self.CLEAN, [])
+        assert out[0].status == v.AMBIGUOUS
+
+    def test_a_start_exactly_at_the_cycle_start_is_not_before_it(self):
+        out = v.check_collector("581989", "0", "active", self.CYCLE,
+                                self.CYCLE, _snaps(45), self.CLEAN, [])
+        assert out[0].status == v.AMBIGUOUS
+
+    def test_no_baseline_file_is_consulted_any_more(self):
+        """The stale-prone dependency is removed, not merely tolerated.
+
+        Docstrings are stripped first: the history is deliberately explained
+        in prose there, so a substring match over the raw file would be
+        satisfied by the explanation rather than by the code.
+        """
+        import ast
+        tree = ast.parse(pathlib.Path(v.__file__).read_text(encoding="utf-8"))
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef))                     and ast.get_docstring(n):
+                n.body = n.body[1:] or [ast.Pass()]
+        code = ast.unparse(tree)
+        assert "baseline.json" not in code
+        assert "baseline_pid" not in code
 
     def test_max_gap_helper(self):
         assert v.max_gap_minutes(_snaps(3)) == pytest.approx(1.0)
