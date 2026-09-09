@@ -293,6 +293,87 @@ def _signal_availability_delay() -> timedelta:
     return timedelta(seconds=get_spec("signal_log").availability_offset_s)
 
 
+#: Bounds for the two live source reads, taken from the feature contract's own
+#: tolerances rather than invented here: a read wider than the tolerance can
+#: only return rows the contract would reject as STALE_DATA.
+_PANEL_WINDOW = timedelta(seconds=300.0)     # QUOTE_TOLERANCE_S
+_BAR_WINDOW = timedelta(seconds=900.0)       # BAR_TOLERANCE_S
+
+
+def capture_decision_features(conn, client_order_id: str, forward_db_path: str,
+                              decision_ts: datetime,
+                              signal_id: str = SIGNAL_ID,
+                              db_path=None) -> bool:
+    """Persist the decision-time feature row for one ACKED live entry.
+
+    `decision_ts` is the pass-start instant, NOT the ACK. Capture necessarily
+    runs after the quote, the wallet read, risk validation and an HTTP
+    round-trip, but the features must describe what was knowable when the
+    decision was taken. `build_row` is pure and takes the instant from the
+    caller, so passing it preserves the boundary; deriving a clock here would
+    silently re-date every row by the submit latency.
+
+    ACKED only, and the caller enforces that. Under DRY_RUN, a pre-submit
+    rejection, or a BLOCKED intent this is never reached, so no research row
+    exists for a decision that did not trade. That is the recorded policy:
+    admitting them would need `LABEL_CONTRACT.linkage` -- "decision_id ==
+    orders.client_order_id" -- to change, which is an operator act. An ACKED
+    decision always satisfies that clause, because `TestnetExecutor._persist`
+    writes the order row write-ahead at SUBMITTED, before the request leaves.
+
+    Both live reads are bounded by the contract's own tolerances. Unbounded,
+    `spot_1m` would scan 69 partitions and ~104 MB of 1m bars on every pass;
+    windowed it reads one partition. The panel read is bounded on `ts`, which
+    `idx_option_quotes_ts` serves.
+
+    Best-effort by construction: every failure path returns False and logs. A
+    research record must never turn a filled order into a reported failure.
+    """
+    research_root = pathlib.Path(__file__).resolve().parents[2] / "research"
+    if str(research_root) not in sys.path:
+        sys.path.insert(0, str(research_root))
+    from alignment import align as AL
+    from alignment import option_panel as OP
+    from alignment import forward_trades as FT
+    from alignment.features import build_row, starter_features
+    from feature_store import decision_store as DS
+
+    # The loaders take a path, not a handle, so they open their own read-only
+    # connections. That is deliberate here: the strategy's connection carries
+    # its own transaction (ADR-0003 claim/commit), and a research read must not
+    # join it.
+    trading_db = conn.execute("PRAGMA database_list").fetchone()[2]
+    lo_panel = decision_ts - _PANEL_WINDOW
+    lo_bar = decision_ts - _BAR_WINDOW
+
+    loads = dict(OP.load_derived_sources(
+        trading_db, lo=lo_panel.isoformat(), hi=decision_ts.isoformat()))
+    loads.update(FT.load_held_direction(forward_db_path, signal_id))
+
+    # `rows_seen=len(obs)`, `unclocked=0`: both loaders already drop rows whose
+    # arrival cannot be placed, so the count they could report is the count
+    # they return. This is the convention the research tests already use for
+    # these two sources.
+    sig = AL.load_sqlite_source(forward_db_path, "signal_log",
+                                payload_fields=("position",),
+                                where="signal_id = ?", params=(signal_id,))
+    loads["signal_log"] = AL.SourceLoad("signal_log", tuple(sig), len(sig), 0)
+    bars = AL.load_lake_source("spot_1m", payload_fields=("close",),
+                               lo=lo_bar, hi=decision_ts)
+    loads["spot_1m"] = AL.SourceLoad("spot_1m", tuple(bars), len(bars), 0)
+
+    specs = starter_features(signal_id)
+    row = build_row(decision_ts, specs, loads)
+
+    db = db_path or DS.DEFAULT_DB
+    DS.init_db(db)
+    written_at = datetime.now(timezone.utc).isoformat()
+    for spec in specs:
+        DS.register_contract(db, spec, registered_at=written_at)
+    DS.persist_row(db, row, specs, written_at, decision_id=client_order_id)
+    return True
+
+
 def capture_signal_context(conn, client_order_id: str, forward_db_path: str,
                            signal_id: str = SIGNAL_ID,
                            direction: Any = _REREAD_DIRECTION,

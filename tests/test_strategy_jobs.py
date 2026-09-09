@@ -108,8 +108,15 @@ UNTOUCHED_MODULES = (
 #: loophole. Changing bridge.py again means authorizing the change and re-pinning
 #: this deliberately. `BRIDGE_OTHER_SURFACE` below is the structural half, and
 #: says WHAT changed when the change is structural.
+#: Re-pinned deliberately for the decision-feature capture. The guard did its
+#: job: it reported the change by name rather than letting it pass. The
+#: structural delta is a pure ADDITION -- `_PANEL_WINDOW`, `_BAR_WINDOW` and
+#: `capture_decision_features` -- with nothing removed, nothing re-signatured,
+#: `capture_signal_context` byte-identical, and STOP_DISTANCE_PCT and the
+#: order-id bound untouched. That was verified against the previous surface
+#: before this hash was moved.
 BRIDGE_CONTENT_SHA256 = (
-    "309ed52f444e5a61928a8e1ff1c3bbae46cc4e70592c42f8ebdc52d56abc4000")
+    "1815db266c8c43be5f40fa820bc80e876c9fed519d73b5f8b44b690294a70f7e")
 
 #: The authorized signature, spelled out so a drifting default or a dropped
 #: parameter names itself rather than only moving a hash.
@@ -122,6 +129,11 @@ BRIDGE_CAPTURE_SIGNATURE = (
 #: re-signatured function is reported by name.
 BRIDGE_OTHER_SURFACE = {
     "log": "logging.getLogger(__name__)",
+    "_PANEL_WINDOW": "timedelta(seconds=300.0)",
+    "_BAR_WINDOW": "timedelta(seconds=900.0)",
+    "capture_decision_features": (
+        "def(conn, client_order_id: str, forward_db_path: str, "
+        "decision_ts: datetime, signal_id: str=SIGNAL_ID, db_path=None)"),
     "SIGNAL_ID": "'g3_momentum_tsmom'",
     "_MAX_STOP_SHRINK_TICKS": "8",
     "STOP_DISTANCE_PCT": "1.4",

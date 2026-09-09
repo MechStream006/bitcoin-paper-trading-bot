@@ -339,6 +339,29 @@ def evaluate_once(
         log.warning("[strategy] signal context not captured for %s: %s: %s",
                     intent.client_order_id, type(exc).__name__, exc)
 
+    # The decision-time feature row, keyed on the same client_order_id.
+    #
+    # ACKED only, and this is the enforcement point: DRY_RUN, a pre-submit risk
+    # rejection and every earlier return leave the function above, so none of
+    # them reaches here and none produces a research row. That is the recorded
+    # policy. Admitting them would require LABEL_CONTRACT's linkage clause --
+    # "decision_id == orders.client_order_id" -- to change, which is an
+    # operator act; an ACKED decision satisfies it because the executor writes
+    # the order row write-ahead at SUBMITTED, before the request leaves.
+    #
+    # `now` again, not a fresh clock: capture necessarily runs after an HTTP
+    # round-trip, but the row must describe what was knowable when the decision
+    # was taken, and `build_row` takes the instant from its caller.
+    #
+    # Best-effort on the same terms as the capture above, and for the same
+    # reason: the order is already live.
+    try:
+        bridge.capture_decision_features(
+            conn, intent.client_order_id, forward_db_path, decision_ts=now)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[strategy] decision features not captured for %s: %s: %s",
+                    intent.client_order_id, type(exc).__name__, exc)
+
     return EvaluationResult(SUBMITTED, "submitted", intent, decision,
                             submitted=True, order_state=state)
 

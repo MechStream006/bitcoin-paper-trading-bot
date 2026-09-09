@@ -619,3 +619,353 @@ class TestExistingProtectionsPreserved:
         r = run_entry(forward_db(tmp_path), conn, executor=ex)
         assert r.outcome == SJ.NOT_ACKED
         assert storage.list_mirrors(conn) == []
+
+
+# ---------------------------------------------------------------------------
+# Decision-feature capture: ACKED only, best-effort, decision-boundary dated
+# ---------------------------------------------------------------------------
+
+class TestDecisionFeatureCapture:
+    """Policy: DRY_RUN and every pre-submit path produce no research row.
+
+    Admitting them would require LABEL_CONTRACT's linkage clause --
+    "decision_id == orders.client_order_id" -- to change, which is an operator
+    act. An ACKED decision satisfies it because the executor writes the order
+    row write-ahead at SUBMITTED, before the request leaves.
+    """
+
+    def _spy(self, monkeypatch):
+        """Record every capture call without touching the real research tree."""
+        calls = []
+
+        def fake(conn, client_order_id, forward_db_path, decision_ts,
+                 signal_id=bridge.SIGNAL_ID):
+            calls.append({"coid": client_order_id, "decision_ts": decision_ts,
+                          "forward_db_path": forward_db_path,
+                          "signal_id": signal_id})
+            return True
+
+        monkeypatch.setattr(bridge, "capture_decision_features", fake)
+        return calls
+
+    def test_DF01_acked_decision_captures_one_row(self, tmp_path, conn, monkeypatch):
+        calls = self._spy(monkeypatch)
+        fwd = forward_db(tmp_path)
+        ex = FakeExecutor(record_to=conn)
+        r = run_entry(fwd, conn, executor=ex)
+        assert r.outcome == SJ.SUBMITTED
+        assert len(calls) == 1
+        assert calls[0]["coid"] == r.intent.client_order_id
+
+    def test_DF02_dry_run_captures_nothing(self, tmp_path, conn, monkeypatch):
+        calls = self._spy(monkeypatch)
+        ex = FakeExecutor()
+        r = run_entry(forward_db(tmp_path), conn, executor=ex, dry_run=True)
+        assert r.outcome == SJ.DRY_RUN
+        assert ex.submits == []
+        assert calls == [], "a decision that never reached the exchange is not evidence"
+
+    def test_DF03_pre_submit_rejection_captures_nothing(self, tmp_path, conn, monkeypatch):
+        calls = self._spy(monkeypatch)
+        ex = FakeExecutor()
+        r = run_entry(forward_db(tmp_path), conn, executor=ex,
+                      risk=FakeRisk(Decision.reject("capped")))
+        assert r.outcome == SJ.REJECTED
+        assert ex.submits == []
+        assert calls == []
+
+    def test_DF04_non_acked_submission_captures_nothing(self, tmp_path, conn, monkeypatch):
+        calls = self._spy(monkeypatch)
+        for st in (OrderState.REJECTED, OrderState.UNKNOWN, OrderState.BLOCKED):
+            c = sqlite3.connect(":memory:")
+            storage.init_schema(c); storage.init_execution_schema(c)
+            r = run_entry(forward_db(tmp_path, name=f"f{st.value}.db"), c,
+                          executor=FakeExecutor(state=st))
+            assert r.outcome == SJ.NOT_ACKED, st
+        assert calls == [], "only an ACK is evidence"
+
+    def test_DF05_halted_reconciler_captures_nothing(self, tmp_path, conn, monkeypatch):
+        calls = self._spy(monkeypatch)
+        r = run_entry(forward_db(tmp_path), conn, executor=FakeExecutor(),
+                      reconciler=FakeReconciler(False))
+        assert r.outcome == SJ.NOT_PERMITTED
+        assert calls == []
+
+    def test_DF06_decision_ts_is_pass_start_not_ack_time(self, tmp_path, conn, monkeypatch):
+        """Capture runs after an HTTP round-trip; the row must still describe
+        the instant the decision was taken."""
+        calls = self._spy(monkeypatch)
+        fwd = forward_db(tmp_path)
+        run_entry(fwd, conn, executor=FakeExecutor(record_to=conn), now=NOW)
+        assert calls[0]["decision_ts"] == NOW
+
+    def test_DF07_capture_failure_cannot_alter_the_trading_outcome(
+            self, tmp_path, conn, monkeypatch):
+        """The order is already live. A research record must never turn a
+        filled order into a reported failure."""
+        def boom(*a, **k):
+            raise RuntimeError("feature store unreachable")
+
+        monkeypatch.setattr(bridge, "capture_decision_features", boom)
+        ex = FakeExecutor(record_to=conn)
+        r = run_entry(forward_db(tmp_path), conn, executor=ex)
+        assert r.outcome == SJ.SUBMITTED
+        assert r.submitted is True
+        assert len(ex.submits) == 1
+        assert storage.list_mirrors(conn)[0]["state"] == "ENTERED"
+
+    def test_DF08_capture_failure_is_logged_not_swallowed(
+            self, tmp_path, conn, monkeypatch, caplog):
+        import logging
+
+        def boom(*a, **k):
+            raise RuntimeError("feature store unreachable")
+
+        monkeypatch.setattr(bridge, "capture_decision_features", boom)
+        with caplog.at_level(logging.WARNING):
+            run_entry(forward_db(tmp_path), conn, executor=FakeExecutor(record_to=conn))
+        assert any("decision features not captured" in m for m in caplog.messages)
+
+    def test_DF09_signal_context_capture_is_still_called(self, tmp_path, conn, monkeypatch):
+        """The new capture must not displace the existing one."""
+        self._spy(monkeypatch)
+        seen = []
+        monkeypatch.setattr(bridge, "capture_signal_context",
+                            lambda *a, **k: seen.append(k) or True)
+        run_entry(forward_db(tmp_path), conn, executor=FakeExecutor(record_to=conn))
+        assert len(seen) == 1
+
+
+class TestCaptureUsesTheExistingContract:
+    """The helper must reuse the registered machinery, not reimplement it."""
+
+    def _src(self):
+        return (pathlib.Path(SJ.__file__).resolve().parent / "bridge.py").read_text(
+            encoding="utf-8")
+
+    def test_DF10_uses_starter_features_and_build_row(self):
+        src = self._src()
+        assert "starter_features" in src and "build_row" in src
+        assert "FeatureSpec(" not in src, "must not define its own feature specs"
+
+    def test_DF11_all_five_contract_features_are_covered(self):
+        """The five sources the contract declares, and no sixth."""
+        import sys as _sys
+        research = pathlib.Path(SJ.__file__).resolve().parents[2] / "research"
+        if str(research) not in _sys.path:
+            _sys.path.insert(0, str(research))
+        from alignment.features import starter_features
+
+        specs = starter_features(bridge.SIGNAL_ID)
+        assert {s.name for s in specs} == {
+            "spot_price", "option_atm_iv", "signal_position",
+            "consumed_direction", "market_close_1m"}
+        src = self._src()
+        for source in ("spot_index", "atm_iv", "signal_log", "held_direction",
+                       "spot_1m"):
+            assert source in src or "load_derived_sources" in src
+
+    def test_DF12_market_close_1m_is_loaded_bounded(self):
+        """51ac0f3's window must actually be used, or the pass scans 69
+        partitions and ~104 MB of 1m bars."""
+        src = self._src()
+        i = src.index('load_lake_source("spot_1m"')
+        call = src[i:i + 260]
+        assert "lo=" in call and "hi=" in call, call
+
+    def test_DF13_panel_read_is_bounded_too(self):
+        src = self._src()
+        i = src.index("load_derived_sources(")
+        call = src[i:i + 200]
+        assert "lo=" in call and "hi=" in call, call
+
+    def test_DF14_contract_hashes_are_unchanged_by_this_change(self):
+        """The feature contract hash covers name, each input's source, field,
+        criticality, tolerance and panel key, and the compute source text --
+        none of which this change touches."""
+        import sys as _sys
+        research = pathlib.Path(SJ.__file__).resolve().parents[2] / "research"
+        if str(research) not in _sys.path:
+            _sys.path.insert(0, str(research))
+        from alignment.features import starter_features
+        from feature_store import decision_store as DS
+
+        hashes = {s.name: DS.contract_hash(s) for s in starter_features(bridge.SIGNAL_ID)}
+        assert len(set(hashes.values())) == 5, "five distinct contracts"
+        # Recomputing must be stable -- the hash is a pure function of the spec.
+        again = {s.name: DS.contract_hash(s) for s in starter_features(bridge.SIGNAL_ID)}
+        assert hashes == again
+
+    def test_DF15_no_label_contract_or_governance_reference(self):
+        """Code only. The policy is deliberately EXPLAINED in prose there --
+        why DRY_RUN is excluded turns on LABEL_CONTRACT's linkage clause -- so
+        a raw substring match would be satisfied by the explanation rather than
+        by a dependency."""
+        import ast
+        tree = ast.parse(self._src())
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef))                     and ast.get_docstring(n):
+                n.body = n.body[1:] or [ast.Pass()]
+        code = ast.unparse(tree)
+        for banned in ("LABEL_CONTRACT", "register_definition", "thresholds.yaml",
+                       "registry.yaml"):
+            assert banned not in code, banned
+
+
+class TestCaptureRunsForReal:
+    """The spy tests above prove the wiring; this proves the helper itself.
+
+    Everything is synthetic and local: a trading DB with an option panel, a
+    forward store with signal_log/trade_entries/run_log, a one-partition lake,
+    and a decision_features.db in tmp_path. Nothing touches the real research
+    tree or production.
+    """
+
+    def _trading_db(self, path, decision_ts):
+        c = sqlite3.connect(path)
+        storage.init_schema(c)
+        storage.init_execution_schema(c)
+        # Two ATM legs quoting a positive mark_iv, so the panel reduction has a
+        # valid pair, plus the spot each ticker carries.
+        for iid, ctype, strike in ((901, "call_options", 70000.0),
+                                   (902, "put_options", 70000.0)):
+            c.execute(
+                "INSERT OR REPLACE INTO instruments (id, symbol, contract_type,"
+                " underlying, quoting, tick_size, contract_value, state,"
+                " strike_price, settlement_time, fetched_at)"
+                " VALUES (?,?,?,'BTC','USD',0.1,0.001,'live',?,?,?)",
+                (iid, f"X-BTC-70000-{iid}", ctype, strike,
+                 (decision_ts + timedelta(days=2)).isoformat(),
+                 decision_ts.isoformat()))
+        ts = (decision_ts - timedelta(seconds=30)).isoformat()
+        for iid in (901, 902):
+            c.execute(
+                "INSERT INTO option_quotes (instrument_id, ts, exch_ts,"
+                " spot_price, mark_iv) VALUES (?,?,?,?,?)",
+                (iid, ts, None, 70123.5, 0.55))
+        c.commit()
+        return c
+
+    def _forward_db(self, path, decision_ts):
+        c = sqlite3.connect(path)
+        c.executescript("""
+            CREATE TABLE signal_log (id INTEGER PRIMARY KEY, signal_id TEXT,
+                day TEXT, position REAL, raw_value REAL, run_id INTEGER);
+            CREATE TABLE run_log (id INTEGER PRIMARY KEY, signal_id TEXT,
+                run_date TEXT, fn_hash TEXT, status TEXT, note TEXT,
+                created_at TEXT);
+            CREATE TABLE trade_entries (id INTEGER PRIMARY KEY, signal_id TEXT,
+                entry_date TEXT, direction INTEGER, entry_close_price REAL,
+                planned_exit_date TEXT, open INTEGER);
+            CREATE TABLE trade_exits (id INTEGER PRIMARY KEY, entry_id INTEGER,
+                exit_date TEXT, exit_close_price REAL, cost_bps REAL);
+        """)
+        day = (decision_ts - timedelta(days=2)).date().isoformat()
+        c.execute("INSERT INTO run_log (id, signal_id, run_date, status, created_at)"
+                  " VALUES (1,?,?, 'ok', ?)",
+                  (bridge.SIGNAL_ID, day,
+                   (decision_ts - timedelta(days=1)).isoformat()))
+        c.execute("INSERT INTO signal_log (id, signal_id, day, position, run_id)"
+                  " VALUES (1,?,?,1.0,1)", (bridge.SIGNAL_ID, day))
+        c.execute("INSERT INTO trade_entries (id, signal_id, entry_date, direction,"
+                  " entry_close_price, planned_exit_date, open)"
+                  " VALUES (1,?,?,1,70000.0,?,1)",
+                  (bridge.SIGNAL_ID, day,
+                   (decision_ts + timedelta(days=5)).date().isoformat()))
+        c.commit()
+        c.close()
+        return path
+
+    def _lake(self, base, decision_ts):
+        pq = pytest.importorskip("pyarrow.parquet")
+        pa = pytest.importorskip("pyarrow")
+        import pandas as pd
+        part = (base / "spot" / "BTCUSDT"
+                / f"year={decision_ts.year}" / f"month={decision_ts.month:02d}")
+        part.mkdir(parents=True, exist_ok=True)
+        bar = decision_ts - timedelta(minutes=3)
+        rows = [{"open_time": int((bar - timedelta(minutes=i)).timestamp() * 1000),
+                 "close": 70200.0 + i} for i in range(5)]
+        pq.write_table(pa.Table.from_pandas(pd.DataFrame(rows)),
+                       part / "data.parquet")
+        (part / "_manifest.json").write_text('{"parquet_sha256": "sha-test"}',
+                                             encoding="utf-8")
+        return base
+
+    def test_DF16_capture_writes_rows_for_all_five_features(self, tmp_path):
+        import sys as _sys
+        research = pathlib.Path(SJ.__file__).resolve().parents[2] / "research"
+        if str(research) not in _sys.path:
+            _sys.path.insert(0, str(research))
+        from feature_store import decision_store as DS
+        import alignment.align as AL
+
+        decision_ts = datetime(2026, 9, 15, 1, 30, tzinfo=timezone.utc)
+        trading = tmp_path / "btc_trading.db"
+        conn = self._trading_db(trading, decision_ts)
+        fwd = self._forward_db(str(tmp_path / "fwd.db"), decision_ts)
+        lake_base = self._lake(tmp_path / "raw", decision_ts)
+        store = tmp_path / "decision_features.db"
+
+        real_lake = AL.load_lake_source
+        try:
+            # Point the lake read at the synthetic tree; every other bound and
+            # argument is the helper's own.
+            AL.load_lake_source = lambda source, base_dir=None, **kw: real_lake(
+                source, base_dir=lake_base, **kw)
+            ok = bridge.capture_decision_features(
+                conn, "coid-df16", fwd, decision_ts=decision_ts, db_path=store)
+        finally:
+            AL.load_lake_source = real_lake
+
+        assert ok is True
+        c = sqlite3.connect(store)
+        names = [r[0] for r in c.execute(
+            "SELECT feature_name FROM feature_rows WHERE decision_id=? "
+            "ORDER BY feature_name", ("coid-df16",))]
+        stored_ts = {r[0] for r in c.execute(
+            "SELECT decision_ts FROM feature_rows WHERE decision_id=?",
+            ("coid-df16",))}
+        inputs = c.execute(
+            "SELECT COUNT(*) FROM feature_row_inputs WHERE decision_id=?",
+            ("coid-df16",)).fetchone()[0]
+        c.close()
+
+        assert names == ["consumed_direction", "market_close_1m", "option_atm_iv",
+                         "signal_position", "spot_price"], names
+        assert stored_ts == {decision_ts.isoformat()}, "decision boundary preserved"
+        assert inputs == 5, "every input recorded, including any unavailable one"
+
+    def test_DF17_absence_is_persisted_not_dropped(self, tmp_path):
+        """No lake and no panel: the row must still exist, carrying states."""
+        import sys as _sys
+        research = pathlib.Path(SJ.__file__).resolve().parents[2] / "research"
+        if str(research) not in _sys.path:
+            _sys.path.insert(0, str(research))
+
+        decision_ts = datetime(2026, 9, 15, 1, 30, tzinfo=timezone.utc)
+        trading = tmp_path / "empty_trading.db"
+        conn = sqlite3.connect(trading)
+        storage.init_schema(conn)
+        storage.init_execution_schema(conn)
+        fwd = self._forward_db(str(tmp_path / "fwd2.db"), decision_ts)
+        store = tmp_path / "df17.db"
+
+        import alignment.align as AL
+        real_lake = AL.load_lake_source
+        try:
+            AL.load_lake_source = lambda *a, **k: []
+            ok = bridge.capture_decision_features(
+                conn, "coid-df17", fwd, decision_ts=decision_ts, db_path=store)
+        finally:
+            AL.load_lake_source = real_lake
+
+        assert ok is True
+        c = sqlite3.connect(store)
+        rows = dict(c.execute(
+            "SELECT feature_name, state FROM feature_rows WHERE decision_id=?",
+            ("coid-df17",)).fetchall())
+        c.close()
+        assert len(rows) == 5, "absence is a row, not a gap"
+        assert rows["market_close_1m"] != "READY"
+        assert rows["spot_price"] != "READY"
