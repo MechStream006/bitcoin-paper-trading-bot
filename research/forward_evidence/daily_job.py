@@ -66,6 +66,10 @@ COST_BPS = 15.0
 # Horizons for forward labels (calendar days)
 LABEL_HORIZONS = [5, 7, 14, 30]
 
+#: One UTC day in ms. A day is eligible for processing once it has fully
+#: elapsed -- see the completeness filter in main().
+_DAY_MS = 86_400_000
+
 # ---- compute function file hash for determinism check ----------------------
 _FN_FILE  = _HERE / "decision_function.py"
 _FN_HASH  = hashlib.sha256(_FN_FILE.read_bytes()).hexdigest()
@@ -448,14 +452,39 @@ def main() -> None:
     con = init_db(DB_PATH)
     already = _already_processed(con)
 
+    # Only fully elapsed UTC days are eligible, on every path.
+    #
+    # The job fires at 00:05 UTC and `corpus.iloc[-1]` is then TODAY, five
+    # minutes old: `_load_corpus` takes LAST(close) per UTC day, so that row's
+    # `spot_close` is the 5th 1m bar of the day, not its close. Because the day
+    # is written with INSERT OR IGNORE and then sits in `already`, the partial
+    # value was frozen permanently -- the stored series ran ~1 day lagged
+    # (`stored[D]` tracked the lake's `D-1` close, differing by up to $3,892).
+    #
+    # The frozen collection_spec already forbids this: the trigger is "once per
+    # day, after daily close is available" and the input is "Binance BTCUSD
+    # spot close (from 1m OHLCV, LAST BAR OF DAY)". Waiting for the day to
+    # elapse is therefore spec COMPLIANCE, not a change of definition, and it
+    # is what research/dq/checks.py::check_temporal already classifies as
+    # PARTIAL_DAY -> wait.
+    #
+    # This also removes the month-boundary skip at its source: at 00:05 on the
+    # 1st the newest complete day is the last day of the previous month, which
+    # lives in a partition that already exists, so there is nothing to miss.
+    # The high-water-mark catch-up below remains as defence in depth for a
+    # genuine multi-day outage.
+    complete = [i for i in range(len(corpus))
+                if int(corpus["day_ts"].iloc[i]) + _DAY_MS <= now_ms]
+
     # Determine days to process
     if args.backfill:
-        to_process = [i for i in range(len(corpus))
+        to_process = [i for i in complete
                       if int(corpus["day_ts"].iloc[i]) not in already]
     elif not already:
-        # Fresh DB in daily mode: unchanged behaviour, one day. Seeding a whole
-        # history is --backfill's job and must stay an explicit choice.
-        to_process = [len(corpus) - 1]
+        # Fresh DB in daily mode: one day, as before -- now the newest COMPLETE
+        # day rather than the incomplete current one. Seeding a whole history
+        # is --backfill's job and must stay an explicit choice.
+        to_process = complete[-1:]
     else:
         # Daily: every unprocessed corpus day ABOVE the high-water mark.
         #
@@ -477,7 +506,7 @@ def main() -> None:
         # already below it. Reprocessing history stays --backfill's job and a
         # separate decision, so deploying this changes no recorded evidence.
         high_water = max(already)
-        to_process = [i for i in range(len(corpus))
+        to_process = [i for i in complete
                       if int(corpus["day_ts"].iloc[i]) > high_water
                       and int(corpus["day_ts"].iloc[i]) not in already]
 
@@ -491,7 +520,9 @@ def main() -> None:
         # Recording status='no_new_data' here closes that gap without
         # touching the normal-path run_log write below, which is unchanged.
         if not args.dry_run:
-            latest_day_ts = int(corpus["day_ts"].iloc[-1])
+            # The newest COMPLETE day: naming the incomplete current row here
+            # would report a day this job deliberately did not process.
+            latest_day_ts = int(corpus["day_ts"].iloc[complete[-1] if complete else -1])
             con.execute("""
                 INSERT OR REPLACE INTO run_log
                     (run_ts, data_day_ts, status, signals_computed,

@@ -308,3 +308,200 @@ class TestMonthRolloverGap:
         con.close()
 
         assert caught_up == reference, "recovered days must be identical to a straight backfill"
+
+
+# ---------------------------------------------------------------------------
+# F1 -- only fully elapsed UTC days are eligible
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone  # noqa: E402
+
+DAY_MS = 86_400_000
+
+
+def _corpus_from(first_day_ts: int, n_days: int) -> pd.DataFrame:
+    """Synthetic corpus anchored on an explicit first day."""
+    c = _synthetic_corpus(n_days=n_days)
+    c["day_ts"] = [first_day_ts + i * DAY_MS for i in range(n_days)]
+    return c
+
+
+def _day(y, m, d) -> int:
+    return int(datetime(y, m, d, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+class TestOnlyCompletedDaysAreProcessed:
+    """H6 F1: the 00:05 run wrote TODAY's five-minute-old tick as the close.
+
+    `_load_corpus` takes LAST(close) per UTC day, so `corpus.iloc[-1]` at 00:05
+    is the 5th 1m bar of the current day. INSERT OR IGNORE then froze it and
+    the stored series ran about one day lagged. The frozen collection_spec
+    requires "after daily close is available" and the "last bar of day", so
+    waiting for the day to elapse is spec compliance, not a redefinition.
+    """
+
+    def _run(self, monkeypatch, db_path, corpus, now_ms, argv=("daily_job.py",)):
+        monkeypatch.setattr(daily_job, "_load_corpus", lambda: corpus)
+        monkeypatch.setattr(daily_job, "DB_PATH", db_path)
+        monkeypatch.setattr(daily_job.time, "time", lambda: now_ms / 1000.0)
+        monkeypatch.setattr(sys, "argv", list(argv))
+        daily_job.main()
+
+    def _days(self, db_path):
+        con = sqlite3.connect(db_path)
+        rows = [r[0] for r in con.execute(
+            "SELECT day_ts FROM corpus_daily ORDER BY day_ts")]
+        con.close()
+        return rows
+
+    def test_F101_incomplete_current_day_is_excluded(self, monkeypatch, db_path):
+        """At 00:05 on the newest corpus day, that day must NOT be processed."""
+        first = _day(2026, 9, 1)
+        corpus = _corpus_from(first, 10)
+        today = first + 9 * DAY_MS
+        self._run(monkeypatch, db_path, corpus, now_ms=today + 5 * 60_000,
+                  argv=["daily_job.py", "--backfill"])
+        got = self._days(db_path)
+        assert today not in got, "the incomplete current day must be excluded"
+        assert got == [first + i * DAY_MS for i in range(9)]
+
+    def test_F102_completed_previous_day_is_processed(self, monkeypatch, db_path):
+        first = _day(2026, 9, 1)
+        corpus = _corpus_from(first, 10)
+        today = first + 9 * DAY_MS
+        self._run(monkeypatch, db_path, corpus, now_ms=today + 5 * 60_000,
+                  argv=["daily_job.py", "--backfill"])
+        assert (today - DAY_MS) in self._days(db_path), "yesterday must be collected"
+
+    def test_F103_day_becomes_eligible_exactly_when_it_elapses(self, monkeypatch, db_path):
+        """The boundary is inclusive at day_ts + 86_400_000."""
+        first = _day(2026, 9, 1)
+        corpus = _corpus_from(first, 3)
+        last = first + 2 * DAY_MS
+        self._run(monkeypatch, db_path, corpus, now_ms=last + DAY_MS - 1,
+                  argv=["daily_job.py", "--backfill"])
+        assert last not in self._days(db_path), "one ms early: not yet eligible"
+        self._run(monkeypatch, db_path, corpus, now_ms=last + DAY_MS)
+        assert last in self._days(db_path), "exactly at the boundary: eligible"
+
+    def test_F104_month_boundary_sequence_sep30_oct1_oct2(self, monkeypatch, db_path):
+        """The sequence this fix exists for. The boundary stops being a
+        catch-up case at all: Sep 30 is collected on Oct 1 from the September
+        partition, which already exists."""
+        first = _day(2026, 9, 20)
+        corpus_sep = _corpus_from(first, 11)
+        corpus_oct = _corpus_from(first, 13)
+
+        self._run(monkeypatch, db_path, corpus_sep,
+                  now_ms=_day(2026, 9, 30) + 5 * 60_000,
+                  argv=["daily_job.py", "--backfill"])
+        assert self._days(db_path)[-1] == _day(2026, 9, 29)
+
+        self._run(monkeypatch, db_path, corpus_sep,
+                  now_ms=_day(2026, 10, 1) + 5 * 60_000)
+        assert self._days(db_path)[-1] == _day(2026, 9, 30), "Sep 30 collected on Oct 1"
+
+        self._run(monkeypatch, db_path, corpus_oct,
+                  now_ms=_day(2026, 10, 2) + 5 * 60_000)
+        days = self._days(db_path)
+        assert _day(2026, 10, 1) in days, "Oct 1 must be collected"
+        assert _day(2026, 10, 2) not in days, "Oct 2 is still incomplete"
+        assert days == [first + i * DAY_MS for i in range(12)], "no gaps, in order"
+
+    def test_F105_multi_day_catch_up_still_works(self, monkeypatch, db_path):
+        """660c645's catch-up composes with the completeness filter."""
+        first = _day(2026, 9, 1)
+        corpus = _corpus_from(first, 15)
+        self._run(monkeypatch, db_path, corpus,
+                  now_ms=first + 5 * DAY_MS + 5 * 60_000,
+                  argv=["daily_job.py", "--backfill"])
+        assert self._days(db_path) == [first + i * DAY_MS for i in range(5)]
+        self._run(monkeypatch, db_path, corpus,
+                  now_ms=first + 11 * DAY_MS + 5 * 60_000)
+        assert self._days(db_path) == [first + i * DAY_MS for i in range(11)]
+
+    def test_F106_no_duplicate_processing(self, monkeypatch, db_path):
+        first = _day(2026, 9, 1)
+        corpus = _corpus_from(first, 8)
+        now = first + 7 * DAY_MS + 5 * 60_000
+        self._run(monkeypatch, db_path, corpus, now_ms=now,
+                  argv=["daily_job.py", "--backfill"])
+        before = self._days(db_path)
+        self._run(monkeypatch, db_path, corpus, now_ms=now)
+        self._run(monkeypatch, db_path, corpus, now_ms=now)
+        assert self._days(db_path) == before
+        con = sqlite3.connect(db_path)
+        dups = con.execute(
+            "SELECT COUNT(*) FROM (SELECT day_ts FROM corpus_daily "
+            "GROUP BY day_ts HAVING COUNT(*)>1)").fetchone()[0]
+        con.close()
+        assert dups == 0
+
+    def test_F107_fresh_db_takes_the_newest_completed_day(self, monkeypatch, db_path):
+        first = _day(2026, 9, 1)
+        corpus = _corpus_from(first, 10)
+        today = first + 9 * DAY_MS
+        self._run(monkeypatch, db_path, corpus, now_ms=today + 5 * 60_000)
+        assert self._days(db_path) == [today - DAY_MS], "one day, and not the incomplete one"
+
+    def test_F108_recovered_day_uses_its_completed_day_close(self, monkeypatch, db_path):
+        """The point of the fix: a day is stored with its true close.
+
+        The incomplete build carries a deliberately wrong close for the day in
+        question; the completed build carries the right one.
+        """
+        first = _day(2026, 9, 1)
+        target = first + 5 * DAY_MS
+
+        partial = _corpus_from(first, 6)
+        partial.loc[partial.index[-1], "spot_close"] = 11111.0
+        completed = _corpus_from(first, 7)
+        completed.loc[completed["day_ts"] == target, "spot_close"] = 99999.0
+
+        self._run(monkeypatch, db_path, partial, now_ms=target + 5 * 60_000,
+                  argv=["daily_job.py", "--backfill"])
+        assert target not in self._days(db_path), "the 00:05 tick must not be stored"
+
+        self._run(monkeypatch, db_path, completed,
+                  now_ms=target + DAY_MS + 5 * 60_000)
+        con = sqlite3.connect(db_path)
+        stored = con.execute("SELECT spot_close FROM corpus_daily WHERE day_ts=?",
+                             (target,)).fetchone()[0]
+        con.close()
+        assert stored == 99999.0, "must be the completed-day close, not the 00:05 tick"
+
+    def test_F109_no_new_data_row_names_the_newest_complete_day(self, monkeypatch, db_path):
+        """The no_new_data row must not name a day the job declined to process."""
+        first = _day(2026, 9, 1)
+        corpus = _corpus_from(first, 6)
+        now = first + 5 * DAY_MS + 5 * 60_000
+        self._run(monkeypatch, db_path, corpus, now_ms=now,
+                  argv=["daily_job.py", "--backfill"])
+        self._run(monkeypatch, db_path, corpus, now_ms=now)
+        con = sqlite3.connect(db_path)
+        row = con.execute(
+            "SELECT data_day_ts, status FROM run_log ORDER BY run_ts DESC LIMIT 1"
+        ).fetchone()
+        con.close()
+        assert row[1] == "no_new_data"
+        assert row[0] == first + 4 * DAY_MS, "newest COMPLETE day, not the incomplete one"
+
+    def test_F110_historical_evidence_is_never_rewritten(self, monkeypatch, db_path):
+        """A day already stored keeps its recorded value. The fix is
+        forward-only; recorded evidence is immutable."""
+        first = _day(2026, 9, 1)
+        target = first + 3 * DAY_MS
+        c1 = _corpus_from(first, 5)
+        c1.loc[c1["day_ts"] == target, "spot_close"] = 42424.0
+        now = first + 4 * DAY_MS + 5 * 60_000
+        self._run(monkeypatch, db_path, c1, now_ms=now,
+                  argv=["daily_job.py", "--backfill"])
+
+        c2 = _corpus_from(first, 6)
+        c2.loc[c2["day_ts"] == target, "spot_close"] = 55555.0
+        self._run(monkeypatch, db_path, c2, now_ms=now + DAY_MS)
+        con = sqlite3.connect(db_path)
+        stored = con.execute("SELECT spot_close FROM corpus_daily WHERE day_ts=?",
+                             (target,)).fetchone()[0]
+        con.close()
+        assert stored == 42424.0, "recorded evidence is immutable; no rewrite"
