@@ -315,8 +315,27 @@ def load_oi(db_path, instrument_id: int | None = None,
     return obs, cadence
 
 
+def _partition_availability_window(spec: SourceSpec, year: int, month: int
+                                   ) -> tuple[datetime, datetime]:
+    """`[start, end)` of `available_ts` reachable from one monthly partition.
+
+    Derivable only because every lake source declares `availability_field=None`
+    and a structural `availability_offset_s`: availability is then event time
+    plus a constant, so a partition's event month maps to a known availability
+    interval. A source that recorded its own arrival column could place a row
+    anywhere and is deliberately not pruned (see `load_lake_source`).
+    """
+    start_event = datetime(year, month, 1, tzinfo=timezone.utc)
+    end_event = datetime(year + (month == 12), (month % 12) + 1, 1,
+                         tzinfo=timezone.utc)
+    off = timedelta(seconds=spec.availability_offset_s)
+    return start_event + off, end_event + off
+
+
 def load_lake_source(source: str, base_dir=None,
-                     payload_fields: Sequence[str] = ()) -> list[Observation]:
+                     payload_fields: Sequence[str] = (),
+                     lo: datetime | None = None,
+                     hi: datetime | None = None) -> list[Observation]:
     """Load a Parquet-lake source, one partition at a time, with provenance.
 
     Read partition-by-partition rather than through one merged DuckDB view.
@@ -326,16 +345,42 @@ def load_lake_source(source: str, base_dir=None,
     Nones is not reproducible. Reading per partition attaches the dataset,
     symbol, year, month and the manifest's `parquet_sha256` to every row, which
     is the hook that lets a stored feature be traced back to an exact file.
+
+    `lo`/`hi` bound `available_ts` INCLUSIVELY, the same convention
+    `option_panel.load_panel` uses for its own window, and the same field this
+    function already sorts by and that as-of matching consumes. Both default to
+    None, which reads everything exactly as before.
+
+    The bound is a partition filter first and a row filter second. Unbounded,
+    this reads every partition of the source: for `spot_1m` that is 69
+    partitions and ~104 MB of 1m bars since 2021, materialised as Observations
+    -- fine for an offline sweep, not for a caller that needs one recent bar.
+    Pruning is what makes a windowed read proportional to the window rather
+    than to the corpus.
+
+    Pruning is skipped for any source that records its own arrival column,
+    because then availability cannot be derived from the partition's month; row
+    filtering still applies, so the result is identical either way.
     """
     spec = get_spec(source)
     if spec.store != "parquet_lake":
         raise ValueError(f"{source} is not a lake source")
+    if lo is not None and hi is not None and lo > hi:
+        raise ValueError(f"{source}: lo {lo.isoformat()} is after hi {hi.isoformat()}")
     from storage import lake  # noqa: PLC0415 -- optional heavy dep, lake-only path
 
     dataset, symbol = spec.table.split("/", 1)
     base = pathlib.Path(base_dir) if base_dir else (_RESEARCH_ROOT / "data" / "raw")
+    prunable = spec.availability_field is None and (lo is not None or hi is not None)
     out: list[Observation] = []
     for part in lake.list_partitions(base, dataset, symbol):
+        if prunable:
+            p_start, p_end = _partition_availability_window(
+                spec, int(part["year"]), int(part["month"]))
+            if lo is not None and p_end <= lo:
+                continue
+            if hi is not None and p_start > hi:
+                continue
         manifest_path = part["path"].parent / "_manifest.json"
         sha = None
         if manifest_path.exists():
@@ -350,6 +395,10 @@ def load_lake_source(source: str, base_dir=None,
         for row in frame[keep].to_dict("records"):
             avail = availability_time(row, spec)
             if avail is None:
+                continue
+            if lo is not None and avail < lo:
+                continue
+            if hi is not None and avail > hi:
                 continue
             out.append(Observation(
                 source=spec.name, event_ts=event_time(row, spec),
