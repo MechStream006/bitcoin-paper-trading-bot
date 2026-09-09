@@ -1,4 +1,4 @@
-# H6 F1 — Partial-Day `spot_close` Provenance Record (2026-06-16 → fix deployment)
+# H6 F1 — Partial-Day `spot_close` Provenance Record (2026-06-16 → 2026-09-09)
 
 **Read this before treating any historical h6 `corpus_daily.spot_close` as a
 completed-day close, or before computing continuity, returns or regime
@@ -11,9 +11,9 @@ observation is rewritten, recomputed or backfilled.**
 
 ## 1. What the stored values actually are
 
-For every h6 day from **2026-06-16** through the deployment of the F1 fix, the
-stored `corpus_daily.spot_close` is the **00:05 UTC intraday tick of that day**,
-not the day's close. The whole OHLCV row for the day is partial for the same
+For every h6 day from **2026-06-16 through 2026-09-09 inclusive**, the stored
+`corpus_daily.spot_close` is the **00:05 UTC intraday tick of that day**, not
+the day's close. The whole OHLCV row for the day is partial for the same
 reason.
 
 `daily_job` ran at 00:05 UTC and processed `corpus.iloc[-1]`, which at that
@@ -32,8 +32,10 @@ The practical effect is a **systematic ~1-day lag, not random noise**:
 | Largest observed difference | **$3,892** (2026-09-03: stored 77,377.66 vs true 81,270.37) |
 | Example of the lag | stored 2026-09-09 = 78,563.12 vs lake 2026-09-08 = 78,455.80 |
 
-Last day known to be collected under the old behaviour at the time of writing:
-**2026-09-09**. The interval closes on the day the fix is deployed.
+The interval is now closed. The F1 fix was deployed on **2026-09-09 at 11:15
+UTC** (commit `002eee6`), after that day's 00:05 collection, so **2026-09-09 is
+the last day stored under the old behaviour**. Every day stored from
+2026-09-10 onward is a completed-day close.
 
 ## 2. Why this is a defect and not a definition
 
@@ -90,7 +92,9 @@ for the funding analogue of the same 00:05 mechanism — at 00:05 a day has one
   of h6 closes, returns or regime continuity spanning this interval must carry
   the ~1-day lag explicitly.
 - Days collected **after** the fix are completed-day closes. The series
-  therefore changes convention once, at the deployment date, and that boundary
-  is this record.
+  changes convention exactly once, between 2026-09-09 and 2026-09-10, and that
+  boundary is this record. Note the one-off consequence: because 2026-09-09 was
+  already stored under the old behaviour, the 2026-09-10 run collects nothing,
+  and from 2026-09-11 each day D is collected on D+1. No day is skipped.
 - h6 has **0 trade entries and 0 exits** over the whole interval, so no h6
   outcome, label or promotion statistic depends on these values.
