@@ -452,10 +452,34 @@ def main() -> None:
     if args.backfill:
         to_process = [i for i in range(len(corpus))
                       if int(corpus["day_ts"].iloc[i]) not in already]
+    elif not already:
+        # Fresh DB in daily mode: unchanged behaviour, one day. Seeding a whole
+        # history is --backfill's job and must stay an explicit choice.
+        to_process = [len(corpus) - 1]
     else:
-        # Daily: only the most recent day
-        last_ts = int(corpus["day_ts"].iloc[-1])
-        to_process = [] if last_ts in already else [len(corpus) - 1]
+        # Daily: every unprocessed corpus day ABOVE the high-water mark.
+        #
+        # This previously took only `corpus.iloc[-1]`, so a day absent from the
+        # lake at run time was skipped PERMANENTLY -- the next run advanced to
+        # a newer day and never looked back. `daily_ingest` writes only the
+        # current month, so at 00:05 UTC on the 1st the new month's partition
+        # has no bar yet: the corpus still ends on the last day of the previous
+        # month, the run correctly records `no_new_data`, and by the next run
+        # day 1 is no longer `iloc[-1]`. It is then never processed.
+        #
+        # That silently cost one row per month from a registered edge
+        # candidate -- 2026-07-01, 2026-08-01 and 2026-09-01. The `no_new_data`
+        # row added earlier made the no-op VISIBLE but did not stop the skip,
+        # which is why it recurred on 09-01 after being predicted.
+        #
+        # Deliberately bounded to days above the high-water mark: this heals
+        # gaps opening from here on WITHOUT retroactively reprocessing ones
+        # already below it. Reprocessing history stays --backfill's job and a
+        # separate decision, so deploying this changes no recorded evidence.
+        high_water = max(already)
+        to_process = [i for i in range(len(corpus))
+                      if int(corpus["day_ts"].iloc[i]) > high_water
+                      and int(corpus["day_ts"].iloc[i]) not in already]
 
     if not to_process:
         print("  Nothing new to process. DB is up to date.")
