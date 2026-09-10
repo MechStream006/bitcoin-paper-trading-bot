@@ -67,7 +67,12 @@ from execution_evidence.completed_trades import (  # noqa: E402
     CompletedTrade, build_dataset, connect_ro, has_table,
 )
 
-DEFAULT_DB = _HERE / "decision_outcomes.db"
+# Runtime data, and NOT the governed store this module already refuses to
+# touch (see the module docstring). Relocated out of this package directory
+# into research/data/ so the production systemd sandbox (ProtectSystem=strict;
+# ReadWritePaths grants research/data, not this tree) can create and write it,
+# alongside decision_features.db.
+DEFAULT_DB = _RESEARCH_ROOT / "data" / "decision_outcomes.db"
 SCHEMA_VERSION = 1
 
 COMPLETED = "COMPLETED"

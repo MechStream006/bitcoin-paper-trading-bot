@@ -135,6 +135,10 @@ def runtime_health(settings) -> dict:
             check_name="dataset_builder_backup", required=False,
         ),
         hc.check_execution_status(db_path.parent),
+        # `.capture-status.json` lives alongside `.execution-status.json` in the
+        # trading DB's directory -- no new ApiSettings field, and the CLI and
+        # this API surface must not diverge on capture health.
+        hc.check_capture_status(db_path.parent),
         hc.check_offhost_freshness(settings.backup_dir, check_name="offhost_backup"),
         hc.check_offhost_freshness(
             settings.ledger_backup_dir, check_name="ledger_offhost_backup"

@@ -423,6 +423,131 @@ def test_offhost_label_isolation_uses_own_directory(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# check_capture_status() -- decision-feature capture observability
+#
+# The capture on an ACKED live entry is best-effort for trading: a failure
+# logs a warning and the order stays live, so a capture that silently writes
+# zero research rows looks identical to "no live entry happened" (INC-0005 /
+# CLAUDE.md §21). `.capture-status.json` is that missing surface.
+# ---------------------------------------------------------------------------
+
+
+def _write_capture_status(
+    data_dir: Path,
+    *,
+    status: str = "ok",
+    detail: str = "",
+    age_hours: float = 0.0,
+    client_order_id: str = "g3_momentum_tsmom-20260909-buy-1",
+) -> Path:
+    """Write a `.capture-status.json` matching strategy_jobs._write_capture_status()."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    attempted = datetime.now(timezone.utc) - timedelta(hours=age_hours)
+    payload = {
+        "schema": "btcbot-capture-status/1",
+        "attempted_at": attempted.isoformat(),
+        "client_order_id": client_order_id,
+        "status": status,
+        "detail": detail,
+    }
+    f = data_dir / hc.CAPTURE_STATUS_FILENAME
+    f.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return f
+
+
+def test_capture_absent_sidecar_is_info(tmp_path: Path):
+    result = hc.check_capture_status(tmp_path / "data")
+    assert result.severity == hc.INFO
+    assert "has not run" in result.message
+
+
+def test_capture_successful_attempt_is_ok(tmp_path: Path):
+    _write_capture_status(tmp_path, status="ok")
+    result = hc.check_capture_status(tmp_path)
+    assert result.severity == hc.OK
+    assert "OK" in result.message
+    assert result.detail["status"] == "ok"
+
+
+def test_capture_failed_attempt_is_warning_with_detail(tmp_path: Path):
+    _write_capture_status(
+        tmp_path, status="failed",
+        detail="OperationalError: attempt to write a readonly database")
+    result = hc.check_capture_status(tmp_path)
+    assert result.severity == hc.WARNING
+    assert "FAILED" in result.message
+    assert "readonly database" in result.message
+
+
+def test_capture_old_failure_is_still_only_warning_and_shows_its_age(tmp_path: Path):
+    """No age-based escalation -- capture attempts are event-driven, so a
+    stale failure is a WARNING, never a CRITICAL. But the age must be visible
+    so an operator can tell it from a fresh one."""
+    _write_capture_status(tmp_path, status="failed", detail="boom", age_hours=24 * 30)
+    result = hc.check_capture_status(tmp_path)
+    assert result.severity == hc.WARNING
+    assert "720h ago" in result.message
+    assert result.detail["age_hours"] == 720.0
+
+
+def test_capture_success_after_failure_reads_as_ok(tmp_path: Path):
+    """Last attempt wins: a success overwrites the prior failure in place."""
+    _write_capture_status(tmp_path, status="failed", detail="boom", age_hours=2)
+    assert hc.check_capture_status(tmp_path).severity == hc.WARNING
+    _write_capture_status(tmp_path, status="ok")
+    assert hc.check_capture_status(tmp_path).severity == hc.OK
+
+
+def test_capture_malformed_sidecar_is_warning(tmp_path: Path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / hc.CAPTURE_STATUS_FILENAME).write_text("{not json", encoding="utf-8")
+    result = hc.check_capture_status(tmp_path)
+    assert result.severity == hc.WARNING
+    assert "unreadable" in result.message
+
+
+def test_capture_unrecognised_status_is_warning(tmp_path: Path):
+    _write_capture_status(tmp_path, status="weird")
+    assert hc.check_capture_status(tmp_path).severity == hc.WARNING
+
+
+def test_capture_check_is_registered_in_the_cli(tmp_path: Path):
+    import inspect
+
+    assert "check_capture_status" in inspect.getsource(hc.main)
+
+
+def test_runtime_health_includes_capture_check(tmp_path: Path):
+    """CLI/API parity: the capture check must reach the read-only API too."""
+    from src.api.config import ApiSettings
+    from src.api import services
+
+    _write_capture_status(tmp_path, status="ok")
+
+    settings = ApiSettings(
+        host="127.0.0.1",
+        port=9109,
+        token="t" * 40,
+        trading_db_path=tmp_path / "btc_trading.db",
+        forward_db_path=tmp_path / "evidence_forward.db",
+        ledger_db_path=tmp_path / "ledger.db",
+        registry_path=tmp_path / "registry.yaml",
+        thresholds_path=tmp_path / "thresholds.yaml",
+        backup_dir=tmp_path / "backups",
+        ledger_backup_dir=tmp_path / "ledger-backups",
+        label_store_backup_dir=tmp_path / "label-store-backups",
+        dataset_builder_backup_dir=tmp_path / "dataset-builder-backups",
+        feature_store_backup_dir=tmp_path / "feature-store-backups",
+        service_name="btcbot.service",
+        log_level="INFO",
+        cache_ttl_seconds=0.0,
+    )
+
+    names = [c["name"] for c in services.runtime_health(settings)["checks"]]
+    assert "capture" in names
+
+
+# ---------------------------------------------------------------------------
 # Feature Store backup freshness -- operational-defect fix
 #
 # The Feature Store had no backup path at all, so it also had no freshness

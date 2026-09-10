@@ -10,6 +10,7 @@ ADR-0003 that instant -- not the wall-clock day -- is what the live path keys on
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import sqlite3
 import sys
@@ -734,6 +735,86 @@ class TestDecisionFeatureCapture:
                             lambda *a, **k: seen.append(k) or True)
         run_entry(forward_db(tmp_path), conn, executor=FakeExecutor(record_to=conn))
         assert len(seen) == 1
+
+
+class TestCaptureStatusSidecar:
+    """`.capture-status.json` makes a silent capture failure observable.
+
+    The capture is best-effort for trading; without this sidecar a capture
+    that writes zero research rows is indistinguishable from "no live entry
+    occurred" (INC-0005 / CLAUDE.md §21). It follows the `.execution-status.json`
+    precedent: written by the job module, read out-of-process by
+    `scripts/healthcheck.py`, last attempt wins.
+    """
+
+    def _status(self, tmp_path):
+        p = tmp_path / SJ.CAPTURE_STATUS_FILENAME
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+    def test_a_successful_capture_writes_an_ok_record(self, tmp_path, conn, monkeypatch):
+        monkeypatch.setattr(bridge, "capture_decision_features",
+                            lambda *a, **k: True)
+        r = run_entry(forward_db(tmp_path), conn,
+                      executor=FakeExecutor(record_to=conn))
+        assert r.outcome == SJ.SUBMITTED
+        s = self._status(tmp_path)
+        assert s["status"] == "ok" and s["detail"] == ""
+        assert s["client_order_id"] == r.intent.client_order_id
+        assert s["attempted_at"] == NOW.isoformat()
+
+    def test_a_failed_capture_writes_a_failed_record_with_detail(
+            self, tmp_path, conn, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("feature store unreachable")
+
+        monkeypatch.setattr(bridge, "capture_decision_features", boom)
+        r = run_entry(forward_db(tmp_path), conn,
+                      executor=FakeExecutor(record_to=conn))
+        assert r.outcome == SJ.SUBMITTED and r.submitted is True
+        s = self._status(tmp_path)
+        assert s["status"] == "failed"
+        assert "feature store unreachable" in s["detail"]
+
+    def test_success_overwrites_a_prior_failure_in_place(self, tmp_path, conn):
+        SJ._write_capture_status(conn, "coid-1", ok=False, detail="boom",
+                                 attempted_at=NOW)
+        assert self._status(tmp_path)["status"] == "failed"
+        SJ._write_capture_status(conn, "coid-1", ok=True, detail="",
+                                 attempted_at=NOW)
+        s = self._status(tmp_path)
+        assert s["status"] == "ok"
+        assert list((tmp_path).glob(".capture-status.json*")) == [
+            tmp_path / SJ.CAPTURE_STATUS_FILENAME], "no stale temp file left"
+
+    def test_sidecar_write_failure_cannot_alter_the_trading_result(
+            self, tmp_path, conn, monkeypatch, caplog):
+        """The order is already live. A broken status write must not turn a
+        filled order into a reported failure."""
+        import logging
+
+        monkeypatch.setattr(bridge, "capture_decision_features",
+                            lambda *a, **k: True)
+        monkeypatch.setattr(SJ.json, "dumps",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+        with caplog.at_level(logging.WARNING):
+            r = run_entry(forward_db(tmp_path), conn,
+                          executor=FakeExecutor(record_to=conn))
+        assert r.outcome == SJ.SUBMITTED and r.submitted is True
+        assert storage.list_mirrors(conn)[0]["state"] == "ENTERED"
+        assert self._status(tmp_path) is None
+        assert any("could not write capture status" in m for m in caplog.messages)
+
+    def test_no_sidecar_when_capture_is_never_attempted(self, tmp_path, conn,
+                                                        monkeypatch):
+        """DRY_RUN stops before the ACKED path, so nothing is written."""
+        calls = []
+        monkeypatch.setattr(bridge, "capture_decision_features",
+                            lambda *a, **k: calls.append(1) or True)
+        r = run_entry(forward_db(tmp_path), conn, executor=FakeExecutor(),
+                      dry_run=True)
+        assert r.outcome == SJ.DRY_RUN
+        assert calls == []
+        assert self._status(tmp_path) is None
 
 
 class TestCaptureUsesTheExistingContract:

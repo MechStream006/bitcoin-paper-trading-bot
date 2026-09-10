@@ -169,6 +169,20 @@ class TestLabelContract:
         assert "label_specifications" not in src
         assert "label_store.db" not in src
 
+    def test_default_db_resolves_under_research_data(self):
+        """Relocated to research/data/ -- the subtree the production systemd
+        sandbox (ProtectSystem=strict) grants write access to -- alongside
+        decision_features.db."""
+        resolved = OS.DEFAULT_DB.resolve()
+        assert resolved.name == "decision_outcomes.db"
+        assert resolved.parent == (_RESEARCH / "data").resolve()
+        assert resolved.parent.is_dir(), "research/data/ must already exist"
+
+    def test_default_db_is_not_under_the_governed_store_directory(self):
+        parts = OS.DEFAULT_DB.resolve().parts
+        assert "label_store" not in parts
+        assert "feature_store" not in parts
+
 
 class TestCompletedTrade:
     def test_completed_label_carries_the_outcome(self, trading, store):

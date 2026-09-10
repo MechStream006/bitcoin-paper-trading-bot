@@ -106,6 +106,22 @@ class TestSchemaAndIsolation:
     def test_default_db_is_a_separate_file(self):
         assert DS.DEFAULT_DB.name == "decision_features.db"
 
+    def test_default_db_resolves_under_research_data(self):
+        """Relocated to research/data/ -- the one subtree the production
+        systemd sandbox (ProtectSystem=strict) grants write access to, next to
+        the other live research SQLite stores."""
+        resolved = DS.DEFAULT_DB.resolve()
+        assert resolved.parent == (_RESEARCH / "data").resolve()
+        assert resolved.parent.is_dir(), "research/data/ must already exist"
+
+    def test_default_db_is_not_under_the_governed_store_directory(self):
+        """The governed feature store lives in research/feature_store/; a
+        default that resolved there would put the live order path one widened
+        ReadWritePaths grant away from write access to it."""
+        parts = DS.DEFAULT_DB.resolve().parts
+        assert "feature_store" not in parts
+        assert "label_store" not in parts
+
     def test_no_import_from_src(self):
         src = (_RESEARCH / "feature_store" / "decision_store.py").read_text(
             encoding="utf-8")

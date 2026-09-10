@@ -71,7 +71,13 @@ from alignment.features import (  # noqa: E402
 )
 from alignment.timebase import to_utc  # noqa: E402
 
-DEFAULT_DB = _HERE / "decision_features.db"
+# Runtime data, and NOT the governed store this module already refuses to
+# touch (see the module docstring). Relocated out of this package directory
+# into research/data/ so the production systemd sandbox (ProtectSystem=strict;
+# ReadWritePaths grants research/data, not this tree) can create and write it.
+# research/data/ already holds the other live research SQLite stores
+# (evidence_forward.db, forward_evidence.db).
+DEFAULT_DB = _RESEARCH_ROOT / "data" / "decision_features.db"
 
 SCHEMA_VERSION = 1
 

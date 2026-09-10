@@ -77,7 +77,9 @@ is established by the reconciliation pass, exactly as before.
 """
 from __future__ import annotations
 
+import json
 import logging
+import pathlib
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -91,6 +93,13 @@ from src.strategies import bridge
 log = logging.getLogger(__name__)
 
 STRATEGY_JOB_ID = "strategy_evaluate"
+
+#: Sidecar recording the outcome of the most recent decision-feature capture
+#: attempt, written into the trading DB's directory (data/, which is inside the
+#: production systemd ReadWritePaths). Read out-of-process by
+#: scripts/healthcheck.py, following the `.execution-status.json` /
+#: `.offhost-status.json` precedent.
+CAPTURE_STATUS_FILENAME = ".capture-status.json"
 
 #: Evaluation cadence. The signal changes at most once a UTC day (run_daily
 #: writes it at 01:00 UTC), so this only has to be short enough to pick the day
@@ -355,12 +364,18 @@ def evaluate_once(
     #
     # Best-effort on the same terms as the capture above, and for the same
     # reason: the order is already live.
+    capture_ok = False
+    capture_detail = ""
     try:
         bridge.capture_decision_features(
             conn, intent.client_order_id, forward_db_path, decision_ts=now)
+        capture_ok = True
     except Exception as exc:  # noqa: BLE001
-        log.warning("[strategy] decision features not captured for %s: %s: %s",
-                    intent.client_order_id, type(exc).__name__, exc)
+        capture_detail = f"{type(exc).__name__}: {exc}"
+        log.warning("[strategy] decision features not captured for %s: %s",
+                    intent.client_order_id, capture_detail)
+    _write_capture_status(conn, intent.client_order_id, ok=capture_ok,
+                          detail=capture_detail, attempted_at=now)
 
     return EvaluationResult(SUBMITTED, "submitted", intent, decision,
                             submitted=True, order_state=state)
@@ -382,6 +397,49 @@ def _release(conn, forward_entry_id: int) -> None:
     except Exception as exc:  # noqa: BLE001 -- never raise into the scheduler
         log.warning("[strategy] could not release claim %s: %s: %s",
                     forward_entry_id, type(exc).__name__, exc)
+
+
+def _write_capture_status(conn, client_order_id: str, *, ok: bool,
+                          detail: str, attempted_at: datetime) -> None:
+    """Record the outcome of one decision-feature capture attempt.
+
+    The capture is best-effort for trading -- a failure logs a warning and the
+    ACKED order stays live -- which means a capture that silently writes zero
+    research rows is indistinguishable from "no live entry occurred". This
+    sidecar is the missing surface, mirroring `write_execution_status` in
+    `execution/reconciliation_jobs.py`: the status writer lives in the job
+    module, never in the pure helper it observes.
+
+    Last attempt wins. A success overwrites a prior failure in place, so a
+    reader never has to reconcile a history -- the file is the state of the
+    most recent attempt and nothing else. `attempted_at` is carried so an old
+    failure that nothing has retried is distinguishable from a fresh one.
+
+    Best-effort by construction, on the same terms as the capture itself:
+    every exception is swallowed and logged. A status-write failure must never
+    turn a filled order into a reported failure. The directory is derived from
+    the trading connection; if it cannot be, the write is skipped silently.
+    """
+    try:
+        db_file = conn.execute("PRAGMA database_list").fetchone()[2]
+        if not db_file:
+            return
+        data_dir = pathlib.Path(db_file).resolve().parent
+        payload = {
+            "schema": "btcbot-capture-status/1",
+            "attempted_at": attempted_at.isoformat(),
+            "client_order_id": str(client_order_id),
+            "status": "ok" if ok else "failed",
+            "detail": "" if ok else str(detail),
+        }
+        data_dir.mkdir(parents=True, exist_ok=True)
+        path = data_dir / CAPTURE_STATUS_FILENAME
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:  # noqa: BLE001 -- never disturb the trading pass
+        log.warning("[strategy] could not write capture status for %s: %s: %s",
+                    client_order_id, type(exc).__name__, exc)
 
 
 def _record_expired(conn, entries, considered, now, service_started_at) -> None:

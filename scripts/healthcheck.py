@@ -724,6 +724,82 @@ def check_execution_status(
     return CheckResult(check_name, OK, "execution permitted, reconciler clean", detail)
 
 
+CAPTURE_STATUS_FILENAME = ".capture-status.json"
+
+
+def check_capture_status(
+    data_dir: Path, check_name: str = "capture"
+) -> CheckResult:
+    """Decision-feature capture health, from the strategy job's sidecar.
+
+    `strategy_jobs.py` writes `.capture-status.json` after every
+    decision-feature capture attempt on an ACKED live entry. That capture is
+    best-effort for trading -- a failure logs a warning and the order stays
+    live -- so without this surface a capture that silently writes zero
+    research rows is indistinguishable from "no live entry occurred", the
+    INC-0005 / §21 failure class. This is that surface, following the
+    `.execution-status.json` precedent.
+
+    INFO when absent: capture runs only on an ACKED live entry, which never
+    happens under DRY_RUN or before the strategy is armed, so a host that has
+    taken no live entry must not generate alert noise.
+
+    Age is displayed, never escalated on. Capture attempts are event-driven
+    (roughly one per mirrored forward entry), so silence is normal; the
+    timestamp only lets an operator tell an old failure nothing has retried
+    from a fresh one.
+    """
+    status_file = data_dir / CAPTURE_STATUS_FILENAME
+    if not status_file.exists():
+        return CheckResult(
+            check_name, INFO,
+            "decision-feature capture has not run (no ACKED live entry yet)", {},
+        )
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            check_name, WARNING, f"capture status unreadable: {exc}", {}
+        )
+
+    status = payload.get("status")
+    attempted_at = payload.get("attempted_at")
+    detail = {
+        "status": status,
+        "attempted_at": attempted_at,
+        "client_order_id": payload.get("client_order_id"),
+        "capture_detail": payload.get("detail") or "",
+    }
+
+    age_txt = "at an unrecorded time"
+    try:
+        reported = datetime.fromisoformat(str(attempted_at))
+        if reported.tzinfo is None:
+            reported = reported.replace(tzinfo=timezone.utc)
+        age_sec = (datetime.now(timezone.utc) - reported).total_seconds()
+        detail["age_hours"] = round(age_sec / 3600, 1)
+        age_txt = (f"{age_sec / 3600:.0f}h ago" if age_sec >= 3600
+                   else f"{age_sec / 60:.0f} min ago")
+    except (TypeError, ValueError):
+        pass
+
+    if status == "failed":
+        return CheckResult(
+            check_name, WARNING,
+            f"decision-feature capture FAILED ({age_txt}): "
+            f"{detail['capture_detail'] or 'no detail recorded'}", detail,
+        )
+    if status == "ok":
+        return CheckResult(
+            check_name, OK,
+            f"decision-feature capture OK (last attempt {age_txt})", detail,
+        )
+    return CheckResult(
+        check_name, WARNING,
+        f"capture status has an unrecognised status: {status!r}", detail,
+    )
+
+
 def check_integrity(db_path: Path) -> CheckResult:
     if not db_path.exists():
         return CheckResult(
@@ -1149,6 +1225,7 @@ def main() -> int:
             check_name="feature_store_backup", required=False,
         ),
         check_execution_status(db_path.parent),
+        check_capture_status(db_path.parent),
         check_offhost_freshness(backup_dir, check_name="offhost_backup"),
         check_offhost_freshness(
             args.ledger_backup_dir, check_name="ledger_offhost_backup"
