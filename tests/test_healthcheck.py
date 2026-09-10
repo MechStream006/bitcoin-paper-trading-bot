@@ -548,6 +548,102 @@ def test_runtime_health_includes_capture_check(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# check_outcome_status() -- execution-outcome sweep observability
+# ---------------------------------------------------------------------------
+
+
+def _write_outcome_status(data_dir: Path, *, status: str = "ok", detail: str = "",
+                          anomalies=None, persisted: int = 0, pending: int = 0,
+                          age_hours: float = 0.0) -> Path:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc) - timedelta(hours=age_hours)
+    payload = {
+        "schema": "btcbot-outcome-status/1",
+        "ts": ts.isoformat(),
+        "status": status,
+        "detail": detail,
+        "persisted": persisted,
+        "pending": pending,
+        "anomalies": anomalies or [],
+    }
+    f = data_dir / hc.OUTCOME_STATUS_FILENAME
+    f.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return f
+
+
+def test_outcome_absent_sidecar_is_info(tmp_path: Path):
+    result = hc.check_outcome_status(tmp_path / "data")
+    assert result.severity == hc.INFO
+    assert "not armed" in result.message
+
+
+def test_outcome_clean_sweep_is_ok(tmp_path: Path):
+    _write_outcome_status(tmp_path, status="ok", persisted=2, pending=1)
+    result = hc.check_outcome_status(tmp_path)
+    assert result.severity == hc.OK
+    assert "persisted 2" in result.message
+
+
+def test_outcome_failed_sweep_is_warning(tmp_path: Path):
+    _write_outcome_status(tmp_path, status="failed",
+                          detail="OperationalError: disk I/O error")
+    result = hc.check_outcome_status(tmp_path)
+    assert result.severity == hc.WARNING
+    assert "FAILED" in result.message and "disk I/O error" in result.message
+
+
+def test_outcome_anomalies_are_warning_even_when_status_ok(tmp_path: Path):
+    _write_outcome_status(
+        tmp_path, status="ok",
+        anomalies=["g3-x: build_labels returned NO_TRADE but an order is FILLED"])
+    result = hc.check_outcome_status(tmp_path)
+    assert result.severity == hc.WARNING
+    assert "1 anomaly" in result.message
+
+
+def test_outcome_old_failure_is_still_only_warning_and_shows_age(tmp_path: Path):
+    _write_outcome_status(tmp_path, status="failed", detail="boom",
+                          age_hours=24 * 14)
+    result = hc.check_outcome_status(tmp_path)
+    assert result.severity == hc.WARNING
+    assert "336h ago" in result.message
+
+
+def test_outcome_malformed_sidecar_is_warning(tmp_path: Path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / hc.OUTCOME_STATUS_FILENAME).write_text("{bad", encoding="utf-8")
+    assert hc.check_outcome_status(tmp_path).severity == hc.WARNING
+
+
+def test_outcome_check_is_registered_in_the_cli(tmp_path: Path):
+    import inspect
+    assert "check_outcome_status" in inspect.getsource(hc.main)
+
+
+def test_runtime_health_includes_outcome_check(tmp_path: Path):
+    from src.api.config import ApiSettings
+    from src.api import services
+
+    _write_outcome_status(tmp_path, status="ok")
+    settings = ApiSettings(
+        host="127.0.0.1", port=9109, token="t" * 40,
+        trading_db_path=tmp_path / "btc_trading.db",
+        forward_db_path=tmp_path / "evidence_forward.db",
+        ledger_db_path=tmp_path / "ledger.db",
+        registry_path=tmp_path / "registry.yaml",
+        thresholds_path=tmp_path / "thresholds.yaml",
+        backup_dir=tmp_path / "backups",
+        ledger_backup_dir=tmp_path / "ledger-backups",
+        label_store_backup_dir=tmp_path / "label-store-backups",
+        dataset_builder_backup_dir=tmp_path / "dataset-builder-backups",
+        feature_store_backup_dir=tmp_path / "feature-store-backups",
+        service_name="btcbot.service", log_level="INFO", cache_ttl_seconds=0.0,
+    )
+    names = [c["name"] for c in services.runtime_health(settings)["checks"]]
+    assert "outcome_writer" in names
+
+
+# ---------------------------------------------------------------------------
 # Feature Store backup freshness -- operational-defect fix
 #
 # The Feature Store had no backup path at all, so it also had no freshness

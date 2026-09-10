@@ -454,6 +454,30 @@ class TestCoverage:
         assert cov["contracts"][0]["contract_version"] == 1
 
 
+class TestDecisionIndex:
+    def test_one_row_per_decision_oldest_first(self, db):
+        specs = [spec()]
+        DS.persist_row(db, build(T(2026, 9, 1, 10, 0), specs, one_quote()),
+                       specs, WRITTEN_AT, decision_id="late")
+        DS.persist_row(db, build(T(2026, 9, 1, 9, 0), specs, one_quote()),
+                       specs, WRITTEN_AT, decision_id="early")
+        idx = DS.decision_index(db)
+        assert list(idx) == ["early", "late"]
+        assert idx["early"] == T(2026, 9, 1, 9, 0).isoformat()
+
+    def test_it_does_not_fan_out_over_inputs(self, db):
+        """The whole point: identity + instant without load_rows()'s N+1."""
+        src = _strip_docstrings(
+            (_RESEARCH / "feature_store" / "decision_store.py").read_text(
+                encoding="utf-8"))
+        fn = src[src.index("def decision_index"):src.index("def load_rows")]
+        assert "feature_row_inputs" not in fn
+        assert fn.count("execute") == 1
+
+    def test_empty_store_is_an_empty_index(self, db):
+        assert DS.decision_index(db) == {}
+
+
 def _strip_docstrings(src: str) -> str:
     tree = ast.parse(src)
     for node in ast.walk(tree):

@@ -87,6 +87,7 @@ from src.exchange.delta_client import DeltaClient
 from src.execution.reconciler import Reconciler
 from src.execution.reconciliation_jobs import register_reconciliation_jobs
 from src.strategies.strategy_jobs import register_strategy_job
+from src.strategies.outcome_jobs import register_outcome_writer_job
 from src.execution.testnet_executor import TestnetExecutor
 from src.risk.manager import RiskManager
 from src.risk.state import RiskStateStore
@@ -596,6 +597,18 @@ class Runtime:
                 reconciler=reconciler,
                 strategy_enabled=self._demo_strategy_enabled,
                 dry_run=self._demo_strategy_dry_run,
+            )
+
+            # The execution-outcome sweep. Research post-processing, not part of
+            # the trading path: it holds no connection here, opens its own
+            # read-only handles when it fires, and records every failure in
+            # .outcome-status.json rather than raising. Hourly; skipped when the
+            # strategy is off (nothing captured -> nothing to resolve).
+            register_outcome_writer_job(
+                scheduler,
+                trading_db_path=self._db_path,
+                strategy_enabled=self._demo_strategy_enabled,
+                status_path=self._db_path.parent / ".outcome-status.json",
             )
             logger.info("[runtime] reconciliation armed (trading_permitted=%s, "
                         "protection=%s)", reconciler.trading_permitted,

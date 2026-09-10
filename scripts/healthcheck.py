@@ -800,6 +800,88 @@ def check_capture_status(
     )
 
 
+OUTCOME_STATUS_FILENAME = ".outcome-status.json"
+
+
+def check_outcome_status(
+    data_dir: Path, check_name: str = "outcome_writer"
+) -> CheckResult:
+    """Execution-outcome sweep health, from `.outcome-status.json`.
+
+    The sweep resolves captured ACKED decisions to COMPLETED / NO_TRADE and is
+    pure research post-processing -- it never touches trading. Without this
+    surface a sweep that has been failing, or one steadily accumulating
+    anomalies (a NO_TRADE interpretation contradicting a FILLED order), would
+    be invisible.
+
+    INFO when absent: the sweep only runs with the demo strategy armed. A
+    `failed` status, or any recorded anomaly, is WARNING. Age is shown but is
+    never escalated on -- the sweep has nothing to do until an order
+    terminalises, which is days-scale, so silence is normal.
+    """
+    status_file = data_dir / OUTCOME_STATUS_FILENAME
+    if not status_file.exists():
+        return CheckResult(
+            check_name, INFO,
+            "execution-outcome sweep not armed or not yet run", {},
+        )
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            check_name, WARNING, f"outcome status unreadable: {exc}", {}
+        )
+
+    status = payload.get("status")
+    anomalies = payload.get("anomalies") or []
+    reported_at = payload.get("ts")
+    detail = {
+        "status": status,
+        "reported_at": reported_at,
+        "persisted": payload.get("persisted"),
+        "pending": payload.get("pending"),
+        "anomalies": anomalies,
+        "outcome_detail": payload.get("detail") or "",
+    }
+
+    age_txt = "at an unrecorded time"
+    try:
+        reported = datetime.fromisoformat(str(reported_at))
+        if reported.tzinfo is None:
+            reported = reported.replace(tzinfo=timezone.utc)
+        age_sec = (datetime.now(timezone.utc) - reported).total_seconds()
+        detail["age_hours"] = round(age_sec / 3600, 1)
+        age_txt = (f"{age_sec / 3600:.0f}h ago" if age_sec >= 3600
+                   else f"{age_sec / 60:.0f} min ago")
+    except (TypeError, ValueError):
+        pass
+
+    if status == "failed":
+        return CheckResult(
+            check_name, WARNING,
+            f"execution-outcome sweep FAILED ({age_txt}): "
+            f"{detail['outcome_detail'] or 'no detail recorded'}", detail,
+        )
+    if anomalies:
+        return CheckResult(
+            check_name, WARNING,
+            f"execution-outcome sweep: {len(anomalies)} anomal"
+            f"{'y' if len(anomalies) == 1 else 'ies'} ({age_txt}): "
+            f"{'; '.join(str(a) for a in anomalies)}", detail,
+        )
+    if status == "ok":
+        return CheckResult(
+            check_name, OK,
+            f"execution-outcome sweep OK (last run {age_txt}): "
+            f"persisted {detail['persisted']}, pending {detail['pending']}",
+            detail,
+        )
+    return CheckResult(
+        check_name, WARNING,
+        f"outcome status has an unrecognised status: {status!r}", detail,
+    )
+
+
 def check_integrity(db_path: Path) -> CheckResult:
     if not db_path.exists():
         return CheckResult(
@@ -1226,6 +1308,7 @@ def main() -> int:
         ),
         check_execution_status(db_path.parent),
         check_capture_status(db_path.parent),
+        check_outcome_status(db_path.parent),
         check_offhost_freshness(backup_dir, check_name="offhost_backup"),
         check_offhost_freshness(
             args.ledger_backup_dir, check_name="ledger_offhost_backup"

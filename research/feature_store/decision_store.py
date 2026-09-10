@@ -434,6 +434,36 @@ def persist_rows(db_path, rows: Sequence[FeatureRow], specs: Sequence[FeatureSpe
     return out
 
 
+def decision_index(db_path) -> dict[str, str]:
+    """`decision_id -> decision_ts` for every persisted decision, in one query.
+
+    The lightweight alternative to `load_rows()` when only the identity and the
+    decision instant are needed -- an outcome sweep, a coverage count -- with no
+    inputs, no JSON decode and no per-row fan-out. Ordered oldest decision
+    first.
+
+    A `decision_id` that carries two different `decision_ts` values is a
+    contract violation (`build_row` takes the instant from its caller and every
+    feature of one decision shares it), so it raises here rather than silently
+    picking one.
+    """
+    con = _connect(db_path, read_only=True)
+    try:
+        out: dict[str, str] = {}
+        for r in con.execute(
+                "SELECT DISTINCT decision_id, decision_ts FROM feature_rows "
+                "ORDER BY decision_ts, decision_id").fetchall():
+            did = r["decision_id"]
+            if did in out and out[did] != r["decision_ts"]:
+                raise DecisionStoreError(
+                    f"{did} carries two decision_ts values: {out[did]!r} and "
+                    f"{r['decision_ts']!r}")
+            out[did] = r["decision_ts"]
+        return out
+    finally:
+        con.close()
+
+
 def load_rows(db_path, decision_id: str | None = None,
               feature_name: str | None = None) -> list[dict[str, Any]]:
     """Persisted rows with their inputs attached, oldest decision first."""
