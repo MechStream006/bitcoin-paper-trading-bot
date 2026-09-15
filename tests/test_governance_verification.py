@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "research" / "evidence_library"))
 sys.path.insert(0, str(ROOT / "research" / "dq"))
 
+import contract_receipts as cre
+import contract_registry as cr
 import evidence_governance as eg
 import governance_verification as gv
 import lifecycle
@@ -209,6 +211,46 @@ class TestCrossSubsystem:
         assert not rep.ok
         assert any(f.code in ("GV1",) or f.subsystem in ("receipt_chain", "cross_subsystem")
                    for f in rep.errors)
+
+# ---------------------------------------------------------------------------
+# GV2 — contract-receipt resolution uses subject.id (the contract_hash),
+# not subject.version_or_hash (the lifecycle version number)
+# ---------------------------------------------------------------------------
+
+class TestGV2ContractResolution:
+    def test_valid_contract_activation_receipt_causes_no_false_GV2(self, db):
+        governed_candidate(db)
+        cre.init_db(db)
+        cre.activate_contract_with_receipt(
+            db, "gv2_probe_contract", {"k": "v"}, "tester", "GV2 regression probe")
+        rep = gv.verify_governance(db, registry=registry_for(db), thresholds=THRESHOLDS)
+        assert rep.ok
+        assert not any(f.code == "GV2" for f in rep.findings)
+
+    def test_nonexistent_contract_reference_still_flagged(self, db):
+        governed_candidate(db)
+        cre.init_db(db)
+        result = cre.activate_contract_with_receipt(
+            db, "gv2_probe_contract", {"k": "v"}, "tester", "GV2 regression probe")
+        contract_hash = result["contract"]["contract_hash"]
+        con = sqlite3.connect(db)
+        try:
+            con.execute("DROP TRIGGER trg_contracts_no_delete")
+            con.execute("DELETE FROM contract_registry WHERE contract_hash = ?", (contract_hash,))
+            con.commit()
+        finally:
+            con.close()
+        rep = gv.verify_governance(db, registry=registry_for(db), thresholds=THRESHOLDS)
+        assert not rep.ok
+        assert any(f.code == "GV2" and contract_hash[:12] in f.message for f in rep.errors)
+
+    def test_transition_receipts_still_ignored_by_GV2(self, db):
+        """family-subject transition receipts must never be mistaken for
+        contract-subject receipts by the GV2 scope filter."""
+        governed_candidate(db)
+        rep = gv.verify_governance(db, registry=registry_for(db), thresholds=THRESHOLDS)
+        assert rep.ok
+        assert not any(f.code == "GV2" for f in rep.findings)
 
 
 # ---------------------------------------------------------------------------

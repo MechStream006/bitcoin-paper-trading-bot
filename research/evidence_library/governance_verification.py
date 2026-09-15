@@ -505,39 +505,47 @@ def _cross_subsystem_checks(db_path: Path | str, as_of: str | None) -> list[Find
             result = tg.replay_transition_receipt(db_path, r["receipt_id"])
         except Exception as exc:  # noqa: BLE001 -- fail closed
             findings.append(Finding(
-                "GV1", "error", "cross_subsystem",
-                message=f"transition receipt {r['receipt_id'][:8]}… raised on replay: {exc}"))
+                "GV1", "error",
+                message=f"transition receipt {r['receipt_id'][:8]}… raised on replay: {exc}",
+                subsystem="cross_subsystem"))
             continue
         if result.replay.mode == "refused":
             # bootstrap: refuses by design. Integrity + legality still must hold.
             if not result.hash_ok:
-                findings.append(Finding("GV1", "error", "cross_subsystem",
-                    f"receipt {r['receipt_id'][:8]}… fails hash verification"))
+                findings.append(Finding("GV1", "error",
+                    f"receipt {r['receipt_id'][:8]}… fails hash verification", "cross_subsystem"))
             if not result.legality_ok:
-                findings.append(Finding("GV1", "error", "cross_subsystem",
-                    f"receipt {r['receipt_id'][:8]}… records an illegal arc"))
+                findings.append(Finding("GV1", "error",
+                    f"receipt {r['receipt_id'][:8]}… records an illegal arc", "cross_subsystem"))
         elif not result.ok:
-            findings.append(Finding("GV1", "error", "cross_subsystem",
-                f"receipt {r['receipt_id'][:8]}… does not replay: {'; '.join(result.errors)}"))
+            findings.append(Finding("GV1", "error",
+                f"receipt {r['receipt_id'][:8]}… does not replay: {'; '.join(result.errors)}",
+                "cross_subsystem"))
 
     # GV2 — every referenced contract_hash resolves.
     for r in receipts:
-        chash = r["body"].get("subject", {}).get("version_or_hash")
+        subject = r["body"].get("subject", {})
         # Only contract-subject receipts name a contract_hash here; transition
         # receipts put a transition id in version_or_hash, so scope by kind.
-        if r["body"].get("subject", {}).get("kind") != "contract":
+        if subject.get("kind") != "contract":
             continue
+        # contract_receipts.py's Subject carries the contract_hash in `id` --
+        # `version_or_hash` is the lifecycle VERSION NUMBER for a contract
+        # subject (str(version)), not a hash, and never resolves in the
+        # registry. Resolving `id` matches how every contract.activate/
+        # .retire receipt is actually constructed.
+        chash = subject.get("id")
         if not chash:
             continue
         try:
             cr.resolve_by_hash(db_path, chash)
         except cr.ContractNotFoundError:
-            findings.append(Finding("GV2", "error", "cross_subsystem",
+            findings.append(Finding("GV2", "error",
                 f"receipt {r['receipt_id'][:8]}… names contract_hash {str(chash)[:12]}…, "
-                f"which does not resolve in the registry"))
+                f"which does not resolve in the registry", "cross_subsystem"))
         except Exception as exc:  # noqa: BLE001
-            findings.append(Finding("GV-ERR", "error", "cross_subsystem",
-                f"contract resolution for {r['receipt_id'][:8]}… raised: {exc}"))
+            findings.append(Finding("GV-ERR", "error",
+                f"contract resolution for {r['receipt_id'][:8]}… raised: {exc}", "cross_subsystem"))
 
     # GV3 — the two state derivations agree.
     try:
@@ -548,12 +556,12 @@ def _cross_subsystem_checks(db_path: Path | str, as_of: str | None) -> list[Find
             if rec is None:
                 continue  # TG1 already reports a missing receipt
             if rec[0] != state:
-                findings.append(Finding("GV3", "error", "cross_subsystem",
+                findings.append(Finding("GV3", "error",
                     f"{fam_id}: state_transitions derives {state!r} but the receipt chain "
-                    f"derives {rec[0]!r} -- the two records disagree"))
+                    f"derives {rec[0]!r} -- the two records disagree", "cross_subsystem"))
     except Exception as exc:  # noqa: BLE001
-        findings.append(Finding("GV-ERR", "error", "cross_subsystem",
-            f"state-derivation cross-check raised: {exc}"))
+        findings.append(Finding("GV-ERR", "error",
+            f"state-derivation cross-check raised: {exc}", "cross_subsystem"))
 
     return findings
 
