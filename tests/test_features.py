@@ -482,16 +482,18 @@ class TestDeterminismAndPurity:
 class TestStarterFeatureSet:
     def test_it_is_small_and_every_feature_is_declared(self):
         specs = FT.starter_features(signal_id="g3")
-        assert len(specs) == 5
+        assert len(specs) == 4
         for s in specs:
             assert s.description and s.inputs
             for i in s.inputs:
-                assert i.tolerance_s is not None or i.source == "spot_1m"
+                assert i.tolerance_s is not None
 
-    def test_market_bar_feature_exists_and_is_expected_to_be_unavailable(self):
-        specs = {s.name: s for s in FT.starter_features("g3")}
-        assert "market_close_1m" in specs
-        assert specs["market_close_1m"].inputs[0].source == "spot_1m"
+    def test_market_close_1m_is_removed_and_cannot_reappear(self):
+        """v3 dropped it: its lake source is never current at a live decision."""
+        names = {s.name for s in FT.starter_features("g3")}
+        assert "market_close_1m" not in names
+        assert FT.REMOVED_IN_V3 == ("market_close_1m",)
+        assert not hasattr(FT, "BAR_TOLERANCE_S"), "the v2 bar tolerance must not linger"
 
     def test_option_features_no_longer_carry_an_instrument_id(self):
         """v2 resolves the option series by rule, not by a fixed member."""
@@ -506,6 +508,8 @@ class TestStarterFeatureSet:
         """quote_spread_bps and option_oi_contracts were dropped in v2."""
         names = {s.name for s in FT.starter_features("g3")}
         assert not (names & set(FT.REMOVED_IN_V2))
+        assert not (names & set(FT.REMOVED_IN_V3))
+        assert not (set(FT.REMOVED_IN_V2) & set(FT.REMOVED_IN_V3)), "V2 is preserved, not rewritten"
         assert not hasattr(FT, "_spread_bps"), "the v1 helper must not linger"
 
 
@@ -575,8 +579,6 @@ class TestAgainstRealCorpus:
                      and str(o.provenance.get("client_order_id", "")).startswith("g3")]
         loads = dict(OP.load_derived_sources(_OQ))
         loads["signal_log"] = _sqlite_load(_FWD, "signal_log", ("position",))
-        lake = AL.load_lake_source("spot_1m", payload_fields=("close",))
-        loads["spot_1m"] = AL.SourceLoad("spot_1m", tuple(lake), len(lake), 0)
         return decisions, loads
 
     def test_real_decisions_produce_rows_with_no_lookahead(self):
@@ -589,28 +591,6 @@ class TestAgainstRealCorpus:
                 for i in f.inputs:
                     if i.available_ts is not None:
                         assert i.available_ts <= r.decision_ts
-
-    def test_market_bars_resolve_after_the_lake_extension(self):
-        """Superseded assertion.
-
-        This previously asserted market bars stay UNAVAILABLE, which was true
-        only while the lake ended 2026-07-31. Extending it through the live
-        period is what the assertion was waiting on, so it now checks the
-        thing that actually matters: the bar is real, fresh enough, and
-        traceable to the partition it came from. Unavailability itself stays
-        covered by the synthetic stale/missing cases, which do not depend on
-        the state of the corpus.
-        """
-        decisions, loads = self._setup()
-        specs = FT.starter_features("g3_momentum_tsmom")
-        rows = FT.build_rows(decisions, specs, loads)
-        for r in rows:
-            f = r.features["market_close_1m"]
-            assert f.state == S.READY, f.inputs[0].detail
-            rec = f.inputs[0]
-            assert rec.age_s <= rec.tolerance_s
-            assert rec.provenance["parquet_sha256"]
-            assert rec.available_ts <= r.decision_ts
 
     def test_the_lake_holds_no_incomplete_final_day(self):
         """The corpus invariant B01 depends on: no short day after 2026-06-15.

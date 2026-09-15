@@ -42,11 +42,9 @@ WHAT THIS MODULE WILL NOT DO
 ----------------------------
 It will not interpolate, forward-fill past the declared tolerance, or reach for
 a different source to complete a row. A feature whose input is stale is a stale
-feature, and the row says so. In particular, the market bars in the Parquet lake
-end 2026-07-31 while live decisions are in September: `market_close_1m` is
-therefore INCOMPLETE_DATA at every current decision instant, and that is the
-correct answer, not a gap to paper over by substituting the spot price embedded
-in the option feed. They are different measurements from different venues.
+feature, and the row says so. Nor will it substitute one venue's price for
+another's to complete a row: the spot price embedded in the option feed and a
+Binance bar are different measurements from different venues.
 
 TOLERANCE IS MANDATORY AND EXPLICIT
 -----------------------------------
@@ -368,11 +366,13 @@ def _identity(key: str) -> Callable[[Mapping[str, Any]], Any]:
 
 QUOTE_TOLERANCE_S = 300.0
 SIGNAL_TOLERANCE_S = 172_800.0
-BAR_TOLERANCE_S = 900.0
 
 
 def starter_features(signal_id: str) -> list[FeatureSpec]:
-    """Five features over sources this project already collects (contract v2).
+    """Four features over sources this project already collects (contract v3).
+
+    v3 removed `market_close_1m`; `REMOVED_IN_V3` records why. Removing it moved
+    no other feature's contract hash -- each spec is hashed on its own.
 
     v1 took an `instrument_id` and keyed three option features to it. That is
     unresolvable across dates -- no option instrument survives more than ~3 days
@@ -397,7 +397,7 @@ def starter_features(signal_id: str) -> list[FeatureSpec]:
     Re-adding either is a new feature needing its own justification, not a
     restoration; `REMOVED_IN_V2` records that so it cannot happen silently.
 
-    `consumed_direction` is the fifth, added later and alongside
+    `consumed_direction` was added later, alongside
     `signal_position` rather than in place of it. `signal_position` is the
     latest DAILY signal; the live path consumes the direction currently HELD,
     and the collector's no-early-exit hold lets the two drift apart on 10.6% of
@@ -445,17 +445,20 @@ def starter_features(signal_id: str) -> list[FeatureSpec]:
                         "i.e. what bridge.latest_direction() returns. 0.0 means "
                         "flat, which is a state, not a gap.",
         ),
-        FeatureSpec(
-            name="market_close_1m",
-            inputs=(InputRequirement(
-                name="close", source="spot_1m", field="close",
-                tolerance_s=BAR_TOLERANCE_S),),
-            compute=_identity("close"),
-            description="Binance 1m close from the Parquet lake.",
-        ),
     ]
 
 
 #: Features that existed in contract v1 and were deliberately dropped in v2.
 #: A guard test asserts none of these names reappears in `starter_features`.
 REMOVED_IN_V2 = ("option_oi_contracts", "quote_spread_bps")
+
+#: Dropped in v3. `market_close_1m` read the Parquet lake, which is refreshed
+#: once a day at 00:05 UTC with the previous day's bars, while a live G3 entry is
+#: decided in the hour after the 01:00 UTC collector commit. The bar it needs is
+#: therefore never present, so it was INCOMPLETE_DATA at every live decision by
+#: schedule rather than by market. Its declared availability is the venue's
+#: publication time, so an offline rebuild of the same decision would resolve it
+#: READY from bars the live path never had. It also duplicates `spot_price`: the
+#: Delta index and the Binance close differ by about +/-2 bps. Re-adding it is a
+#: new feature needing a source that is current at decision time.
+REMOVED_IN_V3 = ("market_close_1m",)

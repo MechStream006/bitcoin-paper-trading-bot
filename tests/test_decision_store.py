@@ -529,13 +529,11 @@ class TestAgainstRealCorpus:
                 and str(o.provenance.get("client_order_id", "")).startswith("g3")]
         ids = {o.available_ts.isoformat(): str(o.provenance["client_order_id"])
                for o in auto}
-        lake = AL.load_lake_source("spot_1m", payload_fields=("close",))
         loads = {
             "option_quotes": load(_OQ, "option_quotes",
                                   ("spot_price", "mark_iv", "oi_contracts",
                                    "best_bid", "best_ask")),
             "signal_log": load(_FWD, "signal_log", ("position",)),
-            "spot_1m": AL.SourceLoad("spot_1m", tuple(lake), len(lake), 0),
         }
         specs = FT.starter_features("g3_momentum_tsmom")
         rows = FT.build_rows([o.available_ts for o in auto], specs, loads)
@@ -567,13 +565,6 @@ class TestAgainstRealCorpus:
         rows, specs, ids = self._built()
         DS.persist_rows(db, rows, specs, WRITTEN_AT, decision_ids=ids)
         assert DS.revalidate_no_lookahead(db) == []
-
-    def test_lake_provenance_survives_persistence(self, db):
-        rows, specs, ids = self._built()
-        DS.persist_rows(db, rows, specs, WRITTEN_AT, decision_ids=ids)
-        mk = [r for r in DS.load_rows(db) if r["feature_name"] == "market_close_1m"]
-        assert mk
-        assert all(r["inputs"][0]["provenance"].get("parquet_sha256") for r in mk)
 
     def test_decision_ids_are_the_real_client_order_ids(self, db):
         rows, specs, ids = self._built()

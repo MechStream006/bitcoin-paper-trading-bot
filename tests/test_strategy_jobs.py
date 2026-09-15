@@ -115,8 +115,14 @@ UNTOUCHED_MODULES = (
 #: `capture_signal_context` byte-identical, and STOP_DISTANCE_PCT and the
 #: order-id bound untouched. That was verified against the previous surface
 #: before this hash was moved.
+#: Re-pinned deliberately for feature contract v3, which removed
+#: `market_close_1m`. The structural delta is a pure REMOVAL -- `_BAR_WINDOW`
+#: and the lake read inside `capture_decision_features` -- with no signature
+#: changed, `capture_signal_context` byte-identical, and the signal_log load,
+#: STOP_DISTANCE_PCT and the order-id bound untouched. The previous pin
+#: (1815db26...) was confirmed equal to bridge.py at 31609d2 before moving it.
 BRIDGE_CONTENT_SHA256 = (
-    "1815db266c8c43be5f40fa820bc80e876c9fed519d73b5f8b44b690294a70f7e")
+    "40e8f69facfa7168d1f4a83f0743e79f74954bbaefbe8ce02a1f43455f905350")
 
 #: The authorized signature, spelled out so a drifting default or a dropped
 #: parameter names itself rather than only moving a hash.
@@ -130,7 +136,6 @@ BRIDGE_CAPTURE_SIGNATURE = (
 BRIDGE_OTHER_SURFACE = {
     "log": "logging.getLogger(__name__)",
     "_PANEL_WINDOW": "timedelta(seconds=300.0)",
-    "_BAR_WINDOW": "timedelta(seconds=900.0)",
     "capture_decision_features": (
         "def(conn, client_order_id: str, forward_db_path: str, "
         "decision_ts: datetime, signal_id: str=SIGNAL_ID, db_path=None)"),

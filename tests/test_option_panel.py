@@ -261,7 +261,6 @@ class TestPositiveIvValidity:
                   for s in FT.starter_features("g3_momentum_tsmom")}
         assert hashes["spot_price"].startswith("d0c3da2b9c73")
         assert hashes["signal_position"].startswith("6a2dcdb053c8")
-        assert hashes["market_close_1m"].startswith("5bee276a9aad")
         assert not hashes["option_atm_iv"].startswith("35dbdc82fd85")
 
 
@@ -296,7 +295,7 @@ class TestContractV2:
         specs = FT.starter_features("g3")
         assert [s.name for s in specs] == [
             "spot_price", "option_atm_iv", "signal_position",
-            "consumed_direction", "market_close_1m"]
+            "consumed_direction"]
 
     def test_removed_features_cannot_silently_reappear(self):
         names = {s.name for s in FT.starter_features("g3")}

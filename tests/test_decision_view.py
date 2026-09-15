@@ -265,7 +265,7 @@ class TestVersionSelection:
         con.close()
         got = JV.intended_versions(f, specs)
         assert got["spot_price"][0] == 2 and got["option_atm_iv"][0] == 2
-        assert got["signal_position"][0] == 1 and got["market_close_1m"][0] == 1
+        assert got["signal_position"][0] == 1 and got["consumed_direction"][0] == 1
 
 
 class TestMissingFeatures:
@@ -559,7 +559,6 @@ class TestAgainstRealStores:
         assert got["spot_price"][0] == 2
         assert got["option_atm_iv"][0] == 2
         assert got["signal_position"][0] == 1
-        assert got["market_close_1m"][0] == 1
 
     def test_every_feature_resolves_on_real_data(self):
         cov = JV.coverage(JV.build_view(_FEAT, _OUT))

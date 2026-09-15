@@ -293,11 +293,10 @@ def _signal_availability_delay() -> timedelta:
     return timedelta(seconds=get_spec("signal_log").availability_offset_s)
 
 
-#: Bounds for the two live source reads, taken from the feature contract's own
-#: tolerances rather than invented here: a read wider than the tolerance can
+#: Bound for the live panel read, taken from the feature contract's own
+#: tolerance rather than invented here: a read wider than the tolerance can
 #: only return rows the contract would reject as STALE_DATA.
 _PANEL_WINDOW = timedelta(seconds=300.0)     # QUOTE_TOLERANCE_S
-_BAR_WINDOW = timedelta(seconds=900.0)       # BAR_TOLERANCE_S
 
 
 def capture_decision_features(conn, client_order_id: str, forward_db_path: str,
@@ -321,10 +320,10 @@ def capture_decision_features(conn, client_order_id: str, forward_db_path: str,
     decision always satisfies that clause, because `TestnetExecutor._persist`
     writes the order row write-ahead at SUBMITTED, before the request leaves.
 
-    Both live reads are bounded by the contract's own tolerances. Unbounded,
-    `spot_1m` would scan 69 partitions and ~104 MB of 1m bars on every pass;
-    windowed it reads one partition. The panel read is bounded on `ts`, which
-    `idx_option_quotes_ts` serves.
+    The panel read is bounded by the contract's own quote tolerance, on `ts`,
+    which `idx_option_quotes_ts` serves. Every source is SQLite: contract v3
+    dropped the only Parquet-lake feature, so this path imports nothing beyond
+    the standard library and the project's own modules.
 
     Best-effort by construction: every failure path returns False and logs. A
     research record must never turn a filled order into a reported failure.
@@ -344,23 +343,19 @@ def capture_decision_features(conn, client_order_id: str, forward_db_path: str,
     # join it.
     trading_db = conn.execute("PRAGMA database_list").fetchone()[2]
     lo_panel = decision_ts - _PANEL_WINDOW
-    lo_bar = decision_ts - _BAR_WINDOW
 
     loads = dict(OP.load_derived_sources(
         trading_db, lo=lo_panel.isoformat(), hi=decision_ts.isoformat()))
     loads.update(FT.load_held_direction(forward_db_path, signal_id))
 
-    # `rows_seen=len(obs)`, `unclocked=0`: both loaders already drop rows whose
-    # arrival cannot be placed, so the count they could report is the count
-    # they return. This is the convention the research tests already use for
-    # these two sources.
+    # `rows_seen=len(obs)`, `unclocked=0`: the loader already drops rows whose
+    # arrival cannot be placed, so the count it could report is the count it
+    # returns. This is the convention the research tests already use for this
+    # source.
     sig = AL.load_sqlite_source(forward_db_path, "signal_log",
                                 payload_fields=("position",),
                                 where="signal_id = ?", params=(signal_id,))
     loads["signal_log"] = AL.SourceLoad("signal_log", tuple(sig), len(sig), 0)
-    bars = AL.load_lake_source("spot_1m", payload_fields=("close",),
-                               lo=lo_bar, hi=decision_ts)
-    loads["spot_1m"] = AL.SourceLoad("spot_1m", tuple(bars), len(bars), 0)
 
     specs = starter_features(signal_id)
     row = build_row(decision_ts, specs, loads)

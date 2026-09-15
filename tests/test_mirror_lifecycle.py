@@ -840,19 +840,41 @@ class TestCaptureUsesTheExistingContract:
         specs = starter_features(bridge.SIGNAL_ID)
         assert {s.name for s in specs} == {
             "spot_price", "option_atm_iv", "signal_position",
-            "consumed_direction", "market_close_1m"}
+            "consumed_direction"}
         src = self._src()
-        for source in ("spot_index", "atm_iv", "signal_log", "held_direction",
-                       "spot_1m"):
+        for source in ("spot_index", "atm_iv", "signal_log", "held_direction"):
             assert source in src or "load_derived_sources" in src
 
-    def test_DF12_market_close_1m_is_loaded_bounded(self):
-        """51ac0f3's window must actually be used, or the pass scans 69
-        partitions and ~104 MB of 1m bars."""
-        src = self._src()
-        i = src.index('load_lake_source("spot_1m"')
-        call = src[i:i + 260]
-        assert "lo=" in call and "hi=" in call, call
+    def test_DF12_capture_code_names_no_lake_reader(self):
+        """Static layer of the no-lake guard (the contract and runtime layers are
+        DF18 and DF19). Contract v3 removed market_close_1m, the only feature
+        whose source was the Parquet lake -- the read that pulled pandas and
+        numpy onto the live order path. This reads the function's code, not its
+        prose, so a docstring that explains the removal cannot trip it."""
+        import ast
+        tree = ast.parse(self._src())
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "capture_decision_features")
+        banned_calls = {"load_lake_source", "read_table", "read_parquet"}
+        banned_modules = ("storage.lake", "storage.duck")
+        found = []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Attribute) and node.attr in banned_calls:
+                found.append(node.attr)
+            elif isinstance(node, ast.Name) and node.id in banned_calls:
+                found.append(node.id)
+            elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and node.value in banned_calls):
+                found.append(node.value)
+            elif isinstance(node, ast.Import):
+                found += [a.name for a in node.names
+                          if a.name.startswith(banned_modules)]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                found += [f"{node.module}.{a.name}" for a in node.names
+                          if f"{node.module}.{a.name}".startswith(banned_modules)
+                          or node.module.startswith(banned_modules)]
+        assert found == [], found
 
     def test_DF13_panel_read_is_bounded_too(self):
         src = self._src()
@@ -872,7 +894,20 @@ class TestCaptureUsesTheExistingContract:
         from feature_store import decision_store as DS
 
         hashes = {s.name: DS.contract_hash(s) for s in starter_features(bridge.SIGNAL_ID)}
-        assert len(set(hashes.values())) == 5, "five distinct contracts"
+        assert len(set(hashes.values())) == 4, "four distinct contracts"
+        # Full hashes, so removing market_close_1m (v3) provably moved none of
+        # the four survivors. signal_position and consumed_direction are the
+        # ADR-0003 pins.
+        assert hashes == {
+            "spot_price":
+                "d0c3da2b9c736a45e96c6ba14ff6d29382c40c21823d536fb01798c5adeda691",
+            "option_atm_iv":
+                "545794bcf17f15b5f21318011f341e9c51100a2e9f39028148932f0fd5cd19a8",
+            "signal_position":
+                "6a2dcdb053c8f7eadcb1e9441513b034b4a90d8abd41e51c138dcee643d4d7dc",
+            "consumed_direction":
+                "e0c0af82039ecb977e547b215daa3442b92038187af9e96c0b4323c1d2389b79",
+        }
         # Recomputing must be stable -- the hash is a pure function of the spec.
         again = {s.name: DS.contract_hash(s) for s in starter_features(bridge.SIGNAL_ID)}
         assert hashes == again
@@ -897,8 +932,8 @@ class TestCaptureRunsForReal:
     """The spy tests above prove the wiring; this proves the helper itself.
 
     Everything is synthetic and local: a trading DB with an option panel, a
-    forward store with signal_log/trade_entries/run_log, a one-partition lake,
-    and a decision_features.db in tmp_path. Nothing touches the real research
+    forward store with signal_log/trade_entries/run_log, and a
+    decision_features.db in tmp_path. Nothing touches the real research
     tree or production.
     """
 
@@ -957,47 +992,20 @@ class TestCaptureRunsForReal:
         c.close()
         return path
 
-    def _lake(self, base, decision_ts):
-        pq = pytest.importorskip("pyarrow.parquet")
-        pa = pytest.importorskip("pyarrow")
-        import pandas as pd
-        part = (base / "spot" / "BTCUSDT"
-                / f"year={decision_ts.year}" / f"month={decision_ts.month:02d}")
-        part.mkdir(parents=True, exist_ok=True)
-        bar = decision_ts - timedelta(minutes=3)
-        rows = [{"open_time": int((bar - timedelta(minutes=i)).timestamp() * 1000),
-                 "close": 70200.0 + i} for i in range(5)]
-        pq.write_table(pa.Table.from_pandas(pd.DataFrame(rows)),
-                       part / "data.parquet")
-        (part / "_manifest.json").write_text('{"parquet_sha256": "sha-test"}',
-                                             encoding="utf-8")
-        return base
-
-    def test_DF16_capture_writes_rows_for_all_five_features(self, tmp_path):
+    def test_DF16_capture_writes_rows_for_all_four_features(self, tmp_path):
         import sys as _sys
         research = pathlib.Path(SJ.__file__).resolve().parents[2] / "research"
         if str(research) not in _sys.path:
             _sys.path.insert(0, str(research))
-        from feature_store import decision_store as DS
-        import alignment.align as AL
 
         decision_ts = datetime(2026, 9, 15, 1, 30, tzinfo=timezone.utc)
         trading = tmp_path / "btc_trading.db"
         conn = self._trading_db(trading, decision_ts)
         fwd = self._forward_db(str(tmp_path / "fwd.db"), decision_ts)
-        lake_base = self._lake(tmp_path / "raw", decision_ts)
         store = tmp_path / "decision_features.db"
 
-        real_lake = AL.load_lake_source
-        try:
-            # Point the lake read at the synthetic tree; every other bound and
-            # argument is the helper's own.
-            AL.load_lake_source = lambda source, base_dir=None, **kw: real_lake(
-                source, base_dir=lake_base, **kw)
-            ok = bridge.capture_decision_features(
-                conn, "coid-df16", fwd, decision_ts=decision_ts, db_path=store)
-        finally:
-            AL.load_lake_source = real_lake
+        ok = bridge.capture_decision_features(
+            conn, "coid-df16", fwd, decision_ts=decision_ts, db_path=store)
 
         assert ok is True
         c = sqlite3.connect(store)
@@ -1012,13 +1020,13 @@ class TestCaptureRunsForReal:
             ("coid-df16",)).fetchone()[0]
         c.close()
 
-        assert names == ["consumed_direction", "market_close_1m", "option_atm_iv",
+        assert names == ["consumed_direction", "option_atm_iv",
                          "signal_position", "spot_price"], names
         assert stored_ts == {decision_ts.isoformat()}, "decision boundary preserved"
-        assert inputs == 5, "every input recorded, including any unavailable one"
+        assert inputs == 4, "every input recorded, including any unavailable one"
 
     def test_DF17_absence_is_persisted_not_dropped(self, tmp_path):
-        """No lake and no panel: the row must still exist, carrying states."""
+        """No panel: the row must still exist, carrying states."""
         import sys as _sys
         research = pathlib.Path(SJ.__file__).resolve().parents[2] / "research"
         if str(research) not in _sys.path:
@@ -1032,14 +1040,8 @@ class TestCaptureRunsForReal:
         fwd = self._forward_db(str(tmp_path / "fwd2.db"), decision_ts)
         store = tmp_path / "df17.db"
 
-        import alignment.align as AL
-        real_lake = AL.load_lake_source
-        try:
-            AL.load_lake_source = lambda *a, **k: []
-            ok = bridge.capture_decision_features(
-                conn, "coid-df17", fwd, decision_ts=decision_ts, db_path=store)
-        finally:
-            AL.load_lake_source = real_lake
+        ok = bridge.capture_decision_features(
+            conn, "coid-df17", fwd, decision_ts=decision_ts, db_path=store)
 
         assert ok is True
         c = sqlite3.connect(store)
@@ -1047,6 +1049,205 @@ class TestCaptureRunsForReal:
             "SELECT feature_name, state FROM feature_rows WHERE decision_id=?",
             ("coid-df17",)).fetchall())
         c.close()
-        assert len(rows) == 5, "absence is a row, not a gap"
-        assert rows["market_close_1m"] != "READY"
+        assert len(rows) == 4, "absence is a row, not a gap"
         assert rows["spot_price"] != "READY"
+        assert rows["option_atm_iv"] != "READY"
+
+
+#: Run by DF19 in a fresh interpreter. The pytest process has long since cached
+#: pandas, numpy and pyarrow, and a cached module never reaches a meta-path
+#: finder, so an in-process blocker would pass even if capture imported them.
+#: The recorder catches executed imports of already-cached modules; the blocker
+#: catches first imports, including lazy ones; the canary proves both hooks were
+#: live, so the guard cannot pass by never having run.
+_NO_LAKE_PROBE = r'''
+import builtins, importlib.abc, json, pathlib, sqlite3, sys
+from datetime import datetime, timedelta, timezone
+
+root, work = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+sys.path.insert(0, str(root))
+STDLIB = set(sys.stdlib_module_names)
+PROJECT = {"src", "config", "alignment", "feature_store", "label_store",
+           "execution_evidence", "dq", "states", "policy", "storage", "ingest"}
+CANARY = "_btcbot_no_lake_probe_canary"
+
+
+def non_stdlib(names):
+    return sorted({n.split(".")[0] for n in names} - STDLIB - PROJECT)
+
+
+from src.data import storage
+from src.strategies import bridge, strategy_jobs as SJ
+
+decision = datetime(2026, 9, 17, 1, 15, 0, 123456, tzinfo=timezone.utc)
+conn = sqlite3.connect(work / "btc_trading.db")
+storage.init_schema(conn)
+storage.init_execution_schema(conn)
+for iid, ctype in ((901, "call_options"), (902, "put_options")):
+    conn.execute(
+        "INSERT INTO instruments (id, symbol, contract_type, underlying, quoting,"
+        " tick_size, contract_value, state, strike_price, settlement_time, fetched_at)"
+        " VALUES (?,?,?,'BTC','USD',0.1,0.001,'live',70000.0,?,?)",
+        (iid, f"X-BTC-70000-{iid}", ctype, (decision + timedelta(days=2)).isoformat(),
+         (decision - timedelta(days=1)).isoformat()))
+# The second cycle is written 3s after the decision, as a submit round-trip would.
+for ts, spot, ivs in (((decision - timedelta(seconds=40)).isoformat(), 70100.0, (0.50, 0.60)),
+                      ((decision + timedelta(seconds=3)).isoformat(), 99999.0, (0.99, 0.99))):
+    for iid, iv in zip((901, 902), ivs):
+        conn.execute("INSERT INTO option_quotes (instrument_id, ts, exch_ts, spot_price,"
+                     " mark_iv) VALUES (?,?,NULL,?,?)", (iid, ts, spot, iv))
+conn.commit()
+
+fwd = work / "evidence_forward.db"
+f = sqlite3.connect(fwd)
+f.executescript((root / "research" / "forward_evidence" / "schema_forward.sql")
+                .read_text(encoding="utf-8"))
+sid = bridge.SIGNAL_ID
+f.execute("INSERT INTO run_log (id, signal_id, run_date, fn_hash, status, created_at)"
+          " VALUES (1,?,'2026-09-16','h','ok','2026-09-17T01:00:30Z')", (sid,))
+f.execute("INSERT INTO signal_log (signal_id, day, position, raw_value, run_id)"
+          " VALUES (?,'2026-09-16',1.0,0.05,1)", (sid,))
+f.execute("INSERT INTO trade_entries (id, signal_id, entry_date, direction,"
+          " entry_close_price, planned_exit_date, open)"
+          " VALUES (1,?,'2026-09-16',1,70000.0,'2026-09-23',0)", (sid,))
+# The next day's run is physically present, as on any later replay; it becomes
+# available at 2026-09-18 01:00 and must not reach this decision.
+f.execute("INSERT INTO run_log (id, signal_id, run_date, fn_hash, status, created_at)"
+          " VALUES (2,?,'2026-09-17','h','ok','2026-09-18T01:00:30Z')", (sid,))
+f.execute("INSERT INTO signal_log (signal_id, day, position, raw_value, run_id)"
+          " VALUES (?,'2026-09-17',-1.0,-0.05,2)", (sid,))
+f.execute("INSERT INTO trade_exits (entry_id, exit_date, exit_close_price, cost_bps)"
+          " VALUES (1,'2026-09-17',71000.0,15.0)")
+f.execute("INSERT INTO trade_entries (id, signal_id, entry_date, direction,"
+          " entry_close_price, planned_exit_date, open)"
+          " VALUES (2,?,'2026-09-17',-1,71000.0,'2026-09-24',1)", (sid,))
+f.commit()
+f.close()
+
+before = set(sys.modules)
+imported, blocked = [], []
+real_import = builtins.__import__
+
+
+def recording_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if level == 0:
+        imported.append(name)
+    return real_import(name, globals, locals, fromlist, level)
+
+
+class Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in STDLIB | PROJECT:
+            return None
+        blocked.append(name)
+        raise ImportError(f"non-stdlib import on the capture path: {name}")
+
+
+store = work / "decision_features.db"
+ctx_ok, ok, error = None, False, ""
+builtins.__import__ = recording_import
+sys.meta_path.insert(0, Blocker())
+try:
+    ctx_ok = bridge.capture_signal_context(conn, "coid-df19", str(fwd), sid,
+                                           direction=1, decision_ts=decision)
+    try:
+        ok = bridge.capture_decision_features(conn, "coid-df19", str(fwd),
+                                              decision_ts=decision, db_path=store)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    SJ._write_capture_status(conn, "coid-df19", ok=bool(ok), detail=error,
+                             attempted_at=decision)
+    try:
+        __import__(CANARY)
+    except ImportError:
+        pass
+finally:
+    builtins.__import__ = real_import
+    sys.meta_path[:] = [m for m in sys.meta_path if not isinstance(m, Blocker)]
+
+rows = {}
+if store.exists():
+    c = sqlite3.connect(store)
+    for name, state, value, available in c.execute(
+            "SELECT r.feature_name, r.state, r.value_json, i.available_ts"
+            " FROM feature_rows r JOIN feature_row_inputs i"
+            " USING (decision_id, feature_name, contract_version)"):
+        rows[name] = [state, value, available]
+    c.close()
+lake = (root / "research" / "storage" / "lake.py").resolve()
+print(json.dumps({
+    "decision_ts": decision.isoformat(),
+    "ctx_ok": ctx_ok, "ok": ok, "error": error,
+    "status": json.loads((work / ".capture-status.json").read_text())["status"],
+    "imported": non_stdlib(imported),
+    "blocked": blocked,
+    "new_modules": non_stdlib(set(sys.modules) - before),
+    "lake_loaded": any(getattr(m, "__file__", None)
+                       and pathlib.Path(m.__file__).resolve() == lake
+                       for m in list(sys.modules.values())),
+    "rows": rows,
+}))
+'''
+
+
+class TestCaptureNeedsNoLake:
+    """Contract and runtime layers of the no-lake guard; DF12 is the static one.
+
+    Contract v3 removed `market_close_1m`, the only Parquet-lake feature, and
+    with it the pandas/numpy import on the live ACKED path. A source-text check
+    alone is bypassable (an alias, `getattr`, a direct lake reader, a lake
+    source re-added through a spec, a lazy import in a loader), so the three
+    layers check the contract, the executed imports and the code independently.
+    """
+
+    def test_DF18_contract_is_four_features_none_backed_by_the_lake(self):
+        research = ROOT / "research"
+        if str(research) not in sys.path:
+            sys.path.insert(0, str(research))
+        from alignment import features as FT
+        from alignment.timebase import get_spec
+
+        specs = FT.starter_features(bridge.SIGNAL_ID)
+        assert [s.name for s in specs] == [
+            "spot_price", "option_atm_iv", "signal_position", "consumed_direction"]
+        assert FT.REMOVED_IN_V2 == ("option_oi_contracts", "quote_spread_bps")
+        assert FT.REMOVED_IN_V3 == ("market_close_1m",)
+        assert not ({s.name for s in specs} & set(FT.REMOVED_IN_V2 + FT.REMOVED_IN_V3))
+        lake_backed = [(s.name, i.source) for s in specs for i in s.inputs
+                       if get_spec(i.source).store == "parquet_lake"]
+        assert lake_backed == []
+
+    def test_DF19_acked_capture_is_stdlib_only_and_never_reads_ahead(self, tmp_path):
+        import subprocess
+
+        script = tmp_path / "no_lake_probe.py"
+        script.write_text(_NO_LAKE_PROBE, encoding="utf-8")
+        work = tmp_path / "work"
+        work.mkdir()
+        proc = subprocess.run([sys.executable, str(script), str(ROOT), str(work)],
+                              capture_output=True, text=True, timeout=180,
+                              cwd=str(ROOT))
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+        assert out["ctx_ok"] is True and out["ok"] is True, out["error"]
+        assert out["status"] == "ok"
+        canary = "_btcbot_no_lake_probe_canary"
+        assert out["imported"] == [canary], "non-stdlib import executed by capture"
+        assert out["blocked"] == [canary], "non-stdlib import attempted by capture"
+        assert out["new_modules"] == []
+        assert out["lake_loaded"] is False
+
+        rows = out["rows"]
+        assert sorted(rows) == ["consumed_direction", "option_atm_iv",
+                                "signal_position", "spot_price"]
+        decision = datetime.fromisoformat(out["decision_ts"])
+        for name, (state, _, available) in rows.items():
+            assert state == "READY", (name, state)
+            assert datetime.fromisoformat(available) <= decision, name
+        # The values come from before the decision, never from the cycle written
+        # 3s after it (99999 / 0.99) or the next day's run (-1).
+        assert float(rows["spot_price"][1]) == 70100.0
+        assert float(rows["option_atm_iv"][1]) == pytest.approx(0.55)
+        assert float(rows["signal_position"][1]) == 1.0
+        assert float(rows["consumed_direction"][1]) == 1.0
