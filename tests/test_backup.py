@@ -1369,3 +1369,140 @@ class TestBackupCannotDisturbTheCollector:
                 if key in ("After", "Before", "Requires", "Requisite", "Wants",
                            "BindsTo", "PartOf", "Conflicts"):
                     assert "btcbot.service" not in d, f"{name}: {d}"
+
+
+# ---------------------------------------------------------------------------
+# Decision-time research stores -- backup coverage gap fix
+#
+# research/data/decision_features.db and research/data/decision_outcomes.db
+# had NO backup path of any kind: no flag, no run_backup() call, and --all
+# did not reach them. These tests mirror the Feature Store fix's own tests --
+# same defect shape, same required proof.
+# ---------------------------------------------------------------------------
+
+_DECISION_FEATURES_TABLES = {"feature_contracts": 4, "feature_rows": 10}
+_DECISION_OUTCOMES_TABLES = {"label_contracts": 1, "decision_outcomes": 5}
+
+
+def _decision_features_db(tmp_path: Path) -> Path:
+    return _make_db(
+        tmp_path / "research" / "data" / "decision_features.db",
+        _DECISION_FEATURES_TABLES,
+    )
+
+
+def _decision_outcomes_db(tmp_path: Path) -> Path:
+    return _make_db(
+        tmp_path / "research" / "data" / "decision_outcomes.db",
+        _DECISION_OUTCOMES_TABLES,
+    )
+
+
+def test_decision_features_backup_succeeds(tmp_path, monkeypatch):
+    """--decision-features is recognized and produces a normal, hashed backup."""
+    _setup_root(tmp_path)
+    _decision_features_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--decision-features"])
+    assert backup.main() == 0
+    bfile = _latest_backup(
+        tmp_path / "data" / "decision-features-backups", "decision_features")
+    assert bfile is not None
+    assert bfile.name.startswith("decision_features_")
+    assert _integrity_ok(bfile)
+    manifest = json.loads(
+        (bfile.parent / (bfile.stem + ".manifest.json")).read_text())
+    assert manifest["sha256"] == _sha256(bfile)
+    assert manifest["row_counts"]["feature_contracts"] == 4
+    assert manifest["row_counts"]["feature_rows"] == 10
+
+
+def test_decision_outcomes_backup_succeeds(tmp_path, monkeypatch):
+    """--decision-outcomes is recognized and produces a normal, hashed backup."""
+    _setup_root(tmp_path)
+    _decision_outcomes_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--decision-outcomes"])
+    assert backup.main() == 0
+    bfile = _latest_backup(
+        tmp_path / "data" / "decision-outcomes-backups", "decision_outcomes")
+    assert bfile is not None
+    assert bfile.name.startswith("decision_outcomes_")
+    assert _integrity_ok(bfile)
+    manifest = json.loads(
+        (bfile.parent / (bfile.stem + ".manifest.json")).read_text())
+    assert manifest["sha256"] == _sha256(bfile)
+    assert manifest["row_counts"]["decision_outcomes"] == 5
+
+
+def test_decision_stores_missing_are_skipped_not_failed(tmp_path, monkeypatch):
+    """OPTIONAL classification: absence must not fail the run.
+
+    Neither store exists until a live entry has ever been captured, so
+    treating their absence as an error would fail `--all` on every host that
+    has not yet processed a live decision.
+    """
+    _setup_root(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["backup.py", "--decision-features", "--decision-outcomes"])
+    assert backup.main() == 0
+
+
+def test_all_flag_covers_decision_stores(tmp_path, monkeypatch):
+    """The defect itself: --all reached seven stores and silently skipped these two."""
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+    _decision_features_db(tmp_path)
+    _decision_outcomes_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--all"])
+    assert backup.main() == 0
+    assert _latest_backup(
+        tmp_path / "data" / "decision-features-backups",
+        "decision_features") is not None
+    assert _latest_backup(
+        tmp_path / "data" / "decision-outcomes-backups",
+        "decision_outcomes") is not None
+
+
+def test_all_still_covers_every_other_store_with_decision_stores_present(
+    tmp_path, monkeypatch,
+):
+    """Regression: adding the eighth/ninth store must not drop any existing one."""
+    _setup_root(tmp_path)
+    _make_db(tmp_path / "data" / "btc_trading.db", _TRADING_TABLES)
+    _make_db(tmp_path / "research" / "data" / "forward_evidence.db", _H6_TABLES)
+    _make_db(
+        tmp_path / "research" / "data" / "evidence_forward.db", _EVIDENCE_FWD_TABLES)
+    _make_db(tmp_path / "research" / "evidence_library" / "ledger.db", _LEDGER_TABLES)
+    _make_db(
+        tmp_path / "research" / "label_store" / "label_store.db", _LABEL_STORE_TABLES)
+    _feature_store_db(tmp_path)
+    _decision_features_db(tmp_path)
+    _decision_outcomes_db(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--all"])
+    backup.main()
+    for bdir, label in (
+        ("backups", "btc_trading"), ("evidence-backups", "evidence"),
+        ("evidence-fwd-backups", "fwd_hg"), ("ledger-backups", "ledger"),
+        ("label-store-backups", "label_store"),
+        ("feature-store-backups", "feature_store"),
+        ("decision-features-backups", "decision_features"),
+        ("decision-outcomes-backups", "decision_outcomes"),
+    ):
+        assert _latest_backup(tmp_path / "data" / bdir, label) is not None, label
+
+
+def test_decision_features_only_exit_code_is_its_own(tmp_path, monkeypatch):
+    """`--decision-features` alone returns that store's own return code."""
+    _setup_root(tmp_path)
+    monkeypatch.setattr(backup, "ROOT", tmp_path)
+
+    def failing(db_path, backup_dir, dry_run, db_label=None, **kw):
+        return 1 if db_label == "decision_features" else 0
+
+    monkeypatch.setattr(backup, "run_backup", failing)
+    monkeypatch.setattr(sys, "argv", ["backup.py", "--decision-features"])
+    assert backup.main() == 1

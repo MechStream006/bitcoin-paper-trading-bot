@@ -12,6 +12,8 @@ Backs up five databases:
   5. research/label_store/label_store.db     (Label Store; --label-store)
   6. research/dataset_builder/dataset_builder.db (Dataset Registry; --dataset-builder)
   7. research/feature_store/feature_store.db  (Feature Store; --feature-store)
+  8. research/data/decision_features.db      (decision-time feature capture; --decision-features)
+  9. research/data/decision_outcomes.db      (execution-outcome capture; --decision-outcomes)
 
 Label Store note (Phase 3 WBS 3.10, LS-DEC-001): the registry, research
 tier, and forward tier are co-located in one file by design (LS-DEC-001,
@@ -71,7 +73,8 @@ OFFHOST_STATUS_FILENAME = ".offhost-status.json"
 #: backup loudly at 02:00 instead of silently backing up the wrong set.
 ALL_LABELS = (
     "evidence", "fwd_hg", "ledger", "label_store",
-    "dataset_builder", "feature_store", "btc_trading",
+    "dataset_builder", "feature_store", "decision_features",
+    "decision_outcomes", "btc_trading",
 )
 
 
@@ -565,6 +568,16 @@ def main() -> int:
              "registry: Feature Specifications + feature.register receipts)",
     )
     parser.add_argument(
+        "--decision-features", dest="decision_features", action="store_true",
+        help="Back up research/data/decision_features.db (decision-time "
+             "feature contract capture for ACKED live entries)",
+    )
+    parser.add_argument(
+        "--decision-outcomes", dest="decision_outcomes", action="store_true",
+        help="Back up research/data/decision_outcomes.db (execution-outcome "
+             "capture for captured ACKED decisions)",
+    )
+    parser.add_argument(
         "--all", dest="backup_all", action="store_true",
         help="Back up all six databases (btc_trading, forward_evidence, "
              "evidence_forward, ledger, label_store, dataset_builder)",
@@ -614,6 +627,8 @@ def main() -> int:
     rc_label_store = 0
     rc_dataset_builder = 0
     rc_feature_store = 0
+    rc_decision_features = 0
+    rc_decision_outcomes = 0
     rc_trading     = 0
 
     if (args.evidence or args.backup_all) and not skip("evidence"):
@@ -679,15 +694,39 @@ def main() -> int:
         if args.feature_store and not args.backup_all:
             return rc_feature_store
 
+    if (args.decision_features or args.backup_all) and not skip("decision_features"):
+        rc_decision_features = run_backup(
+            ROOT / "research" / "data" / "decision_features.db",
+            ROOT / "data" / "decision-features-backups",
+            args.dry_run,
+            db_label="decision_features",
+            encrypt=args.encrypt,
+        )
+        if args.decision_features and not args.backup_all:
+            return rc_decision_features
+
+    if (args.decision_outcomes or args.backup_all) and not skip("decision_outcomes"):
+        rc_decision_outcomes = run_backup(
+            ROOT / "research" / "data" / "decision_outcomes.db",
+            ROOT / "data" / "decision-outcomes-backups",
+            args.dry_run,
+            db_label="decision_outcomes",
+            encrypt=args.encrypt,
+        )
+        if args.decision_outcomes and not args.backup_all:
+            return rc_decision_outcomes
+
     if (args.backup_all or not (args.evidence or args.fwd_hg or args.ledger
                                 or args.label_store or args.dataset_builder
-                                or args.feature_store)) and not skip("btc_trading"):
+                                or args.feature_store or args.decision_features
+                                or args.decision_outcomes)) and not skip("btc_trading"):
         rc_trading = run_backup(args.db_path, args.backup_dir, args.dry_run,
                                 db_label="btc_trading", encrypt=args.encrypt)
 
     if args.backup_all:
         return max(rc_trading, rc_evidence, rc_fwd_hg, rc_ledger,
-                   rc_label_store, rc_dataset_builder, rc_feature_store)
+                   rc_label_store, rc_dataset_builder, rc_feature_store,
+                   rc_decision_features, rc_decision_outcomes)
     return rc_trading
 
 
